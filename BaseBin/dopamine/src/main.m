@@ -282,7 +282,7 @@ void finalize_bootstrap_if_needed(bool *finalized)
 	setenv("NO_PASSWORD_PROMPT", "1", 1);
 	setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/var/jb/sbin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/usr/bin", 1);
 	setenv("TERM", "xterm-256color", 1);
-	setenv("SHELL", "/var/jb/bin/sh", 1);
+	setenv("SHELL", JBROOT_PATH("/bin/sh"), 1);
 
 	if ([[NSFileManager defaultManager] fileExistsAtPath:JBROOT_PATH(@"/prep_bootstrap.sh")]) {
 		printf("Running prep_bootstrap script...\n");
