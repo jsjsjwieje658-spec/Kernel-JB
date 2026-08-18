@@ -35,7 +35,9 @@ int main(int argc, char * argv[]) {
     }
     
     if ([DOEnvironmentManager sharedManager].isJailbroken) {
-        setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/var/jb/sbin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/usr/bin", 1);
+        const char *activeJBRoot = jbclient_get_jbroot();
+        NSString *bootstrapPath = [NSString stringWithFormat:@"/sbin:/bin:/usr/sbin:/usr/bin:%s/sbin:%s/bin:%s/usr/sbin:%s/usr/bin", activeJBRoot ?: "", activeJBRoot ?: "", activeJBRoot ?: "", activeJBRoot ?: ""];
+        setenv("PATH", bootstrapPath.UTF8String, 1);
         setenv("TERM", "xterm-256color", 1);
     }
     
