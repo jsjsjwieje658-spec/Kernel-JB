@@ -280,7 +280,9 @@ void finalize_bootstrap_if_needed(bool *finalized)
 	char *shellBackup = getenv("SHELL") ? strdup(getenv("SHELL")) : NULL;
 
 	setenv("NO_PASSWORD_PROMPT", "1", 1);
-	setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/var/jb/sbin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/usr/bin", 1);
+	const char *activeJBRoot = jbclient_get_jbroot();
+	NSString *bootstrapPath = [NSString stringWithFormat:@"/sbin:/bin:/usr/sbin:/usr/bin:%s/sbin:%s/bin:%s/usr/sbin:%s/usr/bin", activeJBRoot ?: "", activeJBRoot ?: "", activeJBRoot ?: "", activeJBRoot ?: ""];
+	setenv("PATH", bootstrapPath.UTF8String, 1);
 	setenv("TERM", "xterm-256color", 1);
 	setenv("SHELL", JBROOT_PATH("/bin/sh"), 1);
 
