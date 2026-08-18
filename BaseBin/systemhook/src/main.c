@@ -483,9 +483,9 @@ __attribute__((constructor)) static void initializer(void)
 		}
 #endif
 		// Load tweaks if desired
-		// We can hardcode /var/jb here since if it doesn't exist, loading TweakLoader.dylib is not going to work anyways
+		// Resolve the loader through the active jbroot so relocated roots remain supported.
 		if (should_enable_tweaks()) {
-			const char *tweakLoaderPath = "/var/jb/usr/lib/TweakLoader.dylib";
+			const char *tweakLoaderPath = JBROOT_PATH("/usr/lib/TweakLoader.dylib");
 			if (access(tweakLoaderPath, F_OK) == 0) {
 				void *tweakLoaderHandle = dlopen(tweakLoaderPath, RTLD_NOW);
 				if (tweakLoaderHandle != NULL) {
