@@ -248,7 +248,7 @@ void load_var_jb_daemons(void)
 	// I spent a lot of time figuring out why and it's something related to us being considered the wrong session / domain
 	// No clue how to fix that, but I also figured out that 'launchctl bootstrap system' works...
 	// Supposedly because this command allows us to manually specifiy a session / domain (which in this case is 'system')
-	exec_cmd_trusted("/var/jb/usr/bin/launchctl", "bootstrap", "system", "/var/jb/Library/LaunchDaemons", NULL);
+	exec_cmd_trusted(JBROOT_PATH("/usr/bin/launchctl"), "bootstrap", "system", JBROOT_PATH("/Library/LaunchDaemons"), NULL);
 }
 
 void install_builtin_packages(void)
