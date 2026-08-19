@@ -242,7 +242,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
         textField.placeholder = @"com.example.app";
         textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-        textField.autocorrectionType = UITextCorrectionTypeNo;
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
