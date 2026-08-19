@@ -5,10 +5,10 @@ CFLAGS = -I../.include -I./src -I../_external/modules/litehook/src -isysroot $(s
 LDFLAGS = -dynamiclib
 
 sign: $(TARGET)
-        @ldid -Cadhoc -S $^
+	@ldid -Cadhoc -S $^
 
 $(TARGET): $(wildcard src/*.[cSm] src/common/*.[cSm] ../libjailbreak/src/jbclient_*.c ../libjailbreak/src/inline_svc.[cS] ../libjailbreak/src/hookd.c ../libjailbreak/src/roothide_hide.c ../libjailbreak/src/jbroot.c ../libjailbreak/src/roothide.c ../libjailbreak/src/info.c ../_external/modules/litehook/src/*.c)
-        $(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 clean:
-        @rm -f $(TARGET)
+	@rm -f $(TARGET)
