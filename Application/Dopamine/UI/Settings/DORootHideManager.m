@@ -374,7 +374,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
                     });
                 } else if ([self.mutableBlacklist containsObject:bundleID]) {
                     UIAlertController *dupAlert = [UIAlertController 
-                        alertControllerTitle:@"Already Exists" 
+                        alertControllerWithTitle:@"Already Exists" 
                         message:@"This app is already in the blacklist."
                         preferredStyle:UIAlertControllerStyleAlert];
                     [dupAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -400,7 +400,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         
         if (blacklist.count == 0) {
             UIAlertController *alert = [UIAlertController 
-                alertControllerTitle:@"Blacklist Empty" 
+                alertControllerWithTitle:@"Blacklist Empty" 
                 message:@"No apps are currently blacklisted.\n\nTap 'Add App to Blacklist' or use preset buttons to add apps."
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -416,7 +416,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         }
         
         UIAlertController *alert = [UIAlertController 
-            alertControllerTitle:@"Current Blacklist" 
+            alertControllerWithTitle:@"Current Blacklist" 
             message:message 
             preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -434,7 +434,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         
         if (count == 0) {
             UIAlertController *alert = [UIAlertController 
-                alertControllerTitle:@"Already Empty" 
+                alertControllerWithTitle:@"Already Empty" 
                 message:@"The blacklist is already empty."
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -443,7 +443,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         }
         
         UIAlertController *alert = [UIAlertController 
-            alertControllerTitle:@"⚠️ Clear Blacklist?" 
+            alertControllerWithTitle:@"⚠️ Clear Blacklist?" 
             message:[NSString stringWithFormat:@"Remove all %lu app(s) from blacklist?\n\nThis cannot be undone!", (unsigned long)count]
             preferredStyle:UIAlertControllerStyleAlert];
         
@@ -456,7 +456,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
                 
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     UIAlertController *clearedAlert = [UIAlertController 
-                        alertControllerTitle:@"Cleared" 
+                        alertControllerWithTitle:@"Cleared" 
                         message:@"All apps removed from blacklist."
                         preferredStyle:UIAlertControllerStyleAlert];
                     [clearedAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -512,7 +512,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         }
         
         UIAlertController *alert = [UIAlertController 
-            alertControllerTitle:@"🏦 Banking Apps" 
+            alertControllerWithTitle:@"🏦 Banking Apps" 
             message:message
             preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -556,7 +556,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         }
         
         UIAlertController *alert = [UIAlertController 
-            alertControllerTitle:@"🛡️ Detection Apps" 
+            alertControllerWithTitle:@"🛡️ Detection Apps" 
             message:message
             preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
@@ -584,7 +584,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             (unsigned long)count];
         
         UIAlertController *alert = [UIAlertController 
-            alertControllerTitle:@"💾 Settings Saved" 
+            alertControllerWithTitle:@"💾 Settings Saved" 
             message:message
             preferredStyle:UIAlertControllerStyleAlert];
         
