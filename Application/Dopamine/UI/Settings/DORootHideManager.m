@@ -15,9 +15,6 @@
 #import "Specifiers/DOButtonCell.h"
 #import "Specifiers/DOHeaderCell.h"
 
-// Localization helper
-#define RHLocalizedString(key) [[NSBundle bundleWithPath:@"/Library/PreferenceBundles/DopamineSettings.bundle"] localizedStringForKey:(key) value:(key) table:nil]
-
 static NSString * const kRootHideEnabledKey = @"RootHideEnabled";
 static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
 
@@ -125,15 +122,17 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         [addSpecifier setProperty:@"addToBlacklist:" forKey:@"action"];
         [specifiers addObject:addSpecifier];
         
-        // View/Edit blacklist
+        // View current blacklist button
         PSSpecifier *viewSpecifier = [PSSpecifier 
-            preferenceSpecifierNamed:@"View / Edit Blacklist"
+            preferenceSpecifierNamed:@"View Current Blacklist"
             target:self
             set:NULL
             get:NULL
-            detail:[DORootHideBlacklistController class]
-            cell:PSLinkCell
+            detail:Nil
+            cell:PSStaticTextCell
             edit:Nil];
+        [viewSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
+        [viewSpecifier setProperty:@"viewBlacklist:" forKey:@"action"];
         [specifiers addObject:viewSpecifier];
         
         // Clear blacklist button
@@ -147,8 +146,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             edit:Nil];
         [clearSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [clearSpecifier setProperty:@"clearBlacklist:" forKey:@"action"];
-        [clearSpecifier setProperty:@"Remove all apps from blacklist?" forKey:@"confirmationTitle"];
-        [clearSpecifier setProperty:@"This cannot be undone." forKey:@"confirmationMessage"];
         [specifiers addObject:clearSpecifier];
         
         // Default Blacklists Group
@@ -198,8 +195,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             edit:Nil];
         [applySpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [applySpecifier setProperty:@"applyRootHideSettings:" forKey:@"action"];
-        [applySpecifier setProperty:@"Apply RootHide settings and reboot userspace?" forKey:@"confirmationTitle"];
-        [applySpecifier setProperty:@"This will restart SpringBoard and all apps." forKey:@"confirmationMessage"];
         [specifiers addObject:applySpecifier];
         
         _specifiers = specifiers;
@@ -259,10 +254,14 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     _mutableBlacklist = saved ? [saved mutableCopy] : [NSMutableArray new];
     
     // Load default blacklist from roothide system
-    for (int i = 0; i < rothide_get_blacklist_count(); i++) {
+    int count = rothide_get_blacklist_count();
+    for (int i = 0; i < count; i++) {
         const char *entry = rothide_get_blacklist_entry(i);
-        if (entry && ![_mutableBlacklist containsObject:[NSString stringWithUTF8String:entry]]) {
-            [_mutableBlacklist addObject:[NSString stringWithUTF8String:entry]];
+        if (entry) {
+            NSString *bundleID = [NSString stringWithUTF8String:entry];
+            if (![_mutableBlacklist containsObject:bundleID]) {
+                [_mutableBlacklist addObject:bundleID];
+            }
         }
     }
 }
@@ -307,11 +306,46 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     [self presentViewController:alert animated:YES completion:nil];
 }
 
+- (void)viewBlacklist:(id)sender
+{
+    if (_mutableBlacklist.count == 0) {
+        UIAlertController *alert = [UIAlertController 
+            alertControllerWithTitle:@"Blacklist Empty" 
+            message:@"No apps are currently blacklisted." 
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    
+    NSMutableString *message = [NSMutableString string];
+    for (NSString *bundleID in _mutableBlacklist) {
+        [message appendFormat:@"• %@\n", bundleID];
+    }
+    
+    UIAlertController *alert = [UIAlertController 
+        alertControllerWithTitle:@"Current Blacklist" 
+        message:message 
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)clearBlacklist:(id)sender
 {
-    [_mutableBlacklist removeAllObjects];
-    [self saveBlacklist];
-    [self reloadSpecifiers];
+    UIAlertController *alert = [UIAlertController 
+        alertControllerWithTitle:@"Clear Blacklist?" 
+        message:@"Remove all apps from blacklist? This cannot be undone." 
+        preferredStyle:UIAlertControllerStyleAlert];
+    
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Clear" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [self->_mutableBlacklist removeAllObjects];
+        [self saveBlacklist];
+        [self reloadSpecifiers];
+    }]];
+    
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)addBankingApps:(id)sender
@@ -330,15 +364,25 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         @"vnpay.NapAsVnPay",
     ];
     
+    int added = 0;
     for (NSString *bundleID in vietnameseBankingApps) {
         if (![_mutableBlacklist containsObject:bundleID]) {
             [_mutableBlacklist addObject:bundleID];
             rothide_add_blacklist(bundleID.UTF8String);
+            added++;
         }
     }
     
     [self saveBlacklist];
     [self reloadSpecifiers];
+    
+    // Show confirmation
+    UIAlertController *alert = [UIAlertController 
+        alertControllerWithTitle:@"Banking Apps Added" 
+        message:[NSString stringWithFormat:@"Added %d Vietnamese banking apps to blacklist.", added] 
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)addDetectionApps:(id)sender
@@ -351,15 +395,25 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         @"com.vmware.horizon",
     ];
     
+    int added = 0;
     for (NSString *bundleID in detectionApps) {
         if (![_mutableBlacklist containsObject:bundleID]) {
             [_mutableBlacklist addObject:bundleID];
             rothide_add_blacklist(bundleID.UTF8String);
+            added++;
         }
     }
     
     [self saveBlacklist];
     [self reloadSpecifiers];
+    
+    // Show confirmation
+    UIAlertController *alert = [UIAlertController 
+        alertControllerWithTitle:@"Detection Apps Added" 
+        message:[NSString stringWithFormat:@"Added %d detection/security apps to blacklist.", added] 
+        preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)applyRootHideSettings:(id)sender
@@ -374,88 +428,19 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     BOOL enabled = self.isRootHideEnabled;
     jbclient_platform_jbsettings_set_bool("roothide.enabled", enabled);
     
-    // Trigger userspace reboot to apply
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
-        // Use jbctl to perform userspace reboot
-        system("jbctl userspace-reboot");
-    });
-}
-
-#pragma mark - Blacklist Sub-controller
-
-@interface DORootHideBlacklistController : PSListController <UITableViewDelegate, UITableViewDataSource>
-@property (nonatomic, strong) NSMutableArray *apps;
-@end
-
-@implementation DORootHideBlacklistController
-
-- (id)specifiers
-{
-    if (!_specifiers) {
-        _specifiers = [NSMutableArray new];
-    }
-    return _specifiers;
-}
-
-- (void)viewDidLoad
-{
-    [super viewDidLoad];
-    
-    // Load blacklist from parent
-    DORootHideManager *parent = (DORootHideManager *)self.parentController;
-    _apps = parent.mutableBlacklist ?: [NSMutableArray new];
-    
-    self.tableView.delegate = self;
-    self.tableView.dataSource = self;
-}
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section
-{
-    return _apps.count;
-}
-
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath
-{
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"BlacklistCell"];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"BlacklistCell"];
-    }
-    
-    NSString *bundleID = _apps[indexPath.row];
-    cell.textLabel.text = bundleID;
-    cell.detailTextLabel.text = @"Tap to remove from blacklist";
-    cell.accessoryType = UITableViewCellAccessoryDetailButton;
-    
-    return cell;
-}
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath
-{
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    
-    NSString *bundleID = _apps[indexPath.row];
-    
+    // Show applying alert
     UIAlertController *alert = [UIAlertController 
-        alertControllerWithTitle:@"Remove from Blacklist" 
-        message:[NSString stringWithFormat:@"Remove %@ from blacklist?", bundleID] 
-        preferredStyle:UIAlertControllerStyleActionSheet];
+        alertControllerWithTitle:@"Applying RootHide Settings" 
+        message:@"RootHide settings are being applied. SpringBoard will restart." 
+        preferredStyle:UIAlertControllerStyleAlert];
     
-    [alert addAction:[UIAlertAction actionWithTitle:@"Remove" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-        [self->_apps removeObjectAtIndex:indexPath.row];
-        rothide_remove_blacklist(bundleID.UTF8String);
-        
-        // Save to parent
-        DORootHideManager *parent = (DORootHideManager *)self.parentController;
-        [parent saveBlacklist];
-        
-        [self.tableView deleteRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationAutomatic];
-    }]];
-    
-    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-    
-    [self presentViewController:alert animated:YES completion:nil];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:^{
+        // Trigger userspace reboot after alert is dismissed
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            system("jbctl userspace-reboot");
+        });
+    }];
 }
-
-@end
 
 @end
