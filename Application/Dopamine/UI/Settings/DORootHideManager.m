@@ -119,8 +119,9 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:DOButtonCell
+            cell:PSButtonCell
             edit:Nil];
+        [addSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [addSpecifier setProperty:@"addToBlacklist:" forKey:@"action"];
         [specifiers addObject:addSpecifier];
         
@@ -142,8 +143,9 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:DOButtonCell
+            cell:PSButtonCell
             edit:Nil];
+        [clearSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [clearSpecifier setProperty:@"clearBlacklist:" forKey:@"action"];
         [clearSpecifier setProperty:@"Remove all apps from blacklist?" forKey:@"confirmationTitle"];
         [clearSpecifier setProperty:@"This cannot be undone." forKey:@"confirmationMessage"];
@@ -161,8 +163,9 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:DOButtonCell
+            cell:PSButtonCell
             edit:Nil];
+        [bankingSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [bankingSpecifier setProperty:@"addBankingApps:" forKey:@"action"];
         [specifiers addObject:bankingSpecifier];
         
@@ -173,8 +176,9 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:DOButtonCell
+            cell:PSButtonCell
             edit:Nil];
+        [detectionSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [detectionSpecifier setProperty:@"addDetectionApps:" forKey:@"action"];
         [specifiers addObject:detectionSpecifier];
         
@@ -190,8 +194,9 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:DOButtonCell
+            cell:PSButtonCell
             edit:Nil];
+        [applySpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [applySpecifier setProperty:@"applyRootHideSettings:" forKey:@"action"];
         [applySpecifier setProperty:@"Apply RootHide settings and reboot userspace?" forKey:@"confirmationTitle"];
         [applySpecifier setProperty:@"This will restart SpringBoard and all apps." forKey:@"confirmationMessage"];
