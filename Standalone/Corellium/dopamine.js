@@ -135,7 +135,7 @@ async function main() {
     let command =
         mode === "install"
             ? "/private/preboot/dopamine install /private/preboot/Dopamine.tar /private/preboot/bootstrap_1900.tar.zst"
-            : "/var/jb/basebin/dopamine activate";
+            : "$(jbroot)/basebin/dopamine activate";  // RootHide: use dynamic jbroot
     console.log("Executing dopamine...")
     result = await agent.shellExec(command);
 

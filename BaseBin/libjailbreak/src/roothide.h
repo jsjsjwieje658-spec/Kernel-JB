@@ -41,9 +41,9 @@ const char* rothide_get_jbroot(void);
 
 /**
  * Convert a standard jailbreak path to a RootHide path
- * Replaces /var/jb prefix with randomized jbroot path
+ * Replaces jbroot prefix with randomized jbroot path
  * 
- * @param input  Input path (e.g., "/var/jb/basebin/jbserver")
+ * @param input  Input path (e.g., "/private/preboot/UUID/jb_XXXX/basebin/jbserver")
  * @param output Output buffer for converted path
  * @param outsize Size of output buffer
  * @return 0 on success, -1 on error
@@ -120,7 +120,7 @@ unsigned long long jbrand(void);
  * Convert path using jbroot prefix replacement
  * Main API function for path conversion
  * 
- * @param path Input path (typically starting with /var/jb)
+ * @param path Input path (typically starting with jbroot)
  * @return Converted path, or original if no conversion needed
  */
 const char* jbroot(const char* path);

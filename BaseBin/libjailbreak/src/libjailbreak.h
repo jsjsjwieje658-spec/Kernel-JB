@@ -20,7 +20,7 @@ extern "C" {
 
 // Path conversion functions for RootHide mode
 // Converts standard jailbreak paths to randomized RootHide paths
-const char* jbroot(const char* path);   // Convert path to jbroot (e.g., /var/jb -> /private/preboot/UUID/jb_XXXX)
+const char* jbroot(const char* path);   // Convert path to jbroot (e.g., /private/preboot/UUID/jb_XXXX)
 const char* rootfs(const char* path);  // Alias for jbroot, backward compatibility
 unsigned long long jbrand(void);       // Returns unique jailbreak session identifier
 

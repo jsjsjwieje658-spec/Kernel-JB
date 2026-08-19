@@ -144,7 +144,7 @@ int roothide_init(void)
         const char *orig_jbroot = get_jbroot();
         if (!orig_jbroot) {
                 // Fallback to standard rootless path
-                orig_jbroot = get_jbroot() ?: "/var/jb";
+                orig_jbroot = get_jbroot() ?: "/private/preboot";  // RootHide: fallback to preboot, NOT /var/jb
         }
         safe_strlcpy(g_roothide.base_jbroot, orig_jbroot, sizeof(g_roothide.base_jbroot));
         

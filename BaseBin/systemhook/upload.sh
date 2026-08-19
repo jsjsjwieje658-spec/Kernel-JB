@@ -5,6 +5,7 @@ DEVICE=root@localhost
 PORT=2223
 
 make
-ssh $DEVICE -p $PORT "rm -rf /var/jb/$PROJECT_NAME"
-scp -P$PORT ./$PROJECT_NAME $DEVICE:/var/jb/$PROJECT_NAME
-ssh $DEVICE -p $PORT "/var/jb/basebin/jbctl rebuild_trustcache"
+# RootHide: Use jbroot path instead of /var/jb
+ssh $DEVICE -p $PORT "rm -rf \$(jbroot)/basebin/$PROJECT_NAME"
+scp -P$PORT ./$PROJECT_NAME $DEVICE:\$(jbroot)/basebin/$PROJECT_NAME
+ssh $DEVICE -p $PORT "\$(jbroot)/basebin/jbctl rebuild_trustcache"
