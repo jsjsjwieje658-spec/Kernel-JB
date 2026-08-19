@@ -124,3 +124,32 @@
 "Status_Title_Select_Package_Managers" = "Chọn trình quản lý gói";
 "Select_Package_Managers_Install_Message" = "Nếu bạn không biết nên nhấn vào lựa chọn nào, hãy chọn Sileo (sẽ không bao giờ có Cydia cho bạn chọn)";
 "Continue" = "Tiếp tục";
+
+// ========== ROOTHIDE MANAGER ==========
+// RootHide Manager - Quản lý ẩn Jailbreak
+"RootHide_Manager_Title" = "Quản lý RootHide";
+"RootHide_Enabled" = "Bật RootHide";
+"RootHide_Randomized_Path" = "Đường dẫn đã ngẫu nhiên hóa";
+"RootHide_Session_ID" = "Mã phiên bản";
+"RootHide_Blacklist_Count" = "Ứng dụng bị chặn";
+"RootHide_Add_To_Blacklist" = "Thêm ứng dụng vào danh sách chặn";
+"RootHide_View_Blacklist" = "Xem / Sửa danh sách chặn";
+"RootHide_Clear_Blacklist" = "Xóa tất cả danh sách chặn";
+"RootHide_Add_Banking_Apps" = "Thêm ứng dụng Ngân hàng Việt Nam";
+"RootHide_Add_Detection_Apps" = "Thêm ứng dụng Phát hiện/Bảo mật";
+"RootHide_Apply_Settings" = "Áp dụng & Khởi động lại Userspace";
+
+// RootHide Descriptions
+"RootHide_Description_Mode" = "Khi bật, các ứng dụng được chọn sẽ chạy mà không có dấu vết jailbreak. Các ứng dụng ngân hàng, trình quét bảo mật và game chống gian lận có thể được ẩn.";
+"RootHide_Description_Blacklist" = "Các ứng dụng trong danh sách này sẽ KHÔNG nhận injection jailbreak hoặc biến môi trường. Chúng sẽ xuất hiện như chưa jailbreak.";
+"RootHide_Description_Presets" = "Thêm nhanh các nhóm ứng dụng phổ biến vào danh sách chặn.";
+"RootHide_Description_Apply" = "Áp dụng thay đổi để bật/tắt chế độ RootHide. Có thể cần khởi động lại userspace.";
+"RootHide_Blacklist_Placeholder" = "com.example.app";
+"RootHide_Blacklist_Alert_Title" = "Thêm vào danh sách chặn";
+"RootHide_Blacklist_Alert_Message" = "Nhập Bundle ID của ứng dụng cần ẩn (ví dụ: com.example.app)";
+"RootHide_Remove_Confirmation" = "Xóa %@ khỏi danh sách chặn?";
+"RootHide_Clear_Confirmation_Title" = "Xóa toàn bộ danh sách chặn?";
+"RootHide_Clear_Confirmation_Message" = "Không thể hoàn tác thao tác này.";
+"RootHide_Apply_Confirmation_Title" = "Áp dụng cài đặt RootHide?";
+"RootHide_Apply_Confirmation_Message" = "Thao tác này sẽ khởi động lại SpringBoard và tất cả ứng dụng.";
+"RootHide_Apps_Blacklisted" = "%lu ứng dụng đang bị chặn";

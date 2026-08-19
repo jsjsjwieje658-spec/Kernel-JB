@@ -20,6 +20,7 @@
 #import "DOSceneDelegate.h"
 #import "DOPSJetsamListItemsController.h"
 #import "DOButtonCell.h"
+#import "DORootHideManager.h"
 
 @interface DOSettingsController ()
 
@@ -339,6 +340,28 @@
                     }
                     [specifiers addObject:removeJailbreakSpecifier];
                 }
+                
+                // ========== ROOTHIDE MANAGER SECTION ==========
+                // Add RootHide Manager for advanced jailbreak hiding
+                if (envManager.isJailbroken) {
+                    PSSpecifier *roothideGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
+                    roothideGroupSpecifier.name = @"ROOTHIDE MANAGER";
+                    roothideGroupSpecifier.footerText = @"Advanced jailbreak hiding with selective injection and path randomization. Hide JB from specific apps.";
+                    [specifiers addObject:roothideGroupSpecifier];
+                    
+                    PSSpecifier *roothideSpecifier = [PSSpecifier 
+                        preferenceSpecifierNamed:@"RootHide Settings" 
+                        target:self 
+                        set:defSetter 
+                        get:defGetter 
+                        detail:[DORootHideManager class] 
+                        cell:PSLinkCell 
+                        edit:nil];
+                    [roothideSpecifier setProperty:@YES forKey:@"enabled"];
+                    [roothideSpecifier setProperty:@"eye.slash.fill" forKey:@"iconImage"];
+                    [specifiers addObject:roothideSpecifier];
+                }
+                // ========== END ROOTHIDE SECTION ==========
             }
         }
         
@@ -651,24 +674,24 @@
 
 - (void)changeMobilePasswordWithAuthenticationPressed
 {
-	LAContext *context = [[LAContext alloc] init];
-	NSError *authError = nil;
-	NSString *reason = DOLocalizedString(@"Password_Auth_Required");
-	
-	if ([context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&authError]) {
-		[context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
-			localizedReason:reason
-			reply:^(BOOL success, NSError * _Nullable error) {
-			dispatch_async(dispatch_get_main_queue(), ^{
-				if (success) {
-					[self changeMobilePassword];
-				}
-			});
-		}];
-	}
-	else {
-		[self changeMobilePassword];
-	}
+        LAContext *context = [[LAContext alloc] init];
+        NSError *authError = nil;
+        NSString *reason = DOLocalizedString(@"Password_Auth_Required");
+        
+        if ([context canEvaluatePolicy:LAPolicyDeviceOwnerAuthentication error:&authError]) {
+                [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
+                        localizedReason:reason
+                        reply:^(BOOL success, NSError * _Nullable error) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                                if (success) {
+                                        [self changeMobilePassword];
+                                }
+                        });
+                }];
+        }
+        else {
+                [self changeMobilePassword];
+        }
 }
 
 - (void)changeMobilePassword

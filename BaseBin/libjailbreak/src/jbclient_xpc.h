@@ -45,4 +45,53 @@ bool jbclient_dopamine_is_jailbroken(char **version);
 int jbclient_dopamine_get_root(void);
 int jbclient_dopamine_drop_root(void);
 
+// ========== ROOTHIDE CONTROL FUNCTIONS ==========
+// These functions allow controlling RootHide from userspace (Dopamine app)
+
+/**
+ * Initialize RootHide subsystem on jbserver side
+ * @return 0 on success
+ */
+int jbclient_roothide_init(void);
+
+/**
+ * Enable or disable RootHide mode globally
+ * @param enabled YES to enable, NO to disable
+ * @return 0 on success
+ */
+int jbclient_roothide_set_enabled(bool enabled);
+
+/**
+ * Check if RootHide is currently enabled
+ * @return YES if enabled, NO otherwise
+ */
+bool jbclient_roothide_is_enabled(void);
+
+/**
+ * Add an app bundle ID to the RootHide blacklist
+ * @param bundleID The bundle identifier to blacklist
+ * @return 0 on success
+ */
+int jbclient_roothide_add_blacklist(const char *bundleID);
+
+/**
+ * Remove an app bundle ID from the RootHide blacklist
+ * @param bundleID The bundle identifier to remove
+ * @return 0 on success
+ */
+int jbclient_roothide_remove_blacklist(const char *bundleID);
+
+/**
+ * Get the current randomized jbroot path from RootHide
+ * @return The path string (must be freed by caller), or NULL on error
+ */
+char *jbclient_roothide_get_jbroot_path(void);
+
+/**
+ * Apply RootHide settings and optionally reboot userspace
+ * @param shouldReboot If YES, triggers userspace reboot after applying
+ * @return 0 on success
+ */
+int jbclient_roothide_apply_settings(bool shouldReboot);
+
 #endif
