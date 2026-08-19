@@ -133,6 +133,46 @@ const char* jbroot(const char* path);
  */
 const char* rootfs(const char* path);
 
+// ============ Advanced Hiding Functions (arm64e optimized) ============
+
+/**
+ * Initialize RootHide hiding subsystem with syscall-level hooks
+ * Must be called early in process startup for blacklisted apps
+ * 
+ * @param clean_mode If true, enable full jailbreak hiding
+ * @return 0 on success, negative on error
+ */
+int roothide_hide_init(bool clean_mode);
+
+/**
+ * Dynamically enable/disable clean mode at runtime
+ * Useful for apps that need temporary JB access
+ * 
+ * @param enabled true to enable hiding, false to disable
+ */
+void roothide_set_clean_mode(bool enabled);
+
+/**
+ * Check if current process is running in clean mode
+ * @return true if clean mode is active
+ */
+bool roothide_is_clean_mode(void);
+
+/**
+ * Sanitize a path for use in clean mode
+ * Converts hidden paths to safe alternatives
+ * 
+ * @param path Input path to sanitize
+ * @return Sanitized path, or original if not hiding
+ */
+const char* roothide_sanitize_path(const char* path);
+
+/**
+ * Clean all jailbreak-related environment variables
+ * Call this after setting clean mode
+ */
+void roothide_clean_environment(void);
+
 #ifdef __cplusplus
 }
 #endif

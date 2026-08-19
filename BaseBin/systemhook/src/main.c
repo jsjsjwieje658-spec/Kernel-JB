@@ -505,6 +505,30 @@ __attribute__((constructor)) static void initializer(void)
 #endif
                 // Load tweaks if desired
                 // Resolve the loader through the active jbroot so relocated roots remain supported.
+                
+                // ========== ROOTHIDE HIDE INITIALIZATION ==========
+                // Initialize RootHide hiding subsystem for blacklisted apps
+                // This must happen BEFORE loading tweaks to ensure clean environment
+                bool isCleanMode = false;
+                if (getenv(ROOTHIDE_CLEAN_MODE_ENV)) {
+                        const char *cleanMode = getenv(ROOTHIDE_CLEAN_MODE_ENV);
+                        if (cleanMode && strcmp(cleanMode, "1") == 0) {
+                                isCleanMode = true;
+                        }
+                }
+                if (getenv(ROOTHIDE_MODE_ENV)) {
+                        const char *roothideMode = getenv(ROOTHIDE_MODE_ENV);
+                        if (roothideMode && strcmp(roothideMode, "hide") == 0) {
+                                isCleanMode = true;
+                        }
+                }
+                
+                // Initialize RootHide hiding if in clean mode
+                if (isCleanMode) {
+                        roothide_hide_init(true);
+                }
+                // ========== END ROOTHIDE INIT ==========
+                
                 if (should_enable_tweaks()) {
                         const char *tweakLoaderPath = JBROOT_PATH("/usr/lib/TweakLoader.dylib");
                         if (access(tweakLoaderPath, F_OK) == 0) {
