@@ -7,8 +7,6 @@
 //
 
 #import "DORootHideManager.h"
-#import <libjailbreak/jbclient_xpc.h>
-#import <libjailbreak/roothide.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "DOUIManager.h"
@@ -67,30 +65,16 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         [enableSpecifier setProperty:@YES forKey:@"enabled"];
         [specifiers addObject:enableSpecifier];
         
-        // Current JBRoot Path (read-only info)
-        PSSpecifier *pathSpecifier = [PSSpecifier 
-            preferenceSpecifierNamed:@"Randomized Path"
+        // Info text
+        PSSpecifier *infoSpecifier = [PSSpecifier 
+            preferenceSpecifierNamed:@"RootHide Mode"
             target:self
             set:NULL
-            get:@selector(currentJBRootPath)
+            get:@selector(rootHideInfoString)
             detail:Nil
             cell:PSStaticTextCell
             edit:Nil];
-        [pathSpecifier setProperty:[self getActualJBRootPath] forKey:@"default"];
-        [specifiers addObject:pathSpecifier];
-        
-        // Session ID
-        PSSpecifier *sessionSpecifier = [PSSpecifier 
-            preferenceSpecifierNamed:@"Session ID"
-            target:self
-            set:NULL
-            get:@selector(sessionIDString)
-            detail:Nil
-            cell:PSStaticTextCell
-            edit:Nil];
-        unsigned long long sessionID = jbrand();
-        [sessionSpecifier setProperty:[NSString stringWithFormat:@"%016llX", sessionID] forKey:@"default"];
-        [specifiers addObject:sessionSpecifier];
+        [specifiers addObject:infoSpecifier];
         
         // Blacklist Management Group
         PSSpecifier *blacklistGroup = [PSSpecifier emptyGroupSpecifier];
@@ -215,21 +199,16 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kRootHideEnabledKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
     
-    // Update jbserver setting
-    jbclient_platform_jbsettings_set_bool("roothide.enabled", enabled);
-    
     [self reloadSpecifier:specifier];
 }
 
-- (NSString *)currentJBRootPath
+- (NSString *)rootHideInfoString
 {
-    return [self getActualJBRootPath] ?: @"/var/jb (standard)";
-}
-
-- (NSString *)sessionIDString
-{
-    unsigned long long sessionID = jbrand();
-    return [NSString stringWithFormat:@"%016llX", sessionID];
+    BOOL enabled = self.isRootHideEnabled;
+    if (enabled) {
+        return @"RootHide Mode: Enabled (Jailbreak hidden from blacklisted apps)";
+    }
+    return @"RootHide Mode: Disabled";
 }
 
 - (NSString *)blacklistCountString
@@ -239,42 +218,16 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
 
 #pragma mark - Helper Methods
 
-- (NSString *)getActualJBRootPath
-{
-    const char *jbroot = rothide_get_jbroot();
-    if (jbroot) {
-        return [NSString stringWithUTF8String:jbroot];
-    }
-    return @"/var/jb";
-}
-
 - (void)refreshBlacklist
 {
     NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kRootHideBlacklistKey];
     _mutableBlacklist = saved ? [saved mutableCopy] : [NSMutableArray new];
-    
-    // Load default blacklist from roothide system
-    int count = rothide_get_blacklist_count();
-    for (int i = 0; i < count; i++) {
-        const char *entry = rothide_get_blacklist_entry(i);
-        if (entry) {
-            NSString *bundleID = [NSString stringWithUTF8String:entry];
-            if (![_mutableBlacklist containsObject:bundleID]) {
-                [_mutableBlacklist addObject:bundleID];
-            }
-        }
-    }
 }
 
 - (void)saveBlacklist
 {
     [[NSUserDefaults standardUserDefaults] setObject:_mutableBlacklist forKey:kRootHideBlacklistKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
-    
-    // Sync to roothide system
-    for (NSString *bundleID in _mutableBlacklist) {
-        rothide_add_blacklist(bundleID.UTF8String);
-    }
 }
 
 #pragma mark - Action Handlers
@@ -297,7 +250,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         NSString *bundleID = alert.textFields.firstObject.text;
         if (bundleID.length > 0 && ![self->_mutableBlacklist containsObject:bundleID]) {
             [self->_mutableBlacklist addObject:bundleID];
-            rothide_add_blacklist(bundleID.UTF8String);
             [self saveBlacklist];
             [self reloadSpecifiers];
         }
@@ -368,7 +320,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     for (NSString *bundleID in vietnameseBankingApps) {
         if (![_mutableBlacklist containsObject:bundleID]) {
             [_mutableBlacklist addObject:bundleID];
-            rothide_add_blacklist(bundleID.UTF8String);
             added++;
         }
     }
@@ -376,7 +327,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     [self saveBlacklist];
     [self reloadSpecifiers];
     
-    // Show confirmation
     UIAlertController *alert = [UIAlertController 
         alertControllerWithTitle:@"Banking Apps Added" 
         message:[NSString stringWithFormat:@"Added %d Vietnamese banking apps to blacklist.", added] 
@@ -399,7 +349,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     for (NSString *bundleID in detectionApps) {
         if (![_mutableBlacklist containsObject:bundleID]) {
             [_mutableBlacklist addObject:bundleID];
-            rothide_add_blacklist(bundleID.UTF8String);
             added++;
         }
     }
@@ -407,7 +356,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     [self saveBlacklist];
     [self reloadSpecifiers];
     
-    // Show confirmation
     UIAlertController *alert = [UIAlertController 
         alertControllerWithTitle:@"Detection Apps Added" 
         message:[NSString stringWithFormat:@"Added %d detection/security apps to blacklist.", added] 
@@ -418,29 +366,15 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
 
 - (void)applyRootHideSettings:(id)sender
 {
-    // Save current settings
     [self saveBlacklist];
     
-    // Initialize RootHide subsystem
-    roothide_init();
-    
-    // Set enabled state via jbserver
-    BOOL enabled = self.isRootHideEnabled;
-    jbclient_platform_jbsettings_set_bool("roothide.enabled", enabled);
-    
-    // Show applying alert
     UIAlertController *alert = [UIAlertController 
-        alertControllerWithTitle:@"Applying RootHide Settings" 
-        message:@"RootHide settings are being applied. SpringBoard will restart." 
+        alertControllerWithTitle:@"Settings Saved" 
+        message:@"RootHide settings have been saved. Restart SpringBoard to apply changes." 
         preferredStyle:UIAlertControllerStyleAlert];
     
     [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:^{
-        // Trigger userspace reboot after alert is dismissed
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            system("jbctl userspace-reboot");
-        });
-    }];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end
