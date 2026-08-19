@@ -12,11 +12,11 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "DOUIManager.h"
-#import "DOButtonCell.h"
-#import "DOHeaderCell.h"
+#import "Specifiers/DOButtonCell.h"
+#import "Specifiers/DOHeaderCell.h"
 
 // Localization helper
-#define RHLocalizedString(key) [[NSBundle bundleWithPath:@"/Library PreferenceBundles/DopamineSettings.bundle"] localizedStringForKey:(key) value:(key) table:nil]
+#define RHLocalizedString(key) [[NSBundle bundleWithPath:@"/Library/PreferenceBundles/DopamineSettings.bundle"] localizedStringForKey:(key) value:(key) table:nil]
 
 static NSString * const kRootHideEnabledKey = @"RootHideEnabled";
 static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
@@ -216,7 +216,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     [[NSUserDefaults standardUserDefaults] synchronize];
     
     // Update jbserver setting
-    jbclient_jbsettings_set_bool("roothide.enabled", enabled);
+    jbclient_platform_jbsettings_set_bool("roothide.enabled", enabled);
     
     [self reloadSpecifier:specifier];
 }
@@ -367,7 +367,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     
     // Set enabled state via jbserver
     BOOL enabled = self.isRootHideEnabled;
-    jbclient_jbsettings_set_bool("roothide.enabled", enabled);
+    jbclient_platform_jbsettings_set_bool("roothide.enabled", enabled);
     
     // Trigger userspace reboot to apply
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
