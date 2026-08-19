@@ -259,7 +259,7 @@ extern char **environ;
         }
     }
     else {
-        return @"iOS 15.0 - 18.7.1 (arm64)";
+        return @"iOS 15.0 - 18.7.1 (arm64e)";
     }
 }
 
@@ -387,7 +387,7 @@ extern char **environ;
     argBuf[i++] = NULL;
     
     posix_spawn_file_actions_t act = NULL;
-	posix_spawn_file_actions_init(&act);
+        posix_spawn_file_actions_init(&act);
     posix_spawnattr_t attr = NULL;
     posix_spawnattr_init(&attr);
      
@@ -632,7 +632,10 @@ extern char **environ;
 
 - (BOOL)isJailbreakHidden
 {
-    return ![[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"];
+    // RootHide does not use /var/jb
+    // Check if jbroot is accessible instead
+    NSString *jbrootPath = JBROOT_PATH(@"/");
+    return ![[NSFileManager defaultManager] fileExistsAtPath:jbrootPath];
 }
 
 - (void)setJailbreakHidden:(BOOL)hidden
@@ -652,10 +655,11 @@ extern char **environ;
                     [self setFakelibMounted:NO];
                     jbclient_platform_set_systemwide_domain_enabled(false);
                 }
+                // RootHide: Remove /var/jb if it exists (leftover from other JBs)
                 [[NSFileManager defaultManager] removeItemAtPath:@"/var/jb" error:nil];
             }
             else {
-                [[NSFileManager defaultManager] createSymbolicLinkAtPath:@"/var/jb" withDestinationPath:JBROOT_PATH(@"/") error:nil];
+                // RootHide: Do NOT create /var/jb symlink - uses randomized jbroot only
                 if ([self isJailbroken]) {
                     jbclient_platform_set_systemwide_domain_enabled(true);
                     [self setFakelibMounted:YES];

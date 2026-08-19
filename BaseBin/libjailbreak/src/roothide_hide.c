@@ -1,9 +1,10 @@
 // roothide_hide.c - Advanced RootHide Hiding Implementation
 // Provides comprehensive jailbreak hiding for blacklisted apps:
-// - Path hiding (/var/jb -> randomized path)
+// - Path hiding (jbroot -> randomized path)
 // - Environment variable cleaning
 // - File/directory access interception
 // - Syscall-level hiding
+// NOTE: RootHide does NOT use /var/jb - uses randomized jbroot path only
 
 #include "roothide.h"
 #include "libjailbreak.h"
@@ -21,8 +22,8 @@
 
 // ============ Hidden Path Patterns ============
 // These paths should be hidden from blacklisted apps
+// NOTE: /var/jb is NOT used in RootHide - we dynamically detect jbroot
 static const char *g_hidden_paths[] = {
-    "/var/jb",
     "/var/lib/dpkg",
     "/var/cache/apt",
     "/etc/apt",
@@ -33,6 +34,24 @@ static const char *g_hidden_paths[] = {
     "/var/mobile/Library/Preferences/com.cydia",
     NULL
 };
+
+// Dynamic jbroot path (resolved at runtime)
+static char g_jbroot_path[PATH_MAX] = {0};
+static bool g_jbroot_initialized = false;
+
+// Get current jbroot path for dynamic hiding
+static const char* get_dynamic_jbroot(void)
+{
+    if (!g_jbroot_initialized) {
+        const char *jbroot = get_jbroot();
+        if (jbroot) {
+            strncpy(g_jbroot_path, jbroot, sizeof(g_jbroot_path) - 1);
+            g_jbroot_path[sizeof(g_jbroot_path) - 1] = '\0';
+        }
+        g_jbroot_initialized = true;
+    }
+    return g_jbroot_path[0] ? g_jbroot_path : NULL;
+}
 
 // ============ Hidden Environment Variables ============
 static const char *g_hidden_env_vars[] = {
@@ -79,6 +98,15 @@ static struct {
 static bool should_hide_path(const char *path)
 {
     if (!path) return false;
+    
+    // Check dynamic jbroot path first (RootHide uses randomized paths)
+    const char *dynamic_jbroot = get_dynamic_jbroot();
+    if (dynamic_jbroot && strncmp(path, dynamic_jbroot, strlen(dynamic_jbroot)) == 0) {
+        char next_char = path[strlen(dynamic_jbroot)];
+        if (next_char == '\0' || next_char == '/') {
+            return true;
+        }
+    }
     
     for (int i = 0; g_hidden_paths[i] != NULL; i++) {
         if (strncmp(path, g_hidden_paths[i], strlen(g_hidden_paths[i])) == 0) {
@@ -350,6 +378,6 @@ const char* roothide_sanitize_path(const char *path)
         return fake_path;
     }
     
-    // Use jbroot conversion for /var/jb paths
+    // Use jbroot conversion for jbroot paths (dynamic, not /var/jb)
     return jbroot(path);
 }

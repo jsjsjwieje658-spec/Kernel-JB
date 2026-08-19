@@ -1,8 +1,9 @@
 // roothide.c - Core RootHide Implementation for Dopamine
 // Provides jailbreak hiding functionality including:
-// - Path randomization (/var/jb -> /private/preboot/UUID/jb_XXXX)
+// - Path randomization (jbroot -> /private/preboot/UUID/jb_XXXX)
 // - Selective injection (blacklist-based)
 // - Clean environment propagation
+// NOTE: RootHide does NOT use /var/jb - uses randomized jbroot path only
 
 #include "roothide.h"
 #include "libjailbreak.h"
@@ -22,7 +23,7 @@ static struct {
         bool initialized;
         char jbroot_path[ROOTHIDE_JBROOT_PATH_MAX];       // Randomized jbroot path
         char random_suffix[ROOTHIDE_RANDOM_STRING_LENGTH]; // Random suffix for path
-        char base_jbroot[PATH_MAX];                        // Original /var/jb path
+        char base_jbroot[PATH_MAX];                        // Original jbroot path
         
         // Blacklist for selective injection
         char blacklist[ROOTHIDE_MAX_BLACKLIST_ENTRIES][256];
@@ -80,8 +81,12 @@ static int get_preboot_uuid(char *uuid_out, size_t uuid_len)
 {
         if (!uuid_out || uuid_len < 37) return -1;
         
-        // Try to read from /var/jb first (standard rootless location)
-        FILE *f = fopen("/var/jb/.jbroot_uuid", "r");
+        // Try to read from jbroot first
+        const char *current_jbroot = get_jbroot();
+        if (current_jbroot) {
+                char uuid_path[PATH_MAX];
+                snprintf(uuid_path, sizeof(uuid_path), "%s/.jbroot_uuid", current_jbroot);
+                FILE *f = fopen(uuid_path, "r");
         if (f) {
                 if (fgets(uuid_out, (int)uuid_len, f)) {
                         // Strip newline
@@ -96,7 +101,7 @@ static int get_preboot_uuid(char *uuid_out, size_t uuid_len)
         // Fallback: use get_jbroot() and extract UUID from path
         const char *jbroot = get_jbroot();
         if (jbroot && strstr(jbroot, "/private/preboot/")) {
-                // Extract UUID from path like /private/preboot/UUID/var/jb
+                // Extract UUID from path like /private/preboot/UUID/jb_XXXX
                 const char *start = strstr(jbroot, "/private/preboot/");
                 if (start) {
                         start += strlen("/private/preboot/");
@@ -138,7 +143,7 @@ int roothide_init(void)
         const char *orig_jbroot = get_jbroot();
         if (!orig_jbroot) {
                 // Fallback to standard rootless path
-                orig_jbroot = "/var/jb";
+                orig_jbroot = get_jbroot() ?: "/var/jb";
         }
         safe_strlcpy(g_roothide.base_jbroot, orig_jbroot, sizeof(g_roothide.base_jbroot));
         
@@ -300,17 +305,22 @@ const char* jbroot(const char* path)
                 return tl_converted_path;
         }
         
-        // Convert path: replace /var/jb prefix with randomized jbroot
+        // Convert path: replace jbroot prefix with randomized jbroot
         const char *result = NULL;
         
-        if (strncmp(path, "/var/jb/", 8) == 0) {
-                // Standard rootless path conversion
-                snprintf(tl_converted_path, sizeof(tl_converted_path), "%s%s", 
-                        g_roothide.jbroot_path, path + 7); // Skip "/var/jb" keep "/"
-                result = tl_converted_path;
+        // Check if path starts with current jbroot
+        size_t jbroot_len = strlen(g_roothide.base_jbroot);
+        if (jbroot_len > 0 && strncmp(path, g_roothide.base_jbroot, jbroot_len) == 0) {
+                // Convert jbroot path to randomized path
+                const char *remaining = path + jbroot_len;
+                if (remaining[0] == '/' || remaining[0] == '\0') {
+                        snprintf(tl_converted_path, sizeof(tl_converted_path), "%s%s", 
+                                g_roothide.jbroot_path, remaining);
+                        result = tl_converted_path;
+                }
         }
-        else if (strncmp(path, "/var/jb", 7) == 0 && strlen(path) == 7) {
-                // Exact match for /var/jb
+        else if (strcmp(path, g_roothide.base_jbroot) == 0) {
+                // Exact match for jbroot
                 safe_strlcpy(tl_converted_path, g_roothide.jbroot_path, sizeof(tl_converted_path));
                 result = tl_converted_path;
         }

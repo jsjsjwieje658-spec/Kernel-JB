@@ -622,7 +622,11 @@ void *boomerang_server(struct boomerang_info *info)
     
     *errOut = [[DOEnvironmentManager sharedManager] prepareBootstrap];
     if (*errOut) return;
-    setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/var/jb/sbin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/usr/bin", 1);
+    // RootHide: Use jbroot path instead of /var/jb
+    const char *jbroot = jbclient_get_jbroot() ?: "";
+    char pathEnv[512];
+    snprintf(pathEnv, sizeof(pathEnv), "/sbin:/bin:/usr/sbin:/usr/bin:%s/sbin:%s/bin:%s/usr/sbin:%s/usr/bin", jbroot, jbroot, jbroot, jbroot);
+    setenv("PATH", pathEnv, 1);
     setenv("TERM", "xterm-256color", 1);
 
     *errOut = [[DOEnvironmentManager sharedManager] updateBootLogo];

@@ -201,7 +201,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
 - (NSURL *)bootstrapURL
 {
-    return [NSURL URLWithString:[NSString stringWithFormat:@"https://apt.procurs.us/bootstraps/%@/bootstrap-ssh-iphoneos-arm64.tar.zst", [self bootstrapVersion]]];
+    return [NSURL URLWithString:[NSString stringWithFormat:@"https://apt.procurs.us/bootstraps/%@/bootstrap-ssh-iphoneos-arm64e.tar.zst", [self bootstrapVersion]]];
 }
 
 /*- (void)downloadBootstrapWithCompletion:(void (^)(NSString *path, NSError *error))completion
@@ -245,20 +245,24 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
 - (NSError *)updateVarJbSymlink
 {
-    // Remove /var/jb as it might be wrong
+    // RootHide does NOT use /var/jb symlink
+    // Instead, we ensure the old /var/jb is removed if it exists (from other jailbreaks)
+    // and verify that our jbroot path is accessible
     NSError *error;
-    if (![self deleteSymlinkAtPath:@"/var/jb" error:&error]) {
-        if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
-            if (![[NSFileManager defaultManager] removeItemAtPath:@"/var/jb" error:&error]) {
-                return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedReplacing userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Removing /var/jb directory failed with error: %@", error]}];
-            }
-        }
-        else {
-            return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedReplacing userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Removing /var/jb symlink failed with error: %@", error]}];
-        }
+    
+    // Remove /var/jb if it exists (leftover from other jailbreaks)
+    if ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) {
+        [[NSFileManager defaultManager] removeItemAtPath:@"/var/jb" error:nil];
     }
-
-    return [self createSymlinkAtPath:@"/var/jb" toPath:JBROOT_PATH(@"/") createIntermediateDirectories:YES];;
+    
+    // Verify jbroot is accessible
+    NSString *jbrootPath = JBROOT_PATH(@"/");
+    if (![[NSFileManager defaultManager] fileExistsAtPath:jbrootPath]) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedReplacing 
+            userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"jbroot path not accessible: %@", jbrootPath]}];
+    }
+    
+    return nil;
 }
 
 - (void)prepareBootstrapWithCompletion:(void (^)(NSError *))completion
@@ -277,6 +281,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // Clean up xinaA15 v1 leftovers if desired
     if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/.keep_symlinks"]) {
         NSArray *xinaLeftoverSymlinks = @[
+            @"/var/jb",  // RootHide does not use /var/jb - remove if exists
             @"/var/alternatives",
             @"/var/ap",
             @"/var/apt",
@@ -557,7 +562,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         [[DOUIManager sharedInstance] sendLog:@"Updating Bundled Packages" debug:NO];
 
         if (shouldInstallLaunchctl) {
-            NSString *launchctlPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"launchctl_1_1.2.0_iphoneos-arm64.deb"];
+            NSString *launchctlPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"launchctl_1_1.2.0_iphoneos-arm64e.deb"];
             int r = [self installPackage:launchctlPath];
             if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install launchctl: %d\n", r]}];
         }
@@ -606,7 +611,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     NSString *path = [[NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath] stringByDeletingLastPathComponent];
     [[NSFileManager defaultManager] removeItemAtPath:path error:&error];
     if (error) return error;
-    [[NSFileManager defaultManager] removeItemAtPath:@"/var/jb" error:nil];
+    // Note: RootHide does not use /var/jb, so no need to remove it
     return error;
 }
 
