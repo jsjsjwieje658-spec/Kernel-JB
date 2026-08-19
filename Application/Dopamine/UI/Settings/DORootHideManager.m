@@ -12,8 +12,8 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "DOUIManager.h"
-#import "Specifiers/DOButtonCell.h"
-#import "Specifiers/DOHeaderCell.h"
+#import "DOButtonCell.h"
+#import "DOHeaderCell.h"
 
 static NSString * const kRootHideEnabledKey = @"RootHideEnabled";
 static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
