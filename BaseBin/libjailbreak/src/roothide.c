@@ -208,7 +208,7 @@ int roothide_init(void)
 const char* roothide_get_jbroot(void)
 {
         if (!g_roothide.initialized) {
-                rothide_init();
+                roothide_init();
         }
         return g_roothide.jbroot_path;
 }
@@ -282,7 +282,7 @@ int rothide_remove_blacklist(const char* bundleID)
 unsigned long long jbrand(void)
 {
         if (!g_roothide.initialized) {
-                rothide_init();
+                roothide_init();
         }
         return g_roothide.session_id;
 }
@@ -292,7 +292,7 @@ const char* jbroot(const char* path)
         if (!path) return NULL;
         
         if (!g_roothide.initialized) {
-                rothide_init();
+                roothide_init();
         }
         
         // Use thread-local cache for performance
