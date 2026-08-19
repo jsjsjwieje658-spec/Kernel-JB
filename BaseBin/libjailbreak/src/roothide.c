@@ -87,15 +87,16 @@ static int get_preboot_uuid(char *uuid_out, size_t uuid_len)
                 char uuid_path[PATH_MAX];
                 snprintf(uuid_path, sizeof(uuid_path), "%s/.jbroot_uuid", current_jbroot);
                 FILE *f = fopen(uuid_path, "r");
-        if (f) {
-                if (fgets(uuid_out, (int)uuid_len, f)) {
-                        // Strip newline
-                        size_t slen = strlen(uuid_out);
-                        if (slen > 0 && uuid_out[slen-1] == '\n') uuid_out[slen-1] = '\0';
+                if (f) {
+                        if (fgets(uuid_out, (int)uuid_len, f)) {
+                                // Strip newline
+                                size_t slen = strlen(uuid_out);
+                                if (slen > 0 && uuid_out[slen-1] == '\n') uuid_out[slen-1] = '\0';
+                                fclose(f);
+                                return 0;
+                        }
                         fclose(f);
-                        return 0;
                 }
-                fclose(f);
         }
         
         // Fallback: use get_jbroot() and extract UUID from path
