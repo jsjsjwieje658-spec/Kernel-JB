@@ -14,13 +14,15 @@
 @property (nonatomic, strong) NSArray *blacklistedApps;
 @property (nonatomic, copy) NSString *currentJBRootPath;
 
-// Actions (matching implementation signatures)
-- (void)addToBlacklist:(id)sender;
-- (void)viewBlacklist:(id)sender;
-- (void)clearBlacklist:(id)sender;
-- (void)addBankingApps:(id)sender;
-- (void)addDetectionApps:(id)sender;
-- (void)applyRootHideSettings:(id)sender;
+// Action handlers (receive PSSpecifier from DOButtonCell)
+- (void)addToBlacklist:(PSSpecifier *)specifier;
+- (void)viewBlacklist:(PSSpecifier *)specifier;
+- (void)clearBlacklist:(PSSpecifier *)specifier;
+- (void)addBankingApps:(PSSpecifier *)specifier;
+- (void)addDetectionApps:(PSSpecifier *)specifier;
+- (void)applyRootHideSettings:(PSSpecifier *)specifier;
+
+// Data management
 - (void)refreshBlacklist;
 
 // Property accessors
