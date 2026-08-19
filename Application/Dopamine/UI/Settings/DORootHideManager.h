@@ -11,14 +11,19 @@
 @interface DORootHideManager : PSListController
 
 @property (nonatomic, strong) NSArray *blacklistedApps;
-@property (nonatomic, assign) BOOL isRootHideEnabled;
 @property (nonatomic, copy) NSString *currentJBRootPath;
 
-// Actions
-- (void)toggleRootHideMode:(id)sender;
-- (void)addToBlacklist:(NSString *)bundleID;
-- (void)removeFromBlacklist:(NSString *)bundleID;
+// Actions (matching implementation signatures)
+- (void)addToBlacklist:(id)sender;
+- (void)viewBlacklist:(id)sender;
+- (void)clearBlacklist:(id)sender;
+- (void)addBankingApps:(id)sender;
+- (void)addDetectionApps:(id)sender;
+- (void)applyRootHideSettings:(id)sender;
 - (void)refreshBlacklist;
-- (void)applyRootHideSettings;
+
+// Property accessors
+- (BOOL)isRootHideEnabled;
+- (void)setRootHideEnabled:(BOOL)enabled specifier:(PSSpecifier *)specifier;
 
 @end
