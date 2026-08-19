@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <substrate.h>
-#import "jbroot.h"
+#import "../libjailbreak/src/jbroot.h"
 
 BOOL preferencePlistNeedsRedirection(NSString *plistPath)
 {
