@@ -55,7 +55,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         // RootHide Mode Toggle Group
         PSSpecifier *modeGroup = [PSSpecifier emptyGroupSpecifier];
         modeGroup.name = @"JAILBREAK HIDING";
-        modeGroup.footerText = @"When enabled, selected apps will run without any jailbreak traces. Banking apps, security scanners, and games with anti-cheat can be hidden.";
         [specifiers addObject:modeGroup];
         
         // Enable/Disable RootHide toggle
@@ -99,7 +98,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         // Blacklist Management Group
         PSSpecifier *blacklistGroup = [PSSpecifier emptyGroupSpecifier];
         blacklistGroup.name = @"BLACKLIST MANAGEMENT";
-        blacklistGroup.footerText = @"Apps in this list will NOT receive jailbreak injection or environment variables. They will appear as non-jailbroken.";
         [specifiers addObject:blacklistGroup];
         
         // Blacklisted apps count
@@ -154,7 +152,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         // Default Blacklists Group
         PSSpecifier *defaultsGroup = [PSSpecifier emptyGroupSpecifier];
         defaultsGroup.name = @"PRESET BLACKLISTS";
-        defaultsGroup.footerText = @"Quickly add common app categories to the blacklist.";
         [specifiers addObject:defaultsGroup];
         
         // Add banking apps
@@ -184,7 +181,6 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         // Apply button group
         PSSpecifier *applyGroup = [PSSpecifier emptyGroupSpecifier];
         applyGroup.name = @"APPLY CHANGES";
-        applyGroup.footerText = @"Apply changes to enable/disable RootHide mode. A userspace reboot may be required.";
         [specifiers addObject:applyGroup];
         
         // Apply now button

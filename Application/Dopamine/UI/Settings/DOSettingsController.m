@@ -346,7 +346,7 @@
                 if (envManager.isJailbroken) {
                     PSSpecifier *roothideGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
                     roothideGroupSpecifier.name = @"ROOTHIDE MANAGER";
-                    roothideGroupSpecifier.footerText = @"Advanced jailbreak hiding with selective injection and path randomization. Hide JB from specific apps.";
+                    [roothideGroupSpecifier setProperty:@"Advanced jailbreak hiding with selective injection and path randomization. Hide JB from specific apps." forKey:@"footerTextDescription"];
                     [specifiers addObject:roothideGroupSpecifier];
                     
                     PSSpecifier *roothideSpecifier = [PSSpecifier 
