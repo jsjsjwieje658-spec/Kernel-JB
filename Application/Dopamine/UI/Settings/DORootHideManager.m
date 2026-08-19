@@ -119,7 +119,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:PSButtonCell
+            cell:PSStaticTextCell
             edit:Nil];
         [addSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [addSpecifier setProperty:@"addToBlacklist:" forKey:@"action"];
@@ -143,7 +143,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:PSButtonCell
+            cell:PSStaticTextCell
             edit:Nil];
         [clearSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [clearSpecifier setProperty:@"clearBlacklist:" forKey:@"action"];
@@ -163,7 +163,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:PSButtonCell
+            cell:PSStaticTextCell
             edit:Nil];
         [bankingSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [bankingSpecifier setProperty:@"addBankingApps:" forKey:@"action"];
@@ -176,7 +176,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:PSButtonCell
+            cell:PSStaticTextCell
             edit:Nil];
         [detectionSpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [detectionSpecifier setProperty:@"addDetectionApps:" forKey:@"action"];
@@ -194,7 +194,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
             set:NULL
             get:NULL
             detail:Nil
-            cell:PSButtonCell
+            cell:PSStaticTextCell
             edit:Nil];
         [applySpecifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
         [applySpecifier setProperty:@"applyRootHideSettings:" forKey:@"action"];
