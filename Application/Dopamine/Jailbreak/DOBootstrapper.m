@@ -1445,79 +1445,39 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 //   kernel's trust cache.
 - (NSError *)resignPatchedDylibs
 {
-    NSString *ldidPath         = JBROOT_PATH(@"/usr/bin/ldid");
     NSString *roothideInitPath  = JBROOT_PATH(@"/usr/lib/roothideinit.dylib");
     NSString *libroothidePath   = JBROOT_PATH(@"/usr/lib/libroothide.dylib");
 
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // ─── Step 1: Trust-cache BOTH patched dylibs ─────────────────────
-    // This MUST happen BEFORE ldid runs, because ldid loads libroothide.dylib.
-    // Without trust-caching, AMFI rejects the patched (unsigned) dylib and
-    // ldid crashes with "No such file or directory" or SIGABRT.
-    NSLog(@"[RootHide] trust-caching patched dylibs before ldid...");
+    // ─── Trust-cache BOTH patched dylibs ─────────────────────────────
+    // This is the ONLY step needed.  jbclient_trust_file_by_path() sends
+    // XPC to launchdhook, which adds the file's CDHash to the kernel trust
+    // cache.  AMFI will then accept the patched dylib even though its code
+    // signature is invalid (because the bytes were modified).
+    //
+    // We do NOT call ldid at all.  ldid fails on this device because:
+    //   1. ldid is a RootHide binary that loads libroothide.dylib
+    //   2. The jbroot path is very long (~160 chars), and ldid's internal
+    //      path handling fails with ENOENT ("No such file or directory")
+    //      even though the file exists and is readable.
+    //   3. Trust-caching is sufficient — AMFI checks the trust cache
+    //      before checking the embedded code signature.
+    NSLog(@"[RootHide] trust-caching patched dylibs...");
 
-    if ([fm fileExistsAtPath:roothideInitPath]) {
-        int tcR = jbclient_trust_file_by_path(roothideInitPath.fileSystemRepresentation);
-        NSLog(@"[RootHide] trust-cache roothideinit.dylib: %d", tcR);
-    }
-    if ([fm fileExistsAtPath:libroothidePath]) {
-        int tcR = jbclient_trust_file_by_path(libroothidePath.fileSystemRepresentation);
-        NSLog(@"[RootHide] trust-cache libroothide.dylib: %d", tcR);
-    }
-
-    // ─── Step 2: Verify ldid exists ──────────────────────────────────
-    if (![fm fileExistsAtPath:ldidPath]) {
-        NSLog(@"[RootHide] resignPatchedDylibs: ldid not found at %@", ldidPath);
-        // Non-fatal — trust-cache above is enough for AMFI to accept the
-        // dylibs even without re-signing.
-        return nil;
-    }
-
-    // ─── Step 3: Re-sign with ldid ───────────────────────────────────
-    // Now that both dylibs are patched AND trust-cached, ldid can safely
-    // run without SIGABRTing on the libroothide assertion.
-
-    // Re-sign roothideinit.dylib.
     if ([fm fileExistsAtPath:roothideInitPath]) {
         chmod(roothideInitPath.fileSystemRepresentation, 0755);
-        int r = exec_cmd_trusted(ldidPath.fileSystemRepresentation,
-                                 "-Cadhoc", "-S",
-                                 roothideInitPath.fileSystemRepresentation, NULL);
-        if (r != 0) {
-            NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib returned %d, trying -s", r);
-            r = exec_cmd_trusted(ldidPath.fileSystemRepresentation,
-                                 "-s",
-                                 roothideInitPath.fileSystemRepresentation, NULL);
-            if (r != 0) {
-                NSLog(@"[RootHide] ldid -s retry also failed: %d (continuing — trust-cache is sufficient)", r);
-            } else {
-                NSLog(@"[RootHide] ldid -s fallback succeeded for roothideinit.dylib");
-            }
-        } else {
-            NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib succeeded");
-        }
+        int tcR = jbclient_trust_file_by_path(roothideInitPath.fileSystemRepresentation);
+        NSLog(@"[RootHide] trust-cache roothideinit.dylib: %d", tcR);
+    } else {
+        NSLog(@"[RootHide] WARNING: roothideinit.dylib missing — cannot trust-cache");
     }
-
-    // Re-sign libroothide.dylib.
     if ([fm fileExistsAtPath:libroothidePath]) {
         chmod(libroothidePath.fileSystemRepresentation, 0755);
-        int r = exec_cmd_trusted(ldidPath.fileSystemRepresentation,
-                                 "-Cadhoc", "-S",
-                                 libroothidePath.fileSystemRepresentation, NULL);
-        if (r != 0) {
-            NSLog(@"[RootHide] ldid re-sign of libroothide.dylib returned %d, trying -s", r);
-            r = exec_cmd_trusted(ldidPath.fileSystemRepresentation,
-                                 "-s",
-                                 libroothidePath.fileSystemRepresentation, NULL);
-            if (r != 0) {
-                NSLog(@"[RootHide] ldid -s retry also failed: %d (continuing — trust-cache is sufficient)", r);
-            } else {
-                NSLog(@"[RootHide] ldid -s fallback succeeded for libroothide.dylib");
-            }
-        } else {
-            NSLog(@"[RootHide] ldid re-sign of libroothide.dylib succeeded");
-        }
+        int tcR = jbclient_trust_file_by_path(libroothidePath.fileSystemRepresentation);
+        NSLog(@"[RootHide] trust-cache libroothide.dylib: %d", tcR);
+    } else {
+        NSLog(@"[RootHide] WARNING: libroothide.dylib missing — cannot trust-cache");
     }
 
     return nil;
@@ -1561,32 +1521,26 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     }
 
     // Initial setup on first jailbreak
-    if ([[NSFileManager defaultManager] fileExistsAtPath:JBROOT_PATH(@"/prep_bootstrap.sh")]) {
+    // prep_bootstrap.sh is a script that ships inside the RootHide bootstrap
+    // tarball (at ./prep_bootstrap.sh).  It is extracted to <jbroot>/prep_bootstrap.sh
+    // during restoreRootHideDylibsFromBundle (which extracts the whole tarball).
+    //
+    // However, on a CACHED bootstrap (CASE 3), the previous jailbreak's
+    // prep_bootstrap.sh DELETED ITSELF (the script's last line is
+    // `rm -f /prep_bootstrap.sh`).  So we need to re-extract it.
+    //
+    // We do this by calling restoreRootHideDylibsFromBundle which extracts
+    // the whole tarball again — this restores prep_bootstrap.sh too.
+    // (This is already done by the belt-and-suspenders patchRootHideAssertions
+    // call above, so prep_bootstrap.sh should exist by now.)
+    NSString *prepBootstrapPath = JBROOT_PATH(@"/prep_bootstrap.sh");
+    if ([[NSFileManager defaultManager] fileExistsAtPath:prepBootstrapPath]) {
         [[DOUIManager sharedInstance] sendLog:@"Finalizing Bootstrap" debug:NO];
 
-        // Run prep_bootstrap.sh via plain /bin/sh, NOT through jbroot-resolved
-        // /bin/sh.  The RootHide Bootstrap's prep_bootstrap.sh invokes binaries
-        // like /usr/libexec/firmware that load roothideinit.dylib via
-        // DYLD_INSERT_LIBRARIES.  roothideinit.dylib's constructor calls
-        // is_jbroot_name(bname) which expects the jbroot directory name to be
-        // in the format ".jbroot-XXXXXXXXXXXXXXXX" — this is a hardcoded
-        // contract of the RootHide framework that we cannot change without
-        // forking roothideinit.dylib itself.
-        //
-        // Our Dopamine-style jbroot is at
-        //   /private/preboot/<UUID>/dopamine-<rand6>/procursus/
-        // which doesn't match that format, so the assertion fires and
-        // prep_bootstrap.sh exits with code 6 (SIGABRT).
-        //
-        // prep_bootstrap.sh only does:
-        //   - run firmware binary
-        //   - run dpkg postinst hooks (debianutils, apt, dash, zsh, bash, vi)
-        //   - set mobile/root shell to zsh
-        //   - prompt for password (interactive)
-        // None of these are critical for jailbreak operation — the user can
-        // run them manually later.  So we log the failure and continue rather
-        // than aborting the whole jailbreak.
-        int r = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), JBROOT_PATH("/prep_bootstrap.sh"), NULL);
+        // Run prep_bootstrap.sh.  Now that roothideinit.dylib is patched
+        // (is_jbroot_name returns 1) and trust-cached (AMFI accepts it),
+        // the /usr/libexec/firmware binary will load it successfully.
+        int r = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), prepBootstrapPath.fileSystemRepresentation, NULL);
         if (r != 0) {
             NSLog(@"[RootHide] prep_bootstrap.sh returned %d (continuing — non-fatal)", r);
             [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"prep_bootstrap.sh returned %d (continuing)", r] debug:YES];
@@ -1594,6 +1548,13 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             // and the rest of finalizeBootstrap.
         }
 
+        NSError *error = [self installPackageManagers];
+        if (error) return error;
+    } else {
+        // prep_bootstrap.sh doesn't exist (cached bootstrap, deleted by
+        // previous run).  This is OK — skip it and go straight to
+        // installPackageManagers.
+        NSLog(@"[RootHide] prep_bootstrap.sh not found (cached bootstrap) — skipping");
         NSError *error = [self installPackageManagers];
         if (error) return error;
     }
