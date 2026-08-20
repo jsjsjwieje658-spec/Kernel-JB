@@ -15,7 +15,26 @@
 #import <sys/mount.h>
 #import <dlfcn.h>
 #import <sys/stat.h>
+#import <strings.h>
 #import "NSString+Version.h"
+
+// --- Mach-O parsing helpers -------------------------------------------------
+// FAT Mach-O headers are big-endian; per-arch Mach-O slices on iOS arm64(e)
+// are little-endian.  We use explicit BE/LE readers so the patchers can
+// walk both layers correctly.
+
+// Read a 32-bit big-endian value from raw bytes (FAT header / FAT arch entries).
+static inline uint32_t rh_u32be(const uint8_t *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+// Read a 32-bit little-endian value from raw bytes (Mach-O slice load commands).
+static inline uint32_t rh_u32le(const uint8_t *p) {
+    return ((uint32_t)p[0]) | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+// Read a 64-bit little-endian value from raw bytes (Mach-O section addr/size).
+static inline uint64_t rh_u64le(const uint8_t *p) {
+    return ((uint64_t)rh_u32le(p)) | ((uint64_t)rh_u32le(p + 4) << 32);
+}
 
 #define LIBKRW_DOPAMINE_BUNDLED_VERSION @"2.0.3"
 #define LIBROOT_DOPAMINE_BUNDLED_VERSION @"1.0.1"
@@ -385,6 +404,23 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
 // Patch roothideinit.dylib: replace is_jbroot_name and resolve_jbrand_value
 // prologues with "return 1" stubs.
+//
+// ROBUST IMPLEMENTATION:
+//   Previous version relied on hard-coded virtual addresses for both
+//   `__text` section base and the two function entry points.  Whenever the
+//   RootHide Bootstrap was rebuilt, these addresses drifted and the patcher
+//   silently aborted (because `sectAddr != 0x7a54 && sectAddr != 0x7a98`
+//   → `break` out of the section loop without applying any patches).
+//
+//   We now detect the arch via the FAT header's cputype/cpusubtype (which
+//   is invariant across bootstrap rebuilds) and scan __text for the
+//   function prologue byte pattern.  Both `is_jbroot_name` and
+//   `resolve_jbrand_value` share the same prologue in this bootstrap, so
+//   we patch the first two matches: the 1st as `is_jbroot_name`
+//   (returns 1 in w0) and the 2nd as `resolve_jbrand_value` (returns 1 in
+//   x0).  Both patches make the function return truthy, bypassing the
+//   ".jbroot-XXXXXXXXXXXXXXXX" name-format check that fails because we
+//   use a non-RootHide-style jbroot path.
 - (NSError *)patchRoothideInitDylib
 {
     NSString *path = JBROOT_PATH(@"/usr/lib/roothideinit.dylib");
@@ -398,127 +434,149 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     uint8_t *bytes = data.mutableBytes;
     NSUInteger length = data.length;
 
-    // Patch patterns (arm64):
-    //   is_jbroot_name:      mov w0, #1; ret       = 20 00 80 52  c0 03 5f d6
-    //   resolve_jbrand_value: mov x0, #1; ret      = 20 00 80 d2  c0 03 5f d6
-    uint8_t patch_arm64_is_jbroot[8] = {0x20, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6};
-    uint8_t patch_arm64_resolve[8] = {0x20, 0x00, 0x80, 0xd2, 0xc0, 0x03, 0x5f, 0xd6};
+    // Patch stubs (arm64): "mov w0, #1; ret" or "mov x0, #1; ret" (8 bytes)
+    static const uint8_t patch_arm64_is_jbroot[8] = {0x20, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6};
+    static const uint8_t patch_arm64_resolve[8]   = {0x20, 0x00, 0x80, 0xd2, 0xc0, 0x03, 0x5f, 0xd6};
 
-    // Patch patterns (arm64e — needs pacibsp at start and retab at end):
-    //   is_jbroot_name:      pacibsp; mov w0, #1; retab = 7f 23 03 d5  20 00 80 52  ff 0f 5f d6
-    //   resolve_jbrand_value: pacibsp; mov x0, #1; retab = 7f 23 03 d5  20 00 80 d2  ff 0f 5f d6
-    uint8_t patch_arm64e_is_jbroot[12] = {0x7f, 0x23, 0x03, 0xd5, 0x20, 0x00, 0x80, 0x52, 0xff, 0x0f, 0x5f, 0xd6};
-    uint8_t patch_arm64e_resolve[12] = {0x7f, 0x23, 0x03, 0xd5, 0x20, 0x00, 0x80, 0xd2, 0xff, 0x0f, 0x5f, 0xd6};
+    // Patch stubs (arm64e — needs pacibsp at start, retab at end) (12 bytes)
+    static const uint8_t patch_arm64e_is_jbroot[12] = {0x7f, 0x23, 0x03, 0xd5, 0x20, 0x00, 0x80, 0x52, 0xff, 0x0f, 0x5f, 0xd6};
+    static const uint8_t patch_arm64e_resolve[12]   = {0x7f, 0x23, 0x03, 0xd5, 0x20, 0x00, 0x80, 0xd2, 0xff, 0x0f, 0x5f, 0xd6};
 
-    // Expected current bytes at function start:
-    // arm64:   ff c3 00 d1 f4 4f 01 a9 (sub sp, sp, #0x30; stp x20, x19, [sp, #0x10])
-    // arm64e:  7f 23 03 d5 ff c3 00 d1 (pacibsp; sub sp, sp, #0x30)
-    uint8_t expected_arm64[8] = {0xff, 0xc3, 0x00, 0xd1, 0xf4, 0x4f, 0x01, 0xa9};
-    uint8_t expected_arm64e[8] = {0x7f, 0x23, 0x03, 0xd5, 0xff, 0xc3, 0x00, 0xd1};
+    // Function prologue patterns we expect at the entry of both functions:
+    //   arm64 : sub sp, sp, #0x30; stp x20, x19, [sp, #0x10]   = ff c3 00 d1 f4 4f 01 a9
+    //   arm64e: pacibsp; sub sp, sp, #0x30                     = 7f 23 03 d5 ff c3 00 d1
+    static const uint8_t prologue_arm64[8]  = {0xff, 0xc3, 0x00, 0xd1, 0xf4, 0x4f, 0x01, 0xa9};
+    static const uint8_t prologue_arm64e[8] = {0x7f, 0x23, 0x03, 0xd5, 0xff, 0xc3, 0x00, 0xd1};
 
-    // Virtual addresses of the two functions (from disassembly).
-    // These are the SAME in both arch 0 (arm64) and arch 1 (arm64e):
-    //   arch 0: __text virt=0x7a98, is_jbroot_name@0x7c94, resolve@0x7d44
-    //   arch 1: __text virt=0x7a54, is_jbroot_name@0x7c5c, resolve@0x7d10
-    //
-    // BUT the __text section has a different base address per arch, so we
-    // search each arch slice independently by iterating through FAT.
-    const uint64_t is_jbroot_virt_arm64 = 0x7c94;
-    const uint64_t resolve_virt_arm64 = 0x7d44;
-    const uint64_t is_jbroot_virt_arm64e = 0x7c5c;
-    const uint64_t resolve_virt_arm64e = 0x7d10;
-
-    NSUInteger patchesApplied = 0;
-
-    // For each architecture in the FAT binary, find and patch both functions.
-    // We detect which arch by checking the __text section's virtual address:
-    //   arm64:  __text virt = 0x7a98
-    //   arm64e: __text virt = 0x7a54
-    uint32_t fatMagic = ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | (uint32_t)bytes[3];
+    uint32_t fatMagic = rh_u32be(bytes);
     if (fatMagic != 0xCAFEBABE) {
         return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : @"roothideinit.dylib is not a FAT binary"}];
     }
-    uint32_t nfat = ((uint32_t)bytes[4] << 24) | ((uint32_t)bytes[5] << 16) | ((uint32_t)bytes[6] << 8) | (uint32_t)bytes[7];
+    uint32_t nfat = rh_u32be(bytes + 4);
+
+    NSUInteger patchesApplied = 0;
 
     for (uint32_t i = 0; i < nfat && i < 8; i++) {
         NSUInteger archEntryOff = 8 + i * 20;
         if (archEntryOff + 20 > length) break;
-        uint32_t archOffset = ((uint32_t)bytes[archEntryOff + 8] << 24) | ((uint32_t)bytes[archEntryOff + 9] << 16) | ((uint32_t)bytes[archEntryOff + 10] << 8) | (uint32_t)bytes[archEntryOff + 11];
+        // FAT arch header (big-endian): cputype(4) cpusubtype(4) offset(4) size(4) align(4)
+        uint32_t cputype    = rh_u32be(bytes + archEntryOff);
+        uint32_t cpusubtype = rh_u32be(bytes + archEntryOff + 4);
+        uint32_t archOffset = rh_u32be(bytes + archEntryOff + 8);
+        if (archOffset + 32 > length) continue;
 
-        // Find __text section for this arch
-        uint32_t moMagic = ((uint32_t)bytes[archOffset + 3] << 24) | ((uint32_t)bytes[archOffset + 2] << 16) | ((uint32_t)bytes[archOffset + 1] << 8) | (uint32_t)bytes[archOffset];
+        // Identify arch from cputype/cpusubtype.  cputype is always
+        // 0x0100000c (arm64 | CPU_ARCH_ABI64) for both arm64/arm64e in
+        // RootHide's FAT; cpusubtype 0x00000000 = arm64,
+        // 0x80000002 = arm64e (PAC).
+        BOOL is_arm64e = ((cpusubtype & 0x00ffffff) == 2);
+        BOOL is_arm64  = ((cpusubtype & 0x00ffffff) == 0);
+        if (!is_arm64 && !is_arm64e) {
+            NSLog(@"[RootHide] roothideinit arch %u: unrecognized cpusubtype 0x%x, skipping", i, cpusubtype);
+            continue;
+        }
+
+        const uint8_t *prologue  = is_arm64e ? prologue_arm64e  : prologue_arm64;
+        const uint8_t *patch1    = is_arm64e ? patch_arm64e_is_jbroot : patch_arm64_is_jbroot;
+        const uint8_t *patch2    = is_arm64e ? patch_arm64e_resolve   : patch_arm64_resolve;
+        NSUInteger patchLen      = is_arm64e ? 12 : 8;
+
+        // Walk load commands to find __TEXT,__text section.
+        uint32_t moMagic = rh_u32le(bytes + archOffset);
         if (moMagic != 0xFEEDFACF) continue;
-        uint32_t ncmds = ((uint32_t)bytes[archOffset + 16]) | ((uint32_t)bytes[archOffset + 17] << 8) | ((uint32_t)bytes[archOffset + 18] << 16) | ((uint32_t)bytes[archOffset + 19] << 24);
+        uint32_t ncmds  = rh_u32le(bytes + archOffset + 16);
         NSUInteger cmdOff = archOffset + 32;
+
+        uint32_t textFileOff = 0;
+        uint64_t textVirt    = 0;
+        uint64_t textSize    = 0;
+        BOOL haveText        = NO;
 
         for (uint32_t j = 0; j < ncmds; j++) {
             if (cmdOff + 8 > length) break;
-            uint32_t cmd = ((uint32_t)bytes[cmdOff]) | ((uint32_t)bytes[cmdOff + 1] << 8) | ((uint32_t)bytes[cmdOff + 2] << 16) | ((uint32_t)bytes[cmdOff + 3] << 24);
-            uint32_t cmdsize = ((uint32_t)bytes[cmdOff + 4]) | ((uint32_t)bytes[cmdOff + 5] << 8) | ((uint32_t)bytes[cmdOff + 6] << 16) | ((uint32_t)bytes[cmdOff + 7] << 24);
-            if (cmd == 0x19) {
-                uint32_t nsects = ((uint32_t)bytes[cmdOff + 64]) | ((uint32_t)bytes[cmdOff + 65] << 8) | ((uint32_t)bytes[cmdOff + 66] << 16) | ((uint32_t)bytes[cmdOff + 67] << 24);
+            uint32_t cmd     = rh_u32le(bytes + cmdOff);
+            uint32_t cmdsize = rh_u32le(bytes + cmdOff + 4);
+            if (cmdsize < 8 || cmdOff + cmdsize > length) break;
+
+            if (cmd == 0x19 && cmdsize >= 72) {  // LC_SEGMENT_64
+                uint32_t nsects = rh_u32le(bytes + cmdOff + 64);
                 NSUInteger sectOff = cmdOff + 72;
                 for (uint32_t s = 0; s < nsects; s++) {
                     if (sectOff + 80 > length) break;
                     char sectname[17] = {0};
-                    memcpy(sectname, bytes + sectOff, 16);
-                    if (strcmp(sectname, "__text") == 0) {
-                        uint64_t sectAddr = 0;
-                        memcpy(&sectAddr, bytes + sectOff + 32, 8);
-                        uint32_t sectFileOff = 0;
-                        memcpy(&sectFileOff, bytes + sectOff + 48, 4);
-
-                        BOOL is_arm64e = (sectAddr == 0x7a54);
-                        BOOL is_arm64 = (sectAddr == 0x7a98);
-                        if (!is_arm64e && !is_arm64) {
-                            NSLog(@"[RootHide] arch %u: __text at virt %llx (unexpected), skipping", i, sectAddr);
-                            break;
-                        }
-
-                        uint64_t isJbrootVirt = is_arm64e ? is_jbroot_virt_arm64e : is_jbroot_virt_arm64;
-                        uint64_t resolveVirt = is_arm64e ? resolve_virt_arm64e : resolve_virt_arm64;
-                        NSUInteger isJbrootFileOff = archOffset + sectFileOff + (isJbrootVirt - sectAddr);
-                        NSUInteger resolveFileOff = archOffset + sectFileOff + (resolveVirt - sectAddr);
-
-                        uint8_t *expected = is_arm64e ? expected_arm64e : expected_arm64;
-                        NSUInteger expectedLen = 8;
-                        NSUInteger patchLen = is_arm64e ? 12 : 8;
-
-                        // Verify and patch is_jbroot_name
-                        if (isJbrootFileOff + patchLen > length) {
-                            NSLog(@"[RootHide] arch %u: is_jbroot_name offset OOB", i);
-                            break;
-                        }
-                        if (memcmp(bytes + isJbrootFileOff, expected, expectedLen) != 0) {
-                            NSLog(@"[RootHide] arch %u: is_jbroot_name bytes mismatch, skipping", i);
-                            break;
-                        }
-                        uint8_t *patch1 = is_arm64e ? patch_arm64e_is_jbroot : patch_arm64_is_jbroot;
-                        memcpy(bytes + isJbrootFileOff, patch1, patchLen);
-
-                        // Verify and patch resolve_jbrand_value
-                        if (resolveFileOff + patchLen > length) {
-                            NSLog(@"[RootHide] arch %u: resolve_jbrand_value offset OOB", i);
-                            break;
-                        }
-                        if (memcmp(bytes + resolveFileOff, expected, expectedLen) != 0) {
-                            NSLog(@"[RootHide] arch %u: resolve_jbrand_value bytes mismatch, skipping", i);
-                            break;
-                        }
-                        uint8_t *patch2 = is_arm64e ? patch_arm64e_resolve : patch_arm64_resolve;
-                        memcpy(bytes + resolveFileOff, patch2, patchLen);
-
-                        patchesApplied++;
-                        NSLog(@"[RootHide] roothideinit arch %u (%s): patched is_jbroot_name@%lx + resolve@%lx",
-                              i, is_arm64e ? "arm64e" : "arm64",
-                              (unsigned long)isJbrootFileOff, (unsigned long)resolveFileOff);
-                        break;
+                    char segname[17]   = {0};
+                    memcpy(sectname, bytes + sectOff,      16);
+                    memcpy(segname,   bytes + sectOff + 16, 16);
+                    if (strcmp(segname, "__TEXT") == 0 && strcmp(sectname, "__text") == 0) {
+                        textVirt    = rh_u64le(bytes + sectOff + 32);
+                        textSize    = rh_u64le(bytes + sectOff + 40);
+                        textFileOff = rh_u32le(bytes + sectOff + 48);
+                        haveText    = YES;
                     }
                     sectOff += 80;
                 }
             }
             cmdOff += cmdsize;
         }
+
+        if (!haveText) {
+            NSLog(@"[RootHide] roothideinit arch %u: no __TEXT,__text section, skipping", i);
+            continue;
+        }
+
+        // Search within __text for prologue pattern matches.  We expect 2
+        // matches: is_jbroot_name (1st) and resolve_jbrand_value (2nd).  We
+        // cap at 2 to avoid accidentally patching unrelated functions that
+        // happen to share the same prologue.
+        NSUInteger textStart = archOffset + textFileOff;
+        NSUInteger textEnd   = textStart + (NSUInteger)textSize;
+        if (textEnd > length) textEnd = length;
+
+        NSUInteger matchCount = 0;
+        NSUInteger firstMatchOff  = 0;
+        NSUInteger secondMatchOff = 0;
+
+        for (NSUInteger off = textStart; off + 8 <= textEnd; off += 4) {
+            if (memcmp(bytes + off, prologue, 8) == 0) {
+                if (matchCount == 0) {
+                    firstMatchOff = off;
+                } else if (matchCount == 1) {
+                    secondMatchOff = off;
+                    break;  // we have both — no need to scan further
+                }
+                matchCount++;
+            }
+        }
+
+        if (matchCount < 2) {
+            NSLog(@"[RootHide] roothideinit arch %u (%s): found only %lu prologue match(es), expected 2 — skipping",
+                  i, is_arm64e ? "arm64e" : "arm64", (unsigned long)matchCount);
+            continue;
+        }
+
+        // Bounds check
+        if (firstMatchOff + patchLen > length || secondMatchOff + patchLen > length) {
+            NSLog(@"[RootHide] roothideinit arch %u: patch offset OOB", i);
+            continue;
+        }
+
+        // Verify prologue bytes (sanity check — already done above but explicit)
+        if (memcmp(bytes + firstMatchOff,  prologue, 8) != 0 ||
+            memcmp(bytes + secondMatchOff, prologue, 8) != 0) {
+            NSLog(@"[RootHide] roothideinit arch %u: prologue verification failed at last moment, skipping", i);
+            continue;
+        }
+
+        // Apply patches
+        memcpy(bytes + firstMatchOff,  patch1, patchLen);
+        memcpy(bytes + secondMatchOff, patch2, patchLen);
+
+        patchesApplied++;
+        NSLog(@"[RootHide] roothideinit arch %u (%s): patched is_jbroot_name@%lx + resolve@%lx (vaddr 0x%llx + 0x%llx)",
+              i, is_arm64e ? "arm64e" : "arm64",
+              (unsigned long)firstMatchOff, (unsigned long)secondMatchOff,
+              (unsigned long long)(textVirt + (firstMatchOff  - textStart)),
+              (unsigned long long)(textVirt + (secondMatchOff - textStart)));
     }
 
     if (patchesApplied == 0) {
@@ -529,8 +587,14 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     [data writeToFile:path options:NSDataWritingAtomic error:&writeError];
     if (writeError) return writeError;
 
+    // Re-sign with adhoc so AMFI accepts the modified dylib on iOS 16+.
+    chmod(path.fileSystemRepresentation, 0755);
     int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-Cadhoc", "-S", path.fileSystemRepresentation, NULL);
-    if (r != 0) NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib returned %d", r);
+    if (r != 0) {
+        NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib returned %d (trying -s fallback)", r);
+        int r2 = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-s", path.fileSystemRepresentation, NULL);
+        if (r2 != 0) NSLog(@"[RootHide] ldid -s fallback also failed: %d", r2);
+    }
 
     NSLog(@"[RootHide] patched %lu architectures in roothideinit.dylib", (unsigned long)patchesApplied);
     return nil;
@@ -538,6 +602,25 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
 // Patch libroothide.dylib: NOP the cbnz instructions after stat() calls
 // in __private_jbrootat_alloc to bypass the "stat(JBROOT) == 0" assertion.
+//
+// ROBUST IMPLEMENTATION:
+//   Previous version relied on hard-coded virtual addresses that drifted
+//   whenever the RootHide Bootstrap was rebuilt (e.g. text_virt changed
+//   from 0x6d78 → 0x6d84 for arm64 and from 0x6c5c → 0x6c64 for arm64e
+//   in the 2025-08 bootstrap release).  This caused "No architectures
+//   patched" → assertion `stat(JBROOT, &jbrootst) == 0` still fired →
+//   jailbreak abort at prep_bootstrap.sh.
+//
+//   We now locate `_jbrootat_alloc` via LC_SYMTAB by name (the symbol is
+//   exported in every shipping RootHide Bootstrap build), then scan the
+//   function body for the pattern:
+//        bl  <stat_addr>          ; 4 bytes, opcode 0x94/0x97
+//        cbnz w0, <assert_lbl>    ; 4 bytes, opcode 0x35xxxxxx
+//   and NOP each matching cbnz.  This is invariant to address drift as
+//   long as the assertion logic itself isn't restructured.
+//   (Helper functions rh_u32be / rh_u32le / rh_u64le are defined near the
+//   top of this file, before patchRoothideInitDylib.)
+
 - (NSError *)patchLibroothideDylib
 {
     NSString *path = JBROOT_PATH(@"/usr/lib/libroothide.dylib");
@@ -552,102 +635,181 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     NSUInteger length = data.length;
 
     // NOP instruction = 0xd503201f (bytes: 1f 20 03 d5)
-    uint8_t nop[4] = {0x1f, 0x20, 0x03, 0xd5};
+    static const uint8_t nop[4] = {0x1f, 0x20, 0x03, 0xd5};
 
-    // Virtual addresses of the cbnz instructions to NOP:
-    // Arch 0 (arm64, __text virt=0x6d78):
-    //   0x70a0: cbnz w0, #0x7440  (stat(JBROOT) check)
-    //   0x70b4: cbnz w0, #0x7460  (stat("/") check)
-    // Arch 1 (arm64e, __text virt=0x6c5c):
-    //   0x6fb8: cbnz w0, #0x7358  (stat(JBROOT) check)
-    //   0x6fcc: cbnz w0, #0x7378  (stat("/") check)
-    //
-    // Expected bytes at each cbnz:
-    //   0x001d0035 = cbnz w0, <offset 0>  (for stat(JBROOT))
-    //   0x601d0035 = cbnz w0, <offset 0x60>  (for stat("/"))
-    uint8_t expected_cbnz1[4] = {0x00, 0x1d, 0x00, 0x35}; // cbnz w0, #0x...0
-    uint8_t expected_cbnz2[4] = {0x60, 0x1d, 0x00, 0x35}; // cbnz w0, #0x...60
-
-    // Virtual addresses per arch
-    struct { uint64_t text_virt; uint64_t cbnz1; uint64_t cbnz2; } archs[] = {
-        {0x6d78, 0x70a0, 0x70b4},  // arm64
-        {0x6c5c, 0x6fb8, 0x6fcc},  // arm64e
-    };
-
-    uint32_t fatMagic = ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | (uint32_t)bytes[3];
+    uint32_t fatMagic = rh_u32be(bytes);
     if (fatMagic != 0xCAFEBABE) {
         return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : @"libroothide.dylib is not a FAT binary"}];
     }
-    uint32_t nfat = ((uint32_t)bytes[4] << 24) | ((uint32_t)bytes[5] << 16) | ((uint32_t)bytes[6] << 8) | (uint32_t)bytes[7];
+    uint32_t nfat = rh_u32be(bytes + 4);
 
     NSUInteger patchesApplied = 0;
+    NSUInteger patchesTotal   = 0;  // total cbnz NOPs written across all arches
+
     for (uint32_t i = 0; i < nfat && i < 8; i++) {
         NSUInteger archEntryOff = 8 + i * 20;
         if (archEntryOff + 20 > length) break;
-        uint32_t archOffset = ((uint32_t)bytes[archEntryOff + 8] << 24) | ((uint32_t)bytes[archEntryOff + 9] << 16) | ((uint32_t)bytes[archEntryOff + 10] << 8) | (uint32_t)bytes[archEntryOff + 11];
+        uint32_t archOffset = rh_u32be(bytes + archEntryOff + 8);
+        if (archOffset + 32 > length) continue;
 
-        uint32_t moMagic = ((uint32_t)bytes[archOffset + 3] << 24) | ((uint32_t)bytes[archOffset + 2] << 16) | ((uint32_t)bytes[archOffset + 1] << 8) | (uint32_t)bytes[archOffset];
+        uint32_t moMagic = rh_u32le(bytes + archOffset);
         if (moMagic != 0xFEEDFACF) continue;
-        uint32_t ncmds = ((uint32_t)bytes[archOffset + 16]) | ((uint32_t)bytes[archOffset + 17] << 8) | ((uint32_t)bytes[archOffset + 18] << 16) | ((uint32_t)bytes[archOffset + 19] << 24);
+        uint32_t ncmds   = rh_u32le(bytes + archOffset + 16);
         NSUInteger cmdOff = archOffset + 32;
+
+        // Walk load commands to find:
+        //   - __TEXT,__text section (file offset + vaddr + size)
+        //   - LC_SYMTAB (symtab offset, nsyms, strtab offset)
+        uint64_t textVirt  = 0;
+        uint32_t textOff   = 0;
+        uint64_t textSize  = 0;
+        BOOL haveText      = NO;
+        uint32_t symtabOff = 0, symtabNsyms = 0, strtabOff = 0;
+        BOOL haveSymtab    = NO;
 
         for (uint32_t j = 0; j < ncmds; j++) {
             if (cmdOff + 8 > length) break;
-            uint32_t cmd = ((uint32_t)bytes[cmdOff]) | ((uint32_t)bytes[cmdOff + 1] << 8) | ((uint32_t)bytes[cmdOff + 2] << 16) | ((uint32_t)bytes[cmdOff + 3] << 24);
-            uint32_t cmdsize = ((uint32_t)bytes[cmdOff + 4]) | ((uint32_t)bytes[cmdOff + 5] << 8) | ((uint32_t)bytes[cmdOff + 6] << 16) | ((uint32_t)bytes[cmdOff + 7] << 24);
-            if (cmd == 0x19) {
-                uint32_t nsects = ((uint32_t)bytes[cmdOff + 64]) | ((uint32_t)bytes[cmdOff + 65] << 8) | ((uint32_t)bytes[cmdOff + 66] << 16) | ((uint32_t)bytes[cmdOff + 67] << 24);
+            uint32_t cmd     = rh_u32le(bytes + cmdOff);
+            uint32_t cmdsize = rh_u32le(bytes + cmdOff + 4);
+            if (cmdsize < 8 || cmdOff + cmdsize > length) break;
+
+            if (cmd == 0x19 && cmdsize >= 72) {  // LC_SEGMENT_64
+                uint32_t nsects = rh_u32le(bytes + cmdOff + 64);
                 NSUInteger sectOff = cmdOff + 72;
                 for (uint32_t s = 0; s < nsects; s++) {
                     if (sectOff + 80 > length) break;
                     char sectname[17] = {0};
-                    memcpy(sectname, bytes + sectOff, 16);
-                    if (strcmp(sectname, "__text") == 0) {
-                        uint64_t sectAddr = 0;
-                        memcpy(&sectAddr, bytes + sectOff + 32, 8);
-                        uint32_t sectFileOff = 0;
-                        memcpy(&sectFileOff, bytes + sectOff + 48, 4);
-
-                        // Find matching arch config
-                        for (int a = 0; a < 2; a++) {
-                            if (sectAddr != archs[a].text_virt) continue;
-
-                            NSUInteger cbnz1Off = archOffset + sectFileOff + (archs[a].cbnz1 - sectAddr);
-                            NSUInteger cbnz2Off = archOffset + sectFileOff + (archs[a].cbnz2 - sectAddr);
-
-                            if (cbnz1Off + 4 > length || cbnz2Off + 4 > length) break;
-
-                            // Verify and patch cbnz1
-                            if (memcmp(bytes + cbnz1Off, expected_cbnz1, 4) == 0) {
-                                memcpy(bytes + cbnz1Off, nop, 4);
-                                NSLog(@"[RootHide] libroothide arch %u: NOP'd cbnz1@%lx", i, (unsigned long)cbnz1Off);
-                            } else {
-                                NSLog(@"[RootHide] libroothide arch %u: cbnz1 bytes mismatch: %02x%02x%02x%02x", i,
-                                      bytes[cbnz1Off], bytes[cbnz1Off+1], bytes[cbnz1Off+2], bytes[cbnz1Off+3]);
-                            }
-
-                            // Verify and patch cbnz2
-                            if (memcmp(bytes + cbnz2Off, expected_cbnz2, 4) == 0) {
-                                memcpy(bytes + cbnz2Off, nop, 4);
-                                NSLog(@"[RootHide] libroothide arch %u: NOP'd cbnz2@%lx", i, (unsigned long)cbnz2Off);
-                            } else {
-                                NSLog(@"[RootHide] libroothide arch %u: cbnz2 bytes mismatch: %02x%02x%02x%02x", i,
-                                      bytes[cbnz2Off], bytes[cbnz2Off+1], bytes[cbnz2Off+2], bytes[cbnz2Off+3]);
-                            }
-
-                            patchesApplied++;
-                            break;
-                        }
-                        break;
+                    char segname[17]   = {0};
+                    memcpy(sectname, bytes + sectOff,      16);
+                    memcpy(segname,   bytes + sectOff + 16, 16);
+                    if (strcmp(segname, "__TEXT") == 0 && strcmp(sectname, "__text") == 0) {
+                        textVirt = rh_u64le(bytes + sectOff + 32);
+                        textSize = rh_u64le(bytes + sectOff + 40);
+                        textOff  = rh_u32le(bytes + sectOff + 48);
+                        haveText = YES;
                     }
                     sectOff += 80;
                 }
+            } else if (cmd == 0x02 && cmdsize >= 24) {  // LC_SYMTAB
+                symtabOff   = rh_u32le(bytes + cmdOff + 8);
+                symtabNsyms = rh_u32le(bytes + cmdOff + 12);
+                strtabOff   = rh_u32le(bytes + cmdOff + 16);
+                haveSymtab  = YES;
             }
             cmdOff += cmdsize;
         }
+
+        if (!haveText) {
+            NSLog(@"[RootHide] libroothide arch %u: no __TEXT,__text section, skipping", i);
+            continue;
+        }
+
+        // --- Step 1: locate _jbrootat_alloc by symbol name -----------------
+        // The symbol may be exported as `_jbrootat_alloc` or
+        // `__private_jbrootat_alloc` (leading-underscore convention varies).
+        // We accept any defined symbol whose name contains "jbrootat_alloc".
+        uint64_t funcVirt = 0;
+        BOOL foundFunc = NO;
+        if (haveSymtab) {
+            for (uint32_t k = 0; k < symtabNsyms; k++) {
+                NSUInteger nlistOff = symtabOff + (NSUInteger)k * 16;
+                if (nlistOff + 16 > length) break;
+                uint32_t strx    = rh_u32le(bytes + nlistOff);
+                uint8_t  n_type  = bytes[nlistOff + 4];
+                uint8_t  n_sect  = bytes[nlistOff + 5];
+                uint64_t n_value = rh_u64le(bytes + nlistOff + 8);
+
+                // N_TYPE mask = 0x0e → N_SECT (defined in some section).
+                if ((n_type & 0x0e) != 0x0e) continue;
+                if (n_value == 0) continue;
+                if (strtabOff + strx >= length) continue;
+
+                NSUInteger nameStart = strtabOff + strx;
+                NSUInteger nameEnd = nameStart;
+                while (nameEnd < length && bytes[nameEnd] != 0) nameEnd++;
+                if (nameEnd <= nameStart) continue;
+
+                NSUInteger nameLen = nameEnd - nameStart;
+                // Quick filter to avoid strstr'ing every symbol.
+                if (nameLen < 14) continue;  // "jbrootat_alloc" is 14 chars
+                // Case-insensitive substring search for "jbrootat_alloc".
+                BOOL match = NO;
+                for (NSUInteger p = 0; p + 14 <= nameLen; p++) {
+                    if (strncasecmp((const char *)(bytes + nameStart + p), "jbrootat_alloc", 14) == 0) {
+                        match = YES;
+                        break;
+                    }
+                }
+                if (!match) continue;
+
+                funcVirt  = n_value;
+                foundFunc = YES;
+                NSLog(@"[RootHide] libroothide arch %u: found symbol '%.*s' @ 0x%llx (sec=%u)",
+                      i, (int)nameLen, bytes + nameStart, (unsigned long long)n_value, n_sect);
+                break;
+            }
+        }
+
+        // Compute the function's file offset & a conservative scan window.
+        NSUInteger funcFileOff = 0;
+        NSUInteger scanBytes   = 0;
+        if (foundFunc) {
+            if (funcVirt < textVirt || funcVirt >= textVirt + textSize) {
+                NSLog(@"[RootHide] libroothide arch %u: func vaddr 0x%llx outside __text [0x%llx, 0x%llx), skipping",
+                      i, (unsigned long long)funcVirt,
+                      (unsigned long long)textVirt, (unsigned long long)(textVirt + textSize));
+                continue;
+            }
+            funcFileOff = archOffset + textOff + (NSUInteger)(funcVirt - textVirt);
+            // Scan up to 0x400 bytes (256 instructions). The function is
+            // typically ~0x140 bytes; we leave ample margin for evolution.
+            scanBytes = 0x400;
+            if (funcFileOff + scanBytes > length) scanBytes = length - funcFileOff;
+        } else {
+            // Fallback: scan entire __text section for the bl+cbnz pattern.
+            // This is more expensive but works even if the symbol was stripped.
+            NSLog(@"[RootHide] libroothide arch %u: symbol _jbrootat_alloc not found, falling back to full __text scan", i);
+            funcFileOff = archOffset + textOff;
+            scanBytes   = (NSUInteger)textSize;
+            if (funcFileOff + scanBytes > length) scanBytes = length - funcFileOff;
+        }
+
+        // --- Step 2: scan for `bl <addr> ; cbnz w0, <offset>` pattern -------
+        // arm64 instruction encodings (little-endian, 4 bytes each):
+        //   bl   <imm26>        : 0b100101 << 26 = 0x94000000 | imm26  → top byte 0x94..0x97
+        //   cbnz w0, <imm19>    : 0b00110101 << 24 = 0x35000000 | imm19 → top byte 0x35
+        //   cbnz x0, <imm19>    : 0b10110101 << 24 = 0xb5000000 | imm19 → top byte 0xb5
+        // We NOP any cbnz w0/x0 that immediately follows a bl, regardless
+        // of operands — within the small jbrootat_alloc function these are
+        // always the post-stat() assertion guards, never false positives.
+        NSUInteger nopsThisArch = 0;
+        for (NSUInteger off = 0; off + 8 <= scanBytes; off += 4) {
+            uint32_t prev = rh_u32le(bytes + funcFileOff + off);
+            uint32_t curr = rh_u32le(bytes + funcFileOff + off + 4);
+
+            BOOL prevIsBl   = ((prev >> 26) == 0x25);  // 0b100101
+            BOOL currIsCbnz = ((curr >> 24) == 0x35) || ((curr >> 24) == 0xb5);
+            if (!prevIsBl || !currIsCbnz) continue;
+
+            // NOP the cbnz in-place.
+            memcpy(bytes + funcFileOff + off + 4, nop, 4);
+            nopsThisArch++;
+            NSLog(@"[RootHide] libroothide arch %u: NOP'd cbnz@0x%llx (after bl@0x%llx)",
+                  i,
+                  (unsigned long long)(funcVirt ? funcVirt + off + 4 : 0),
+                  (unsigned long long)(funcVirt ? funcVirt + off     : 0));
+        }
+
+        if (nopsThisArch > 0) {
+            patchesApplied++;
+            patchesTotal += nopsThisArch;
+        } else {
+            NSLog(@"[RootHide] libroothide arch %u: no bl+cbnz pattern found%s, skipping",
+                  i, foundFunc ? " in _jbrootat_alloc" : " in __text");
+        }
     }
 
-    if (patchesApplied == 0) {
+    if (patchesApplied == 0 || patchesTotal == 0) {
         NSLog(@"[RootHide] No architectures patched in libroothide.dylib (continuing)");
         return nil;  // Non-fatal
     }
@@ -656,10 +818,21 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     [data writeToFile:path options:NSDataWritingAtomic error:&writeError];
     if (writeError) return writeError;
 
+    // Re-sign with adhoc so AMFI accepts the modified dylib on iOS 16+.
+    // We chmod first in case the bootstrap extraction left the file read-only.
+    chmod(path.fileSystemRepresentation, 0755);
     int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-Cadhoc", "-S", path.fileSystemRepresentation, NULL);
-    if (r != 0) NSLog(@"[RootHide] ldid re-sign of libroothide.dylib returned %d", r);
+    if (r != 0) {
+        NSLog(@"[RootHide] ldid re-sign of libroothide.dylib returned %d (trying -s fallback)", r);
+        // Fallback: `ldid -s` is a simpler adhoc signer that sometimes
+        // succeeds when `-Cadhoc -S` fails (e.g. when the existing
+        // embedded signature has a CodeDirectory slot we can't overwrite).
+        int r2 = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-s", path.fileSystemRepresentation, NULL);
+        if (r2 != 0) NSLog(@"[RootHide] ldid -s fallback also failed: %d", r2);
+    }
 
-    NSLog(@"[RootHide] patched %lu architectures in libroothide.dylib", (unsigned long)patchesApplied);
+    NSLog(@"[RootHide] patched %lu architectures (%lu total NOPs) in libroothide.dylib",
+          (unsigned long)patchesApplied, (unsigned long)patchesTotal);
     return nil;
 }
 
