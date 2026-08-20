@@ -232,13 +232,32 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         completion(decompressionError);
         return;
     }
-    
-    decompressionError = [self extractTar:bootstrapTar toPath:@"/"];
+
+    // Extract the bootstrap into JBROOT_PATH("/") (= <preboot>/dopamine-XXXX/procursus/).
+    //
+    // WHY NOT "/":
+    //   Upstream rootless Dopamine uses `toPath:@"/"` because at the time
+    //   extractBootstrap is called, the process has already chroot'd /
+    //   bind-mounted jbroot onto "/".  So writing to "/" actually writes
+    //   into jbroot.
+    //
+    //   Our RootHide patches do NOT do that bind mount — "/" is the real
+    //   read-only system root (SSV-protected on iOS 15+).  Extracting
+    //   into "/" therefore fails with:
+    //     "Can't create '/usr/bin/tee'"
+    //     "Can't create '/usr/bin/dpkg'"
+    //     ... and so on for every file in the bootstrap.
+    //
+    //   Extract directly into JBROOT_PATH("/") instead.  The RootHide
+    //   bootstrap tarball has paths like "./usr/bin/dpkg", so they end up
+    //   at <jbroot>/usr/bin/dpkg, which is exactly where the rest of the
+    //   code expects to find them.
+    decompressionError = [self extractTar:bootstrapTar toPath:JBROOT_PATH(@"/")];
     if (decompressionError) {
         completion(decompressionError);
         return;
     }
-    
+
     [[NSData data] writeToFile:JBROOT_PATH(@"/.installed_dopamine") atomically:YES];
     completion(nil);
 }
