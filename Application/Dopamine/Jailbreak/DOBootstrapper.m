@@ -1514,26 +1514,35 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 - (NSError *)finalizeBootstrap
 {
     // ─────────────────────────────────────────────────────────────────────
-    // STEP 0: Re-sign the patched RootHide dylibs.
+    // STEP 0: Ensure the RootHide dylibs exist and are patched + signed.
     //
-    // WHY: The earlier patchRootHideAssertions call (in bootstrapFinishedCompletion,
-    // during step 5 prepareBootstrap) successfully patched the dylib bytes
-    // but FAILED to re-sign them with ldid — exit code 85 (EBADEXEC).
+    // This is a BELT-AND-SUSPENDERS call.  The earlier patchRootHideAssertions
+    // (called from bootstrapFinishedCompletion during step 5) should have
+    // already restored + patched the dylibs.  But if it failed silently
+    // (e.g. decompressZstd failed, or libarchive extraction failed, or the
+    // user upgraded from an IPA that left the dylibs in a deleted state),
+    // the dylibs won't exist when finalizeBootstrap runs.
     //
-    // Root cause of the ldid failure:
-    //   exec_cmd_trusted() macro calls jbclient_trust_file_by_path(ldid) to
-    //   add ldid to the trust cache via XPC to launchdhook.  But launchdhook
-    //   is only injected in step 8 (injectLaunchdHook), which runs AFTER
-    //   prepareBootstrap (step 5).  So when patcher ran in step 5, the XPC
-    //   had no listener → ldid wasn't trusted → posix_spawn returned 85.
+    // Calling patchRootHideAssertions AGAIN here is safe because:
+    //   - restoreRootHideDylibsFromBundle is idempotent (overwrites with
+    //     pristine copies from the IPA bundle)
+    //   - patchRoothideInitDylib is idempotent (detects already-patched
+    //     state and returns success)
+    //   - patchLibroothideDylib is idempotent (NOPs are only written if
+    //     the bl+cbnz pattern is found; if already NOP'd, it skips)
     //
-    // Now that we're in finalizeBootstrap (step 12, after step 8), launchdhook
-    // IS loaded.  Re-running ldid here will succeed.
-    //
-    // This is critical: prep_bootstrap.sh (below) loads roothideinit.dylib
-    // via /usr/libexec/firmware.  If the dylib is patched-but-unsigned, AMFI
-    // rejects it → SIGABRT → prep_bootstrap.sh exits non-zero.
+    // Now that launchdhook is loaded (step 8), the ldid re-sign inside
+    // the patchers will SUCCEED (previously returned exit 85 because
+    // jbclient_trust_file_by_path XPC had no listener).
     // ─────────────────────────────────────────────────────────────────────
+    NSLog(@"[RootHide] finalizeBootstrap: calling patchRootHideAssertions (belt-and-suspenders)");
+    NSError *patchError2 = [self patchRootHideAssertions];
+    if (patchError2) {
+        NSLog(@"[RootHide] patchRootHideAssertions (in finalizeBootstrap) failed: %@", patchError2);
+    }
+
+    // Also explicitly re-sign, in case the patcher's internal ldid call
+    // failed for some reason but the patches were applied.
     NSError *resignError = [self resignPatchedDylibs];
     if (resignError) {
         NSLog(@"[RootHide] resignPatchedDylibs (non-fatal): %@", resignError);
