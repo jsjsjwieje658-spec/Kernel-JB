@@ -557,8 +557,16 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     if (__builtin_available(iOS 19.0, *)) {
         shouldInstallLaunchctl = [self shouldInstallPackage:@"launchctl"];
     }
+
+    // RootHide: auto-install the official RootHide Manager app on first
+    // jailbreak.  The .deb is shipped inside the IPA at
+    //   <app>/Packages/roothideapp_1.3.9_iphoneos-arm64e.deb
+    // (copied there by Application/Makefile).  We install it ONLY when the
+    // user hasn't already installed a newer version from Sileo/Zebra —
+    // check by looking for the bundle ID in dpkg status.
+    BOOL shouldInstallRootHideApp = ![self installedVersionForPackageWithIdentifier:@"com.roothide.manager"];
     
-    if (shouldInstallLibroot || shouldInstallLibkrw || shouldInstallBasebinLink || shouldInstallLaunchctl) {
+    if (shouldInstallLibroot || shouldInstallLibkrw || shouldInstallBasebinLink || shouldInstallLaunchctl || shouldInstallRootHideApp) {
         [[DOUIManager sharedInstance] sendLog:@"Updating Bundled Packages" debug:NO];
 
         if (shouldInstallLaunchctl) {
@@ -598,6 +606,26 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             NSString *basebinLinkPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"basebin-link.deb"];
             int r = [self installPackage:basebinLinkPath];
             if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install basebin link: %d\n", r]}];
+        }
+
+        // RootHide Manager app auto-install.  We look for the .deb under
+        // <app>/Packages/ (copied there by Application/Makefile).  If the
+        // file is missing or install fails, we DON'T fail the entire
+        // jailbreak — the user can still install RootHide Manager manually
+        // from Sileo/Zebra afterwards.  RootHide Manager is a user-facing
+        // UI convenience, not a hard dependency for jailbreak operation.
+        if (shouldInstallRootHideApp) {
+            NSString *packagesDir = [[[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Packages"] copy];
+            NSString *roothideAppDeb = [packagesDir stringByAppendingPathComponent:@"roothideapp_1.3.9_iphoneos-arm64e.deb"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:roothideAppDeb]) {
+                [[DOUIManager sharedInstance] sendLog:@"Installing RootHide Manager" debug:NO];
+                int r = [self installPackage:roothideAppDeb];
+                if (r != 0) {
+                    // Non-fatal: log and continue.  The user can install
+                    // RootHide Manager later from a package manager.
+                    NSLog(@"[RootHide] Failed to auto-install RootHide Manager app: %d (non-fatal)", r);
+                }
+            }
         }
     }
 

@@ -7,20 +7,20 @@ LDFLAGS = -dynamiclib -rpath @loader_path/../lib -L../../BaseBin/.build -ljailbr
 all: $(TARGET) sign
 
 sign: $(TARGET)
-	@ldid -Cadhoc -S $^
+        @ldid -Cadhoc -S $^
 
 $(TARGET): $(wildcard src/*.c)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
-	install_name_tool -change "@loader_path/libjailbreak.dylib" "@rpath/libjailbreak.dylib" $@
+        $(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+        install_name_tool -change "@loader_path/libjailbreak.dylib" "@rpath/libjailbreak.dylib" $@
 
 clean:
-	@rm -f $(TARGET)
-	@rm -f libkrw-dopamine.deb
+        @rm -f $(TARGET)
+        @rm -f libkrw-dopamine.deb
 
 package: all
-	@mkdir -p .package/DEBIAN
-	@mkdir -p .package/var/jb/usr/lib/libkrw
-	@cp control .package/DEBIAN/control
-	@cp libkrw-dopamine.dylib .package/var/jb/usr/lib/libkrw/libkrw-dopamine.dylib
-	@dpkg-deb --root-owner-group -Zzstd -b .package ./libkrw-dopamine.deb
-	@rm -rf .package
+        @mkdir -p .package/DEBIAN
+        @mkdir -p .package/usr/lib/libkrw
+        @cp control .package/DEBIAN/control
+        @cp libkrw-dopamine.dylib .package/usr/lib/libkrw/libkrw-dopamine.dylib
+        @dpkg-deb --root-owner-group -Zzstd -b .package ./libkrw-dopamine.deb
+        @rm -rf .package
