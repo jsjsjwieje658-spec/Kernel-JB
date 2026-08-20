@@ -113,7 +113,7 @@ extern char **environ;
         // /private/preboot/<UUID>/dopamine-XXX/procursus).
         for (NSString *subItem in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:bundleAppPath error:nil]) {
             // Match pattern: .jbroot-XXXXXXXXXXXXXXXX (8-char prefix + 16 hex chars)
-            if ([subItem.length >= 24 && [subItem hasPrefix:@".jbroot-"]) {
+            if (subItem.length >= 24 && [subItem hasPrefix:@".jbroot-"]) {
                 // Verify the 16-char suffix is valid hex
                 NSString *hexPart = [subItem substringFromIndex:7];
                 NSCharacterSet *hexCharset = [NSCharacterSet characterSetWithCharactersInString:@"0123456789ABCDEFabcdef"];
