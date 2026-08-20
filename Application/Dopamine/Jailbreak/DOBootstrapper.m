@@ -1446,7 +1446,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 // to roothideinit.dylib).
 - (NSError *)resignPatchedDylibs
 {
-    NSString *ldidPath       = JBROOT_PATH("/usr/bin/ldid");
+    NSString *ldidPath       = JBROOT_PATH(@"/usr/bin/ldid");
     NSString *roothideInitPath = JBROOT_PATH(@"/usr/lib/roothideinit.dylib");
     NSString *libroothidePath  = JBROOT_PATH(@"/usr/lib/libroothide.dylib");
 
