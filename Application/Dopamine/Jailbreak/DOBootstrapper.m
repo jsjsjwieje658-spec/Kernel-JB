@@ -736,14 +736,12 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     [data writeToFile:path options:NSDataWritingAtomic error:&writeError];
     if (writeError) return writeError;
 
-    // Re-sign with adhoc so AMFI accepts the modified dylib on iOS 16+.
+    // NOTE: ldid re-sign is NOT called here.  ldid is itself a RootHide
+    // binary that loads libroothide.dylib.  If libroothide.dylib is not
+    // yet patched (or is patched but unsigned), ldid will SIGABRT.
+    // Re-signing is done later in resignPatchedDylibs (finalizeBootstrap),
+    // after BOTH dylibs are patched AND trust-cached.
     chmod(path.fileSystemRepresentation, 0755);
-    int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-Cadhoc", "-S", path.fileSystemRepresentation, NULL);
-    if (r != 0) {
-        NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib returned %d (trying -s fallback)", r);
-        int r2 = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-s", path.fileSystemRepresentation, NULL);
-        if (r2 != 0) NSLog(@"[RootHide] ldid -s fallback also failed: %d", r2);
-    }
 
     NSLog(@"[RootHide] patched %lu architectures in roothideinit.dylib", (unsigned long)patchesApplied);
     return nil;
@@ -973,18 +971,9 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     [data writeToFile:path options:NSDataWritingAtomic error:&writeError];
     if (writeError) return writeError;
 
-    // Re-sign with adhoc so AMFI accepts the modified dylib on iOS 16+.
-    // We chmod first in case the bootstrap extraction left the file read-only.
+    // NOTE: ldid re-sign is NOT called here.  See patchRoothideInitDylib
+    // for explanation.  Re-signing is done in resignPatchedDylibs.
     chmod(path.fileSystemRepresentation, 0755);
-    int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-Cadhoc", "-S", path.fileSystemRepresentation, NULL);
-    if (r != 0) {
-        NSLog(@"[RootHide] ldid re-sign of libroothide.dylib returned %d (trying -s fallback)", r);
-        // Fallback: `ldid -s` is a simpler adhoc signer that sometimes
-        // succeeds when `-Cadhoc -S` fails (e.g. when the existing
-        // embedded signature has a CodeDirectory slot we can't overwrite).
-        int r2 = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-s", path.fileSystemRepresentation, NULL);
-        if (r2 != 0) NSLog(@"[RootHide] ldid -s fallback also failed: %d", r2);
-    }
 
     NSLog(@"[RootHide] patched %lu architectures (%lu total NOPs) in libroothide.dylib",
           (unsigned long)patchesApplied, (unsigned long)patchesTotal);
@@ -1430,34 +1419,64 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
 // Re-sign the patched RootHide dylibs with ldid.
 //
-// This is called from finalizeBootstrap, AFTER launchdhook has been injected
-// (step 8 in DOJailbreaker.jailbreak).  The earlier patchRootHideAssertions
-// call (from bootstrapFinishedCompletion, step 5) ran BEFORE launchdhook was
-// loaded, so jbclient_trust_file_by_path() XPC had no listener → ldid wasn't
-// added to the trust cache → posix_spawn returned EBADEXEC (85).
+// CHICKEN-AND-EGG PROBLEM:
+//   ldid is itself a RootHide binary.  When it runs, dyld loads
+//   libroothide.dylib (a dependency).  libroothide.dylib's constructor
+//   calls __private_jbrootat_alloc, which has the assertion
+//   `stat(JBROOT, &jbrootst) == 0`.
 //
-// Now that launchdhook is loaded, exec_cmd_trusted() will:
-//   1. Send XPC to launchdhook to add ldid to the trust cache (succeeds)
-//   2. posix_spawn ldid (succeeds — ldid is now trusted)
-//   3. ldid re-signs the patched dylib with an adhoc signature
+//   If we call ldid BEFORE patching libroothide.dylib → assertion fires
+//   → SIGABRT (exit 6).
+//   If we call ldid AFTER patching but BEFORE trust-caching → AMFI
+//   rejects the unsigned dylib → ldid crashes with "No such file".
 //
-// After this, AMFI will accept the patched dylib when prep_bootstrap.sh
-// loads it via /usr/libexec/firmware (which sets DYLD_INSERT_LIBRARIES
-// to roothideinit.dylib).
+// SOLUTION:
+//   1. Patch BOTH dylibs first (done in patchRootHideAssertions).
+//   2. Add BOTH patched dylibs to the trust cache via
+//      jbclient_trust_file_by_path().  This makes AMFI accept them
+//      even though their code signatures are invalid.
+//   3. NOW run ldid to re-sign.  ldid loads the trust-cached
+//      libroothide.dylib → constructor runs → assertion is NOP'd → OK.
+//      ldid writes a new adhoc signature to the dylib.
+//
+//   This function is called from finalizeBootstrap (step 12), AFTER
+//   launchdhook is loaded (step 8).  jbclient_trust_file_by_path()
+//   sends XPC to launchdhook, which adds the file's CDHash to the
+//   kernel's trust cache.
 - (NSError *)resignPatchedDylibs
 {
-    NSString *ldidPath       = JBROOT_PATH(@"/usr/bin/ldid");
-    NSString *roothideInitPath = JBROOT_PATH(@"/usr/lib/roothideinit.dylib");
-    NSString *libroothidePath  = JBROOT_PATH(@"/usr/lib/libroothide.dylib");
+    NSString *ldidPath         = JBROOT_PATH(@"/usr/bin/ldid");
+    NSString *roothideInitPath  = JBROOT_PATH(@"/usr/lib/roothideinit.dylib");
+    NSString *libroothidePath   = JBROOT_PATH(@"/usr/lib/libroothide.dylib");
 
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // Verify ldid binary exists before attempting to use it.
+    // ─── Step 1: Trust-cache BOTH patched dylibs ─────────────────────
+    // This MUST happen BEFORE ldid runs, because ldid loads libroothide.dylib.
+    // Without trust-caching, AMFI rejects the patched (unsigned) dylib and
+    // ldid crashes with "No such file or directory" or SIGABRT.
+    NSLog(@"[RootHide] trust-caching patched dylibs before ldid...");
+
+    if ([fm fileExistsAtPath:roothideInitPath]) {
+        int tcR = jbclient_trust_file_by_path(roothideInitPath.fileSystemRepresentation);
+        NSLog(@"[RootHide] trust-cache roothideinit.dylib: %d", tcR);
+    }
+    if ([fm fileExistsAtPath:libroothidePath]) {
+        int tcR = jbclient_trust_file_by_path(libroothidePath.fileSystemRepresentation);
+        NSLog(@"[RootHide] trust-cache libroothide.dylib: %d", tcR);
+    }
+
+    // ─── Step 2: Verify ldid exists ──────────────────────────────────
     if (![fm fileExistsAtPath:ldidPath]) {
         NSLog(@"[RootHide] resignPatchedDylibs: ldid not found at %@", ldidPath);
-        // Non-fatal — we'll continue, but prep_bootstrap.sh may SIGABRT.
+        // Non-fatal — trust-cache above is enough for AMFI to accept the
+        // dylibs even without re-signing.
         return nil;
     }
+
+    // ─── Step 3: Re-sign with ldid ───────────────────────────────────
+    // Now that both dylibs are patched AND trust-cached, ldid can safely
+    // run without SIGABRTing on the libroothide assertion.
 
     // Re-sign roothideinit.dylib.
     if ([fm fileExistsAtPath:roothideInitPath]) {
@@ -1466,24 +1485,17 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                                  "-Cadhoc", "-S",
                                  roothideInitPath.fileSystemRepresentation, NULL);
         if (r != 0) {
-            NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib (retry after launchdhook) returned %d, trying -s", r);
-            // Fallback: simpler adhoc signer that sometimes succeeds when
-            // -Cadhoc -S fails (e.g. when the existing embedded signature
-            // has a CodeDirectory slot we can't overwrite).
+            NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib returned %d, trying -s", r);
             r = exec_cmd_trusted(ldidPath.fileSystemRepresentation,
                                  "-s",
                                  roothideInitPath.fileSystemRepresentation, NULL);
             if (r != 0) {
-                NSLog(@"[RootHide] ldid -s retry also failed: %d", r);
-                // Don't return error — continue anyway. prep_bootstrap.sh
-                // may still succeed if the dylib doesn't strictly need
-                // re-signing (e.g. if the patches didn't modify the
-                // CodeDirectory region).
+                NSLog(@"[RootHide] ldid -s retry also failed: %d (continuing — trust-cache is sufficient)", r);
             } else {
                 NSLog(@"[RootHide] ldid -s fallback succeeded for roothideinit.dylib");
             }
         } else {
-            NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib succeeded (after launchdhook)");
+            NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib succeeded");
         }
     }
 
@@ -1494,17 +1506,17 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                                  "-Cadhoc", "-S",
                                  libroothidePath.fileSystemRepresentation, NULL);
         if (r != 0) {
-            NSLog(@"[RootHide] ldid re-sign of libroothide.dylib (retry after launchdhook) returned %d, trying -s", r);
+            NSLog(@"[RootHide] ldid re-sign of libroothide.dylib returned %d, trying -s", r);
             r = exec_cmd_trusted(ldidPath.fileSystemRepresentation,
                                  "-s",
                                  libroothidePath.fileSystemRepresentation, NULL);
             if (r != 0) {
-                NSLog(@"[RootHide] ldid -s retry also failed: %d", r);
+                NSLog(@"[RootHide] ldid -s retry also failed: %d (continuing — trust-cache is sufficient)", r);
             } else {
                 NSLog(@"[RootHide] ldid -s fallback succeeded for libroothide.dylib");
             }
         } else {
-            NSLog(@"[RootHide] ldid re-sign of libroothide.dylib succeeded (after launchdhook)");
+            NSLog(@"[RootHide] ldid re-sign of libroothide.dylib succeeded");
         }
     }
 
