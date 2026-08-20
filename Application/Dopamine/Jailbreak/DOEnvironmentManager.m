@@ -210,7 +210,11 @@ extern char **environ;
             // contents into the new RootHide-format jbroot path.
             NSString *oldJbroot = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
             // Create new path then move contents
-            [[NSFileManager defaultManager] createDirectoryAtPath:jailbreakRootPath withIntermediateDirectories:YES attributes:nil error:nil];
+            [self runAsRoot:^{
+                [self runUnsandboxed:^{
+                    [[NSFileManager defaultManager] createDirectoryAtPath:jailbreakRootPath withIntermediateDirectories:YES attributes:nil error:nil];
+                }];
+            }];
             // Use contentsOfDirectoryAtPath (it's reliably declared on all SDKs)
             NSArray *oldItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:oldJbroot error:nil];
             for (NSString *itemName in oldItems) {
@@ -226,7 +230,18 @@ extern char **environ;
         }
         else {
             if (![[NSFileManager defaultManager] fileExistsAtPath:jailbreakRootPath]) {
-                [[NSFileManager defaultManager] createDirectoryAtPath:jailbreakRootPath withIntermediateDirectories:YES attributes:nil error:&error];
+                // /var/containers/Bundle/Application/ is a system-managed directory
+                // protected by AMFI/sandbox MAC checks.  Even when Dopamine has
+                // been escalated to uid 0 via kwrite32, the MAC policy may
+                // still deny direct mkdir.  Wrap the mkdir in runAsRoot +
+                // runUnsandboxed which uses jbclient_root_set_mac_label(1, -1)
+                // to temporarily disable the MAC label, allowing the mkdir to
+                // succeed.
+                [self runAsRoot:^{
+                    [self runUnsandboxed:^{
+                        [[NSFileManager defaultManager] createDirectoryAtPath:jailbreakRootPath withIntermediateDirectories:YES attributes:nil error:&error];
+                    }];
+                }];
             }
         }
 
