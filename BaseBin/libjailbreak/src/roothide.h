@@ -117,21 +117,30 @@ unsigned long long jbrand(void);
 // ============ Path Conversion Helpers ============
 
 /**
- * Convert path using jbroot prefix replacement
- * Main API function for path conversion
- * 
- * @param path Input path (typically starting with jbroot)
- * @return Converted path, or original if no conversion needed
- */
-const char* jbroot(const char* path);
-
-/**
- * Alias for jbroot() - backward compatibility with rootless naming
- * 
+ * Sanitize a path for use inside a clean-mode process.
+ * With the current design, the on-disk jbroot path is the same for every process
+ * (it is the path returned by jbserver at jailbreak time), so this function
+ * just returns `path` unchanged.
+ *
+ * Renamed from `jbroot()` to avoid a name collision with `jbroot.c::get_jbroot()`
+ * (different signature, different meaning).
+ *
  * @param path Input path
- * @return Converted path
+ * @return The same pointer as `path` (no allocation, no copy)
  */
-const char* rootfs(const char* path);
+const char* roothide_sanitize_path_v2(const char* path);
+
+// === Backward compatibility shims ===
+// These keep older call sites (if any) compiling. They are thin wrappers
+// over roothide_sanitize_path_v2() and behave identically.
+static inline const char* roothide_jbroot_path(const char* path)
+{
+        return roothide_sanitize_path_v2(path);
+}
+static inline const char* roothide_rootfs(const char* path)
+{
+        return roothide_sanitize_path_v2(path);
+}
 
 // ============ Advanced Hiding Functions (arm64e optimized) ============
 

@@ -379,5 +379,7 @@ const char* roothide_sanitize_path(const char *path)
     }
     
     // Use jbroot conversion for jbroot paths (dynamic, not /var/jb)
-    return jbroot(path);
+    // jbroot() was renamed to roothide_sanitize_path_v2() — it is now a no-op
+    // (the on-disk jbroot path is the same for every process).
+    return roothide_sanitize_path_v2(path);
 }

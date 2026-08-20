@@ -129,94 +129,36 @@ static int safe_strlcpy(char *dst, const char *src, size_t dstsize)
         return 0;
 }
 
-// ============ Public API Implementation ============
+// ============ Path Management ============
 
-int roothide_init(void)
-{
-        pthread_mutex_lock(&g_roothide.mutex);
-        
-        if (g_roothide.initialized) {
-                pthread_mutex_unlock(&g_roothide.mutex);
-                return 0; // Already initialized
-        }
-        
-        // Get original jbroot path
-        const char *orig_jbroot = get_jbroot();
-        if (!orig_jbroot) {
-                // Fallback to standard rootless path
-                orig_jbroot = get_jbroot() ?: "/private/preboot";  // RootHide: fallback to preboot, NOT /var/jb
-        }
-        safe_strlcpy(g_roothide.base_jbroot, orig_jbroot, sizeof(g_roothide.base_jbroot));
-        
-        // Get preboot UUID
-        get_preboot_uuid(g_roothide.preboot_uuid, sizeof(g_roothide.preboot_uuid));
-        
-        // Generate random suffix for path randomization
-        generate_random_string(g_roothide.random_suffix, sizeof(g_roothide.random_suffix));
-        
-        // Construct randomized jbroot path: /private/preboot/{UUID}/jb_{random}
-        snprintf(g_roothide.jbroot_path, sizeof(g_roothide.jbroot_path),
-                 "/private/preboot/%s/jb_%s",
-                 g_roothide.preboot_uuid,
-                 g_roothide.random_suffix);
-        
-        // Generate session identifier
-        g_roothide.session_id = ((unsigned long long)time(NULL) << 32) | 
-                                ((unsigned long long)getpid() & 0xFFFFFFFF);
-        
-        // Load default blacklist (banking apps, detection apps, etc.)
-        // These apps should NEVER receive jailbreak injection
-        const char *default_blacklist[] = {
-                // Banking apps (Vietnam + International)
-                "com.vietinbank.iBank",
-                "com.vcb.IB",
-                "com.techcombank.business",
-                "com.mbmobile",
-                "com.timb.VCBMobileBanking",
-                "com.acb.ACBMobile",
-                "com.vib.VIBMobileBanking",
-                "com.babk.BABMobileBanking",
-                "com.vietcombank.MobileBanking",
-                "com.agribank.DigiBank",
-                "com.oceanbank.OzeMobile",
-                "com.pvcombank.MobileBanking",
-                "com.saigonthonhin.SHBMobile",
-                "com.lienvietpost.LVPBank",
-                "vnpay.NapAsVnPay",
-                
-                // Security/Detection apps
-                "com.apple.dt.Xcode",              // Xcode (debugger detection)
-                "com.bugsnag.Bugsnag",             // Crash reporting with JB detection
-                "io.fabric.sdk.ios",               // Fabric/Crashlytics
-                "com.microsoft.IntuneMAM",         // MDM
-                "com.vmware.horizon",
-                
-                // Game anti-cheat
-                "com.tencent.ig",
-                "com.miHoYo.GenshinImpact",
-                "com.digitalegends.BESTARZ",
-        };
-        
-        size_t default_count = sizeof(default_blacklist) / sizeof(default_blacklist[0]);
-        for (size_t i = 0; i < default_count && g_roothide.blacklist_count < ROOTHIDE_MAX_BLACKLIST_ENTRIES; i++) {
-                safe_strlcpy(g_roothide.blacklist[g_roothide.blacklist_count], 
-                            default_blacklist[i], 
-                            256);
-                g_roothide.blacklist_count++;
-        }
-        
-        g_roothide.initialized = true;
-        pthread_mutex_unlock(&g_roothide.mutex);
-        
-        return 0;
-}
-
-const char* roothide_get_jbroot(void)
+/**
+ * Get the REAL jbroot path used by the system (via jbinfo(rootPath)).
+ * This is the path that actually exists on disk.
+ *
+ * NOTE: We intentionally do NOT randomize the jbroot path at runtime — randomizing it
+ * would require creating a new directory + bind mount + symlink dance at jailbreak
+ * time, which is a high-risk operation that can panic launchd during early boot.
+ * Instead, the jbroot path returned by jbserver (set at jailbreak time by
+ * DOBootstrapper) is already the path under /private/preboot/<UUID>/, which is
+ * itself randomized across devices (the UUID is per-device/per-OS-restore).
+ *
+ * @return The actual jbroot path, or NULL on error
+ */
+const char* rothide_get_jbroot(void)
 {
         if (!g_roothide.initialized) {
                 roothide_init();
         }
-        return g_roothide.jbroot_path;
+        // Always return the REAL jbroot path (the one that actually exists on disk).
+        // Previously this returned a fake /private/preboot/UUID/jb_<random> path
+        // that did NOT exist on disk, which caused subtle bugs when callers tried
+        // to actually access files under it.
+        if (g_roothide.base_jbroot[0]) {
+                return g_roothide.base_jbroot;
+        }
+        // Fallback: query libjailbreak directly
+        const char *jbroot = get_jbroot();
+        return jbroot;
 }
 
 bool roothide_is_blacklisted(const char* bundleID)
@@ -293,7 +235,98 @@ unsigned long long jbrand(void)
         return g_roothide.session_id;
 }
 
-const char* jbroot(const char* path)
+// ============ Initialization ============
+
+int roothide_init(void)
+{
+        pthread_mutex_lock(&g_roothide.mutex);
+        
+        if (g_roothide.initialized) {
+                pthread_mutex_unlock(&g_roothide.mutex);
+                return 0; // Already initialized
+        }
+        
+        // Capture the REAL jbroot path (as reported by jbserver) — this is the path
+        // that actually exists on disk.  Do NOT generate a fake random path here.
+        const char *orig_jbroot = get_jbroot();
+        if (!orig_jbroot) {
+                // Fallback to /private/preboot (RootHide: do NOT use /var/jb)
+                orig_jbroot = "/private/preboot";
+        }
+        safe_strlcpy(g_roothide.base_jbroot, orig_jbroot, sizeof(g_roothide.base_jbroot));
+        
+        // Mirror the path into jbroot_path for backwards compat with code that
+        // inspects g_roothide.jbroot_path.  Both are the REAL path now.
+        safe_strlcpy(g_roothide.jbroot_path, g_roothide.base_jbroot, sizeof(g_roothide.jbroot_path));
+        
+        // Get preboot UUID (informational only, used by rothide_get_jbroot()
+        // in case get_jbroot() ever fails)
+        get_preboot_uuid(g_roothide.preboot_uuid, sizeof(g_roothide.preboot_uuid));
+        
+        // Generate session identifier (per-process, used for diagnostics)
+        g_roothide.session_id = ((unsigned long long)time(NULL) << 32) | 
+                                ((unsigned long long)getpid() & 0xFFFFFFFF);
+        
+        // Load default blacklist (banking apps, detection apps, etc.)
+        // These apps should NEVER receive jailbreak injection
+        const char *default_blacklist[] = {
+                // Banking apps (Vietnam + International)
+                "com.vietinbank.iBank",
+                "com.vcb.IB",
+                "com.techcombank.business",
+                "com.mbmobile",
+                "com.timb.VCBMobileBanking",
+                "com.acb.ACBMobile",
+                "com.vib.VIBMobileBanking",
+                "com.babk.BABMobileBanking",
+                "com.vietcombank.MobileBanking",
+                "com.agribank.DigiBank",
+                "com.oceanbank.OzeMobile",
+                "com.pvcombank.MobileBanking",
+                "com.saigonthonhin.SHBMobile",
+                "com.lienvietpost.LVPBank",
+                "vnpay.NapAsVnPay",
+                
+                // Security/Detection apps
+                "com.apple.dt.Xcode",              // Xcode (debugger detection)
+                "com.bugsnag.Bugsnag",             // Crash reporting with JB detection
+                "io.fabric.sdk.ios",               // Fabric/Crashlytics
+                "com.microsoft.IntuneMAM",         // MDM
+                "com.vmware.horizon",
+                
+                // Game anti-cheat
+                "com.tencent.ig",
+                "com.miHoYo.GenshinImpact",
+                "com.digitalegends.BESTARZ",
+        };
+        
+        size_t default_count = sizeof(default_blacklist) / sizeof(default_blacklist[0]);
+        for (size_t i = 0; i < default_count && g_roothide.blacklist_count < ROOTHIDE_MAX_BLACKLIST_ENTRIES; i++) {
+                safe_strlcpy(g_roothide.blacklist[g_roothide.blacklist_count], 
+                            default_blacklist[i], 
+                            256);
+                g_roothide.blacklist_count++;
+        }
+        
+        g_roothide.initialized = true;
+        pthread_mutex_unlock(&g_roothide.mutex);
+        
+        return 0;
+}
+
+// ============ Path Conversion ============
+
+/**
+ * Convert a standard jailbreak path: if `path` starts with the current jbroot,
+ * return `path` unchanged (the on-disk path is the same for all callers — we
+ * do NOT use per-process path randomization, that caused files to be looked
+ * up under non-existent paths and would break tweaks).
+ *
+ * Renamed from `jbroot()` to `roothide_sanitize_path_v2()` to avoid a name
+ * collision with `jbroot.c::get_jbroot()` which has a different signature
+ * (no args) and a different meaning ("return the jbroot path itself").
+ */
+const char* roothide_sanitize_path_v2(const char* path)
 {
         if (!path) return NULL;
         
@@ -301,55 +334,24 @@ const char* jbroot(const char* path)
                 roothide_init();
         }
         
-        // Use thread-local cache for performance
+        // Use thread-local cache for performance (same input -> same output)
         if (tl_cache_valid && tl_last_input == path) {
                 return tl_converted_path;
         }
         
-        // Convert path: replace jbroot prefix with randomized jbroot
-        const char *result = NULL;
-        
-        // Check if path starts with current jbroot
-        size_t jbroot_len = strlen(g_roothide.base_jbroot);
-        if (jbroot_len > 0 && strncmp(path, g_roothide.base_jbroot, jbroot_len) == 0) {
-                // Convert jbroot path to randomized path
-                const char *remaining = path + jbroot_len;
-                if (remaining[0] == '/' || remaining[0] == '\0') {
-                        snprintf(tl_converted_path, sizeof(tl_converted_path), "%s%s", 
-                                g_roothide.jbroot_path, remaining);
-                        result = tl_converted_path;
-                }
-        }
-        else if (strcmp(path, g_roothide.base_jbroot) == 0) {
-                // Exact match for jbroot
-                safe_strlcpy(tl_converted_path, g_roothide.jbroot_path, sizeof(tl_converted_path));
-                result = tl_converted_path;
-        }
-        else {
-                // No conversion needed, return original
-                result = path;
-        }
-        
+        // No conversion is ever needed — jbroot path is the same on-disk path
+        // for every process.  We just return the input as-is.
         tl_last_input = path;
         tl_cache_valid = true;
-        
-        return result;
-}
-
-const char* rootfs(const char* path)
-{
-        // Alias for jbroot - backward compatibility
-        return jbroot(path);
+        return path;
 }
 
 int rothide_convert_path(const char* input, char* output, size_t outsize)
 {
         if (!input || !output || outsize == 0) return -1;
         
-        const char *converted = jbroot(input);
-        if (!converted) return -1;
-        
-        safe_strlcpy(output, converted, outsize);
+        // No transformation needed — on-disk path is the same for all callers.
+        safe_strlcpy(output, input, outsize);
         return 0;
 }
 

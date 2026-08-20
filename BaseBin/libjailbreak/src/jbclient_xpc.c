@@ -539,16 +539,11 @@ int jbclient_dopamine_drop_root(void)
 }
 
 // ========== ROOTHIDE CONTROL IMPLEMENTATIONS ==========
-
-// Domain and action IDs for RootHide (must match server side)
-#define JBS_DOMAIN_ROOTHIDE  10
-#define JBS_ROOTHIDE_INIT           1
-#define JBS_ROOTHIDE_SET_ENABLED    2
-#define JBS_ROOTHIDE_IS_ENABLED     3
-#define JBS_ROOTHIDE_ADD_BLACKLIST   4
-#define JBS_ROOTHIDE_REMOVE_BLACKLIST 5
-#define JBS_ROOTHIDE_GET_JBROOT_PATH 6
-#define JBS_ROOTHIDE_APPLY_SETTINGS  7
+//
+// The domain ID (JBS_DOMAIN_ROOTHIDE) and action IDs (JBS_ROOTHIDE_*) are
+// defined in jbserver_domains.h. They MUST match the server-side handler in
+// BaseBin/launchdhook/src/jbserver/jbdomain_roothide.c — both files include
+// jbserver_domains.h so they stay in sync.
 
 int jbclient_roothide_init(void)
 {

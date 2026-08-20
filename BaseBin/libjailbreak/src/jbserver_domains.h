@@ -57,6 +57,27 @@ enum {
     JBS_DOPAMINE_DROP_ROOT,
 };
 
+// Domain: RootHide
+// Reachable from the Dopamine app (for UI controls) and from any process that
+// needs to query the RootHide blacklist (e.g. systemhook deciding whether to
+// inject tweaks into a blacklisted app).
+//
+// NOTE: the dispatcher in jbserver.c walks `server->domains[]` by index and
+// aborts on NULL entries, so the array MUST be densely packed. Therefore
+// JBS_DOMAIN_ROOTHIDE is set to 6 (immediately after JBS_DOMAIN_DOPAMINE=5)
+// rather than 10. If upstream Dopamine later adds domain 6, this value will
+// need to move (and the array in jbserver_global.c updated accordingly).
+#define JBS_DOMAIN_ROOTHIDE 6
+enum {
+    JBS_ROOTHIDE_INIT = 1,
+    JBS_ROOTHIDE_SET_ENABLED,
+    JBS_ROOTHIDE_IS_ENABLED,
+    JBS_ROOTHIDE_ADD_BLACKLIST,
+    JBS_ROOTHIDE_REMOVE_BLACKLIST,
+    JBS_ROOTHIDE_GET_JBROOT_PATH,
+    JBS_ROOTHIDE_APPLY_SETTINGS,
+};
+
 #define JBS_BOOMERANG_DONE 42
 
 #endif

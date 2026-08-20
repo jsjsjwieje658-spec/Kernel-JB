@@ -19,9 +19,12 @@ extern "C" {
 #endif
 
 // Path conversion functions for RootHide mode
-// Converts standard jailbreak paths to randomized RootHide paths
-const char* jbroot(const char* path);   // Convert path to jbroot (e.g., /private/preboot/UUID/jb_XXXX)
-const char* rootfs(const char* path);  // Alias for jbroot, backward compatibility
+// NOTE: previously `jbroot(path)` and `rootfs(path)` were declared here. They
+// were renamed to `roothide_sanitize_path_v2()` to avoid a name collision with
+// `jbroot.c::get_jbroot()` (no args, different meaning). The on-disk jbroot
+// path is the same for every process (set at jailbreak time by DOBootstrapper),
+// so the function is effectively a no-op.
+const char* roothide_sanitize_path_v2(const char* path);
 unsigned long long jbrand(void);       // Returns unique jailbreak session identifier
 
 // RootHide initialization and management

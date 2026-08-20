@@ -12,6 +12,7 @@
 #import "DOUIManager.h"
 #import "DOButtonCell.h"
 #import "DOHeaderCell.h"
+#import <libjailbreak/jbclient_xpc.h>
 
 static NSString * const kRootHideEnabledKey = @"RootHideEnabled";
 static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
@@ -269,7 +270,18 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
     @try {
         [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kRootHideEnabledKey];
         [[NSUserDefaults standardUserDefaults] synchronize];
-        
+
+        // Push to jbserver so launchd's gRoothideServer.enabled mirror is
+        // kept in sync.  jbclient_roothide_set_enabled will only succeed if
+        // we are the Dopamine app (enforced by jbdomain_roothide.c).
+        // Errors here are non-fatal — the local NSUserDefaults value is
+        // still authoritative for the UI, and the server will be re-pushed
+        // on next applyRootHideSettings:.
+        int r = jbclient_roothide_set_enabled(enabled);
+        if (r != 0) {
+            NSLog(@"[RootHide] jbclient_roothide_set_enabled(%d) returned %d — server may not be ready yet", enabled, r);
+        }
+
         if (specifier) {
             [self reloadSpecifier:specifier];
         }
@@ -329,10 +341,32 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
         if (_mutableBlacklist) {
             [[NSUserDefaults standardUserDefaults] setObject:_mutableBlacklist forKey:kRootHideBlacklistKey];
             [[NSUserDefaults standardUserDefaults] synchronize];
+            [self syncBlacklistToServer];
         }
     }
     @catch (NSException *exception) {
         NSLog(@"[RootHide] saveBlacklist error: %@", exception.reason);
+    }
+}
+
+// Push the current in-memory blacklist to jbserver (domain 6).
+// Each call re-sends every entry; the server treats duplicates as no-op
+// (rothide_add_blacklist returns 0 for "already exists"). This is O(N) XPC
+// calls which is fine for the expected N (~10-30 entries).
+- (void)syncBlacklistToServer
+{
+    @try {
+        for (NSString *bundleID in _mutableBlacklist) {
+            if ([bundleID isKindOfClass:[NSString class]] && bundleID.length > 0) {
+                int r = jbclient_roothide_add_blacklist([bundleID UTF8String]);
+                if (r != 0) {
+                    NSLog(@"[RootHide] add_blacklist(%@) -> %d", bundleID, r);
+                }
+            }
+        }
+    }
+    @catch (NSException *exception) {
+        NSLog(@"[RootHide] syncBlacklistToServer error: %@", exception.reason);
     }
 }
 
@@ -571,11 +605,18 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
 {
     @try {
         [self saveBlacklist];
-        
+
         NSUInteger count = self.mutableBlacklist.count;
         BOOL enabled = self.isRootHideEnabled;
-        
-        NSString *message = [NSString stringWithFormat: 
+
+        // Push enable flag + apply_settings to jbserver.
+        // We pass shouldReboot=false — the server handler intentionally
+        // ignores this argument for now (see jbdomain_roothide.c), to avoid
+        // accidentally triggering a userspace reboot during setup.
+        jbclient_roothide_set_enabled(enabled);
+        jbclient_roothide_apply_settings(false);
+
+        NSString *message = [NSString stringWithFormat:
             @"RootHide Settings Saved!\n\n"
             @"• Mode: %@\n"
             @"• Blacklisted: %lu app(s)\n\n"
