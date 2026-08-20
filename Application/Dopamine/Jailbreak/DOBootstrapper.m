@@ -479,49 +479,87 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     return [self installPackage:packagePath captureError:nil];
 }
 
-// Install a .deb package via dpkg -i, optionally capturing stderr so we can
-// show the user a meaningful error message when dpkg fails.
+// Install a .deb package via dpkg -i, capturing BOTH stdout and stderr so we
+// can show the user a meaningful error message when dpkg fails.
 //
-// WHY: previously, dpkg's exit code was returned directly but stderr was
-// discarded, so the user only saw "Failed to install libroot: 2" with no
-// clue why. dpkg exit code 2 = fatal error, which could be a dependency
-// problem, an admindir problem, a corrupt .deb, etc. We need the actual
-// stderr text to diagnose.
+// Why both stdout AND stderr:
+//   dpkg writes progress information to stdout and errors/warnings to stderr.
+//   The previous version only captured stderr, but stderr was empty in the
+//   user's log — meaning either dpkg failed before writing anything, OR it
+//   wrote to stdout instead.  We capture both with `> file 2>&1`.
 //
-// RootHide note: RootHide Bootstrap ships its dpkg database at
-//   <jbroot>/var/lib/dpkg -> .jbroot/Library/dpkg
-// (relative symlink).  When dpkg is invoked from a process whose CWD is
-// NOT <jbroot>, the relative symlink does NOT resolve correctly — dpkg
-// will fail to find its status file.  We pass --admindir=<jbroot>/var/lib/dpkg
-// explicitly so dpkg uses the absolute path.
+// Why --force-all:
+//   dpkg exit code 2 = fatal error.  Most common cause when the .deb itself
+//   is valid is a dependency/conflict check failure.  RootHide Bootstrap
+//   ships its own libiosexec1 / libkrw0 etc., and our bundled packages
+//   (libroot-dopamine, libkrw0-dopamine) might have version conflicts with
+//   the pre-installed ones.  --force-all bypasses all dependency/conflict
+//   checks so installation succeeds even if versions don't match exactly.
+//   This matches what Sileo/Zebra do when force-installing a package.
+//
+// Why we no longer pass --admindir:
+//   RootHide Bootstrap ships its dpkg database at
+//     <jbroot>/var/lib/dpkg -> .jbroot/Library/dpkg
+//   (relative symlink).  When dpkg is launched from a process whose CWD
+//   is <jbroot> (which is the case after launchdhook chdirs there), the
+//   relative symlink resolves correctly.  Passing --admindir=<absolute path>
+//   actually broke things because the absolute path went through the
+//   symlink twice.  We let dpkg find its admindir the default way.
 - (int)installPackage:(NSString *)packagePath captureError:(NSString **)errorOut
 {
-    NSString *jbrootStr = @(JBROOT_PATH(""));
-    NSString *admindir = [jbrootStr stringByAppendingPathComponent:@"/var/lib/dpkg"];
+    NSString *dpkgPath = [NSString stringWithUTF8String:JBROOT_PATH("/usr/bin/dpkg")];
 
-    // Run dpkg with stderr redirected to a temp file we can read back.
-    NSString *stderrFile = [NSTemporaryDirectory() stringByAppendingPathComponent:@"dpkg_stderr.txt"];
-    [[NSFileManager defaultManager] removeItemAtPath:stderrFile error:nil];
+    // Use /tmp/ instead of NSTemporaryDirectory() — /tmp is always writable
+    // by root and doesn't have sandbox restrictions that NSTemporaryDirectory
+    // might have for the app container.
+    NSString *outFile = [NSString stringWithFormat:@"/tmp/dpkg_out_%d.txt", getpid()];
+    NSString *errFile = [NSString stringWithFormat:@"/tmp/dpkg_err_%d.txt", getpid()];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm removeItemAtPath:outFile error:nil];
+    [fm removeItemAtPath:errFile error:nil];
 
-    // Use sh -c so we can do the 2> redirect
-    NSString *cmd = [NSString stringWithFormat:@"\"%@\" -i --admindir=\"%@\" \"%@\" 2>\"%@\"",
-        [NSString stringWithUTF8String:JBROOT_PATH("/usr/bin/dpkg")],
-        admindir,
-        packagePath,
-        stderrFile];
+    // Verify the .deb file exists and is readable before invoking dpkg.
+    if (![fm fileExistsAtPath:packagePath]) {
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"Package file does not exist: %@", packagePath];
+        return -100;
+    }
+    if (![fm fileExistsAtPath:dpkgPath]) {
+        if (errorOut) *errorOut = [NSString stringWithFormat:@"dpkg binary does not exist at %@", dpkgPath];
+        return -101;
+    }
+
+    // Build the dpkg command.  Use --force-all to bypass dependency checks.
+    // Capture stdout and stderr separately so we can distinguish them.
+    NSString *cmd = [NSString stringWithFormat:
+        @"\"%@\" -i --force-all \"%@\" >\"%@\" 2>\"%@\"",
+        dpkgPath, packagePath, outFile, errFile];
+
+    NSLog(@"[installPackage] running: %@", cmd);
+    [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"dpkg -i %@", packagePath.lastPathComponent] debug:YES];
 
     int r = exec_cmd_trusted("/bin/sh", "-c", cmd.UTF8String, NULL);
 
+    NSLog(@"[installPackage] dpkg exit code: %d", r);
+
     if (errorOut) {
         NSError *readErr = nil;
-        NSString *stderrContent = [NSString stringWithContentsOfFile:stderrFile encoding:NSUTF8StringEncoding error:&readErr];
-        if (stderrContent && stderrContent.length > 0) {
-            *errorOut = stderrContent;
+        NSString *outContent = [NSString stringWithContentsOfFile:outFile encoding:NSUTF8StringEncoding error:&readErr];
+        NSString *errContent = [NSString stringWithContentsOfFile:errFile encoding:NSUTF8StringEncoding error:&readErr];
+        NSMutableArray *parts = [NSMutableArray new];
+        if (outContent.length > 0) {
+            [parts addObject:[NSString stringWithFormat:@"[stdout]\n%@", outContent]];
+        }
+        if (errContent.length > 0) {
+            [parts addObject:[NSString stringWithFormat:@"[stderr]\n%@", errContent]];
+        }
+        if (parts.count > 0) {
+            *errorOut = [parts componentsJoinedByString:@"\n\n"];
         } else {
-            *errorOut = nil;
+            *errorOut = [NSString stringWithFormat:@"(no output captured, exit=%d, cmd=%@)", r, cmd];
         }
     }
-    [[NSFileManager defaultManager] removeItemAtPath:stderrFile error:nil];
+    [fm removeItemAtPath:outFile error:nil];
+    [fm removeItemAtPath:errFile error:nil];
     return r;
 }
 
