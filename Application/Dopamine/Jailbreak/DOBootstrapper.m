@@ -580,6 +580,62 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     }
 
     if (patchesApplied == 0) {
+        // No patches applied in this run.  Check whether the dylib has
+        // ALREADY been patched (idempotent re-entry) by scanning __text
+        // for the patch stubs we would have written.  If found, this
+        // means a previous jailbreak already patched the dylib — return
+        // success so the caller doesn't abort.
+        BOOL alreadyPatched = NO;
+        for (uint32_t i = 0; i < nfat && i < 8 && !alreadyPatched; i++) {
+            NSUInteger archEntryOff2 = 8 + i * 20;
+            if (archEntryOff2 + 20 > length) break;
+            uint32_t archOffset2 = rh_u32be(bytes + archEntryOff2 + 8);
+            if (archOffset2 + 32 > length) continue;
+            uint32_t ncmds2 = rh_u32le(bytes + archOffset2 + 16);
+            NSUInteger cmdOff2 = archOffset2 + 32;
+            for (uint32_t j = 0; j < ncmds2; j++) {
+                if (cmdOff2 + 8 > length) break;
+                uint32_t cmd2     = rh_u32le(bytes + cmdOff2);
+                uint32_t cmdsize2 = rh_u32le(bytes + cmdOff2 + 4);
+                if (cmdsize2 < 8 || cmdOff2 + cmdsize2 > length) break;
+                if (cmd2 == 0x19 && cmdsize2 >= 72) {
+                    uint32_t nsects2 = rh_u32le(bytes + cmdOff2 + 64);
+                    NSUInteger sectOff2 = cmdOff2 + 72;
+                    for (uint32_t s = 0; s < nsects2; s++) {
+                        if (sectOff2 + 80 > length) break;
+                        char sn[17] = {0}, sg[17] = {0};
+                        memcpy(sn, bytes + sectOff2, 16);
+                        memcpy(sg, bytes + sectOff2 + 16, 16);
+                        if (strcmp(sg, "__TEXT") == 0 && strcmp(sn, "__text") == 0) {
+                            uint32_t textFileOff2 = rh_u32le(bytes + sectOff2 + 48);
+                            uint64_t textSize2    = rh_u64le(bytes + sectOff2 + 40);
+                            NSUInteger start = archOffset2 + textFileOff2;
+                            NSUInteger end   = start + (NSUInteger)textSize2;
+                            if (end > length) end = length;
+                            // Search for the arm64 patch stub "mov w0,#1; ret" = 20 00 80 52 c0 03 5f d6
+                            // or arm64e stub "pacibsp; mov w0,#1; retab" = 7f 23 03 d5 20 00 80 52 ff 0f 5f d6
+                            for (NSUInteger p = start; p + 8 <= end; p++) {
+                                if (memcmp(bytes + p, patch_arm64_is_jbroot, 8) == 0) {
+                                    alreadyPatched = YES;
+                                    break;
+                                }
+                                if (p + 12 <= end && memcmp(bytes + p, patch_arm64e_is_jbroot, 12) == 0) {
+                                    alreadyPatched = YES;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                        sectOff2 += 80;
+                    }
+                }
+                cmdOff2 += cmdsize2;
+            }
+        }
+        if (alreadyPatched) {
+            NSLog(@"[RootHide] roothideinit.dylib already patched (idempotent), returning success");
+            return nil;
+        }
         return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : @"Failed to patch any architecture in roothideinit.dylib"}];
     }
 
@@ -994,7 +1050,29 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             completion(error);
             return;
         }
-        
+
+        // ROOTHIDE FIX: Always re-patch roothideinit.dylib and libroothide.dylib,
+        // regardless of whether we extracted the bootstrap this time.
+        //
+        // WHY: A previous jailbreak attempt with an OLDER IPA may have left
+        // UNPATCHED versions of these dylibs on disk (because the old IPA's
+        // patcher had bugs and silently skipped patching).  The marker file
+        // .installed_dopamine is written BEFORE the patcher runs in
+        // extractBootstrap:withCompletion:, so the next jailbreak skips
+        // extraction entirely — and skips the patcher too.
+        //
+        // Re-patching is idempotent: if the dylibs are already patched, the
+        // prologue/cbnz pattern check will fail to match and the patcher
+        // will simply log "skipping" without modifying anything.
+        //
+        // Without this call, a user who upgraded from a buggy IPA would be
+        // permanently stuck: the patcher would never run again because the
+        // bootstrap is already extracted.
+        NSError *patchError = [self patchRootHideAssertions];
+        if (patchError) {
+            NSLog(@"[RootHide] patchRootHideAssertions (post-bootstrap) failed: %@", patchError);
+        }
+
         NSString *defaultSources = @"Types: deb\n"
             @"URIs: https://repo.chariz.com/\n"
             @"Suites: ./\n"
