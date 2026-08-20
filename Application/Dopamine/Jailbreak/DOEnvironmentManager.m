@@ -237,11 +237,15 @@ extern char **environ;
                 // runUnsandboxed which uses jbclient_root_set_mac_label(1, -1)
                 // to temporarily disable the MAC label, allowing the mkdir to
                 // succeed.
+                __block NSError *blockError = nil;
                 [self runAsRoot:^{
                     [self runUnsandboxed:^{
-                        [[NSFileManager defaultManager] createDirectoryAtPath:jailbreakRootPath withIntermediateDirectories:YES attributes:nil error:&error];
+                        [[NSFileManager defaultManager] createDirectoryAtPath:jailbreakRootPath withIntermediateDirectories:YES attributes:nil error:&blockError];
                     }];
                 }];
+                if (blockError) {
+                    error = blockError;
+                }
             }
         }
 
