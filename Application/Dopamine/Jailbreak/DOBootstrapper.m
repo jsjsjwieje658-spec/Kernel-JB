@@ -476,14 +476,53 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
 - (int)installPackage:(NSString *)packagePath
 {
-    if (getuid() == 0) {
-        return exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"), "-i", packagePath.fileSystemRepresentation, NULL);
+    return [self installPackage:packagePath captureError:nil];
+}
+
+// Install a .deb package via dpkg -i, optionally capturing stderr so we can
+// show the user a meaningful error message when dpkg fails.
+//
+// WHY: previously, dpkg's exit code was returned directly but stderr was
+// discarded, so the user only saw "Failed to install libroot: 2" with no
+// clue why. dpkg exit code 2 = fatal error, which could be a dependency
+// problem, an admindir problem, a corrupt .deb, etc. We need the actual
+// stderr text to diagnose.
+//
+// RootHide note: RootHide Bootstrap ships its dpkg database at
+//   <jbroot>/var/lib/dpkg -> .jbroot/Library/dpkg
+// (relative symlink).  When dpkg is invoked from a process whose CWD is
+// NOT <jbroot>, the relative symlink does NOT resolve correctly — dpkg
+// will fail to find its status file.  We pass --admindir=<jbroot>/var/lib/dpkg
+// explicitly so dpkg uses the absolute path.
+- (int)installPackage:(NSString *)packagePath captureError:(NSString **)errorOut
+{
+    NSString *jbrootStr = @(JBROOT_PATH(""));
+    NSString *admindir = [jbrootStr stringByAppendingPathComponent:@"/var/lib/dpkg"];
+
+    // Run dpkg with stderr redirected to a temp file we can read back.
+    NSString *stderrFile = [NSTemporaryDirectory() stringByAppendingPathComponent:@"dpkg_stderr.txt"];
+    [[NSFileManager defaultManager] removeItemAtPath:stderrFile error:nil];
+
+    // Use sh -c so we can do the 2> redirect
+    NSString *cmd = [NSString stringWithFormat:@"\"%@\" -i --admindir=\"%@\" \"%@\" 2>\"%@\"",
+        [NSString stringWithUTF8String:JBROOT_PATH("/usr/bin/dpkg")],
+        admindir,
+        packagePath,
+        stderrFile];
+
+    int r = exec_cmd_trusted("/bin/sh", "-c", cmd.UTF8String, NULL);
+
+    if (errorOut) {
+        NSError *readErr = nil;
+        NSString *stderrContent = [NSString stringWithContentsOfFile:stderrFile encoding:NSUTF8StringEncoding error:&readErr];
+        if (stderrContent && stderrContent.length > 0) {
+            *errorOut = stderrContent;
+        } else {
+            *errorOut = nil;
+        }
     }
-    else {
-        // idk why but waitpid sometimes fails and this returns -1, so we just ignore the return value
-        exec_cmd(JBROOT_PATH("/basebin/jbctl"), "internal", "install_pkg", packagePath.fileSystemRepresentation, NULL);
-        return 0;
-    }
+    [[NSFileManager defaultManager] removeItemAtPath:stderrFile error:nil];
+    return r;
 }
 
 - (int)uninstallPackageWithIdentifier:(NSString *)identifier
@@ -571,20 +610,23 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
         if (shouldInstallLaunchctl) {
             NSString *launchctlPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"launchctl_1_1.2.0_iphoneos-arm64e.deb"];
-            int r = [self installPackage:launchctlPath];
-            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install launchctl: %d\n", r]}];
+            NSString *errMsg = nil;
+            int r = [self installPackage:launchctlPath captureError:&errMsg];
+            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install launchctl: %d\n%@\n", r, errMsg ?: @""]}];
         }
 
         if (shouldInstallLibroot) {
             NSString *librootPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libroot.deb"];
-            int r = [self installPackage:librootPath];
-            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install libroot: %d\n", r]}];
+            NSString *errMsg = nil;
+            int r = [self installPackage:librootPath captureError:&errMsg];
+            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install libroot: %d\n%@\n", r, errMsg ?: @""]}];
         }
         
         if (shouldInstallLibkrw) {
             NSString *libkrwPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libkrw-dopamine.deb"];
-            int r = [self installPackage:libkrwPath];
-            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install the libkrw plugin: %d\n", r]}];
+            NSString *errMsg = nil;
+            int r = [self installPackage:libkrwPath captureError:&errMsg];
+            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install the libkrw plugin: %d\n%@\n", r, errMsg ?: @""]}];
         }
         
         if (shouldInstallBasebinLink) {
@@ -604,8 +646,9 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             }
             
             NSString *basebinLinkPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"basebin-link.deb"];
-            int r = [self installPackage:basebinLinkPath];
-            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install basebin link: %d\n", r]}];
+            NSString *errMsg = nil;
+            int r = [self installPackage:basebinLinkPath captureError:&errMsg];
+            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install basebin link: %d\n%@\n", r, errMsg ?: @""]}];
         }
 
         // RootHide Manager app auto-install.  We look for the .deb under
