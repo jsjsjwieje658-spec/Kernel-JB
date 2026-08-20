@@ -211,14 +211,13 @@ extern char **environ;
             NSString *oldJbroot = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
             // Create new path then move contents
             [[NSFileManager defaultManager] createDirectoryAtPath:jailbreakRootPath withIntermediateDirectories:YES attributes:nil error:nil];
-            NSDirectoryEnumerator<NSURL *> *enumerator = [[NSFileManager defaultManager]
-                enumeratorAtURL:[NSURL fileURLWithPath:oldJbroot]
-                includingPropertiesForKeys:nil options:0 error:nil];
-            for (NSURL *url in enumerator) {
-                NSString *dest = [jailbreakRootPath stringByAppendingPathComponent:url.lastPathComponent];
-                // Replace existing
+            // Use contentsOfDirectoryAtPath (it's reliably declared on all SDKs)
+            NSArray *oldItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:oldJbroot error:nil];
+            for (NSString *itemName in oldItems) {
+                NSString *src = [oldJbroot stringByAppendingPathComponent:itemName];
+                NSString *dest = [jailbreakRootPath stringByAppendingPathComponent:itemName];
                 [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
-                [[NSFileManager defaultManager] moveItemAtPath:url.path toPath:dest error:nil];
+                [[NSFileManager defaultManager] moveItemAtPath:src toPath:dest error:nil];
             }
             // Remove the old empty container dir (and its parent dopamine-XXX dir)
             NSString *oldParent = [oldJbroot stringByDeletingLastPathComponent];
