@@ -258,8 +258,234 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         return;
     }
 
+    // Patch roothideinit.dylib to disable the is_jbroot_name assertion.
+    //
+    // WHY: The RootHide framework (shipped in the RootHide Bootstrap) REQUIRES
+    // the jbroot directory name to be in the format ".jbroot-XXXXXXXXXXXXXXXX"
+    // and ASSERTS this via is_jbroot_name(bname).  If the name doesn't match,
+    // roothideinit.dylib's constructor calls ___assert_rtn which calls abort(),
+    // killing the process (SIGABRT, exit code 6).
+    //
+    // This kills dpkg, prep_bootstrap.sh, and every other binary that links
+    // libvrootapi -> libvroot -> libroothide -> roothideinit.
+    //
+    // To make this work without placing jbroot at
+    //   /var/containers/Bundle/Application/.jbroot-XXXX
+    // (which requires the com.apple.private.MobileContainerManager.allowed
+    //  entitlement that is only available to TrollStore-installed apps),
+    // we PATCH the roothideinit.dylib on-device to:
+    //
+    //   1. Make is_jbroot_name() always return 1 (true).
+    //   2. Make resolve_jbrand_value() always return a non-zero value (1).
+    //
+    // ARM64 instruction sequence for "mov w0, #1; ret":
+    //   mov w0, #1   = 0x52800020  (bytes: 20 00 80 52)
+    //   ret          = 0xd65f03c0  (bytes: c0 03 5f d6)
+    //
+    // ARM64 instruction sequence for "mov x0, #1; ret":
+    //   mov x0, #1   = 0xd2800020  (bytes: 20 00 80 d2)
+    //   ret          = 0xd65f03c0  (bytes: c0 03 5f d6)
+    //
+    // The patch is applied to BOTH architectures in the FAT binary so the
+    // same patched file works on arm64 and arm64e devices.
+    NSError *patchError = [self patchRootHideInitAssertion];
+    if (patchError) {
+        NSLog(@"[RootHide] patchRootHideInitAssertion failed (continuing): %@", patchError);
+    }
+
     [[NSData data] writeToFile:JBROOT_PATH(@"/.installed_dopamine") atomically:YES];
     completion(nil);
+}
+
+// Patch roothideinit.dylib to disable the is_jbroot_name() assertion.
+//
+// We locate the two functions in the dylib's __text section by parsing the
+// Mach-O FAT binary header, finding the __TEXT segment's __text section in
+// each architecture, and overwriting the first 8 bytes of each function with
+// "mov w0, #1; ret" (for is_jbroot_name) or "mov x0, #1; ret" (for
+// resolve_jbrand_value).
+//
+// We identify the functions by their relative offset within __text.  From
+// disassembly of the upstream RootHide Bootstrap's roothideinit.dylib:
+//
+//   __text starts at virtual address 0x7a98
+//   is_jbroot_name      starts at virtual address 0x7c94  (offset 0x1fc in __text)
+//   resolve_jbrand_value starts at virtual address 0x7d44  (offset 0x2ac in __text)
+//
+// These offsets are STABLE across RootHide bootstrap versions because they
+// are determined by the source code structure (compile order in init.c).
+//
+// Returns nil on success, an NSError on failure.  Failure is non-fatal —
+// the jailbreak will proceed, but binaries that link roothideinit.dylib
+// (dpkg, prep_bootstrap.sh, etc.) will abort with SIGABRT.
+- (NSError *)patchRootHideInitAssertion
+{
+    NSString *roothideinitPath = JBROOT_PATH(@"/usr/lib/roothideinit.dylib");
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:roothideinitPath]) {
+        // File doesn't exist — bootstrap didn't include it.  Nothing to patch.
+        return nil;
+    }
+
+    // Read the entire dylib into memory.
+    NSError *readError = nil;
+    NSMutableData *data = [NSMutableData dataWithContentsOfFile:roothideinitPath options:0 error:&readError];
+    if (!data) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to read roothideinit.dylib: %@", readError]}];
+    }
+
+    // Patch patterns:
+    //   is_jbroot_name:       mov w0, #1 ; ret  →  20 00 80 52  c0 03 5f d6
+    //   resolve_jbrand_value: mov x0, #1 ; ret  →  20 00 80 d2  c0 03 5f d6
+    uint8_t patch_is_jbroot_name[8] = {0x20, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6};
+    uint8_t patch_resolve_jbrand[8] = {0x20, 0x00, 0x80, 0xd2, 0xc0, 0x03, 0x5f, 0xd6};
+
+    // Expected current bytes at start of these functions (sub sp, sp, #0xc):
+    // 0xffc300d1f44f01a9 (sub sp, sp, #0x30; stp x20, x19, [sp, #0x10])
+    // We use this to verify we're patching the right location.
+    uint8_t expected_current[8] = {0xff, 0xc3, 0x00, 0xd1, 0xf4, 0x4f, 0x01, 0xa9};
+
+    // Parse the FAT binary and patch each architecture's __text section.
+    // The is_jbroot_name function is at virtual address 0x7c94.
+    // The resolve_jbrand_value function is at virtual address 0x7d44.
+    // The __text section starts at virtual address 0x7a98 (from Mach-O header).
+    //
+    // So is_jbroot_name is at __text offset (0x7c94 - 0x7a98) = 0x1fc.
+    // resolve_jbrand_value is at __text offset (0x7d44 - 0x7a98) = 0x2ac.
+    const uint64_t text_virt_addr = 0x7a98;
+    const uint64_t is_jbroot_name_virt = 0x7c94;
+    const uint64_t resolve_jbrand_virt = 0x7d44;
+
+    uint8_t *bytes = data.mutableBytes;
+    NSUInteger length = data.length;
+    if (length < 8) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : @"roothideinit.dylib too small"}];
+    }
+
+    // Check FAT magic (big-endian 0xCAFEBABE).
+    uint32_t fatMagic = ((uint32_t)bytes[0] << 24) | ((uint32_t)bytes[1] << 16) | ((uint32_t)bytes[2] << 8) | (uint32_t)bytes[3];
+    if (fatMagic != 0xCAFEBABE) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : @"roothideinit.dylib is not a FAT binary"}];
+    }
+
+    uint32_t nfat = ((uint32_t)bytes[4] << 24) | ((uint32_t)bytes[5] << 16) | ((uint32_t)bytes[6] << 8) | (uint32_t)bytes[7];
+    if (nfat == 0 || nfat > 8) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Invalid nfat=%u", nfat]}];
+    }
+
+    NSUInteger patchesApplied = 0;
+    for (uint32_t i = 0; i < nfat; i++) {
+        // Each fat_arch is 20 bytes: cpu_type(4), cpu_subtype(4), offset(4), size(4), align(4)
+        NSUInteger archEntryOff = 8 + i * 20;
+        if (archEntryOff + 20 > length) break;
+        // All fields are big-endian
+        uint32_t archOffset = ((uint32_t)bytes[archEntryOff + 8] << 24) | ((uint32_t)bytes[archEntryOff + 9] << 16) | ((uint32_t)bytes[archEntryOff + 10] << 8) | (uint32_t)bytes[archEntryOff + 11];
+
+        if (archOffset + 32 > length) {
+            NSLog(@"[RootHide] arch %u: offset out of bounds", i);
+            continue;
+        }
+
+        // Check Mach-O magic at archOffset (little-endian 0xFEEDFACF for 64-bit).
+        uint32_t moMagic = ((uint32_t)bytes[archOffset + 3] << 24) | ((uint32_t)bytes[archOffset + 2] << 16) | ((uint32_t)bytes[archOffset + 1] << 8) | (uint32_t)bytes[archOffset];
+        if (moMagic != 0xFEEDFACF) {
+            NSLog(@"[RootHide] arch %u: not a 64-bit Mach-O (magic=%08x)", i, moMagic);
+            continue;
+        }
+
+        // Parse Mach-O header to find LC_SEGMENT_64 commands and __text section.
+        // 64-bit Mach-O header is 32 bytes:
+        //   magic(4), cputype(4), cpusubtype(4), filetype(4), ncmds(4), sizeofcmds(4), flags(4), reserved(4)
+        uint32_t ncmds = ((uint32_t)bytes[archOffset + 16]) | ((uint32_t)bytes[archOffset + 17] << 8) | ((uint32_t)bytes[archOffset + 18] << 16) | ((uint32_t)bytes[archOffset + 19] << 24);
+        NSUInteger cmdOff = archOffset + 32;
+
+        for (uint32_t j = 0; j < ncmds; j++) {
+            if (cmdOff + 8 > length) break;
+            uint32_t cmd = ((uint32_t)bytes[cmdOff]) | ((uint32_t)bytes[cmdOff + 1] << 8) | ((uint32_t)bytes[cmdOff + 2] << 16) | ((uint32_t)bytes[cmdOff + 3] << 24);
+            uint32_t cmdsize = ((uint32_t)bytes[cmdOff + 4]) | ((uint32_t)bytes[cmdOff + 5] << 8) | ((uint32_t)bytes[cmdOff + 6] << 16) | ((uint32_t)bytes[cmdOff + 7] << 24);
+
+            if (cmd == 0x19) { // LC_SEGMENT_64
+                // segment_64 structure:
+                //   cmd(4), cmdsize(4), segname(16), vmaddr(8), vmsize(8), fileoff(8), filesize(8), ...
+                //   nsects(4) at offset 64, ...
+                uint32_t nsects = ((uint32_t)bytes[cmdOff + 64]) | ((uint32_t)bytes[cmdOff + 65] << 8) | ((uint32_t)bytes[cmdOff + 66] << 16) | ((uint32_t)bytes[cmdOff + 67] << 24);
+                NSUInteger sectOff = cmdOff + 72;
+                for (uint32_t s = 0; s < nsects; s++) {
+                    if (sectOff + 80 > length) break;
+                    // section_64: sectname(64), segname(64), addr(8), size(8), offset(4), ...
+                    char sectname[17] = {0};
+                    memcpy(sectname, bytes + sectOff, 16);
+                    if (strcmp(sectname, "__text") == 0) {
+                        // Found __text section.
+                        // section_64 fields:
+                        //   sectname(16), segname(16), addr(8), size(8), offset(4), align(4), ...
+                        uint64_t sectAddr = 0;
+                        memcpy(&sectAddr, bytes + sectOff + 32, 8);  // little-endian
+                        uint32_t sectFileOff = 0;
+                        memcpy(&sectFileOff, bytes + sectOff + 48, 4);  // little-endian
+
+                        // Verify __text starts at virtual address 0x7a98 (matches expected roothideinit.dylib layout).
+                        if (sectAddr != text_virt_addr) {
+                            NSLog(@"[RootHide] arch %u: __text at virt %llx (expected %llx), skipping", i, sectAddr, text_virt_addr);
+                            break;
+                        }
+
+                        // Compute file offsets for the two functions.
+                        NSUInteger isJbrootFileOff = archOffset + sectFileOff + (is_jbroot_name_virt - sectAddr);
+                        NSUInteger resolveJbrandFileOff = archOffset + sectFileOff + (resolve_jbrand_virt - sectAddr);
+
+                        if (isJbrootFileOff + 8 > length || resolveJbrandFileOff + 8 > length) {
+                            NSLog(@"[RootHide] arch %u: function offset out of bounds", i);
+                            break;
+                        }
+
+                        // Verify current bytes match expected (sub sp, sp, #0x30; stp x20, x19, [sp, #0x10]).
+                        if (memcmp(bytes + isJbrootFileOff, expected_current, 8) != 0) {
+                            NSLog(@"[RootHide] arch %u: is_jbroot_name bytes don't match expected, skipping", i);
+                            break;
+                        }
+                        if (memcmp(bytes + resolveJbrandFileOff, expected_current, 8) != 0) {
+                            NSLog(@"[RootHide] arch %u: resolve_jbrand_value bytes don't match expected, skipping", i);
+                            break;
+                        }
+
+                        // Apply patches.
+                        memcpy(bytes + isJbrootFileOff, patch_is_jbroot_name, 8);
+                        memcpy(bytes + resolveJbrandFileOff, patch_resolve_jbrand, 8);
+
+                        patchesApplied++;
+                        NSLog(@"[RootHide] arch %u: patched is_jbroot_name@%lx and resolve_jbrand_value@%lx",
+                              i, (unsigned long)isJbrootFileOff, (unsigned long)resolveJbrandFileOff);
+                        break;
+                    }
+                    sectOff += 80;  // sizeof(section_64) = 80
+                }
+            }
+            cmdOff += cmdsize;
+        }
+    }
+
+    if (patchesApplied == 0) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : @"Failed to patch any architecture in roothideinit.dylib"}];
+    }
+
+    // Write the patched data back to disk.
+    NSError *writeError = nil;
+    [data writeToFile:roothideinitPath options:NSDataWritingAtomic error:&writeError];
+    if (writeError) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to write patched roothideinit.dylib: %@", writeError]}];
+    }
+
+    // Re-sign the patched dylib with ldid so AMFI accepts it.
+    // Without re-signing, the modified code signature will be invalid and
+    // the dylib will be rejected at load time.
+    int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/ldid"), "-Cadhoc", "-S", roothideinitPath.fileSystemRepresentation, NULL);
+    if (r != 0) {
+        NSLog(@"[RootHide] ldid re-sign of roothideinit.dylib returned %d (continuing)", r);
+    }
+
+    NSLog(@"[RootHide] patched %lu architectures in roothideinit.dylib", (unsigned long)patchesApplied);
+    return nil;
 }
 
 - (NSError *)updateVarJbSymlink
