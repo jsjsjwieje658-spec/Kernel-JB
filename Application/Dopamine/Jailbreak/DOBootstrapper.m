@@ -538,13 +538,13 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
         for (NSUInteger off = textStart; off + 8 <= textEnd; off += 4) {
             if (memcmp(bytes + off, prologue, 8) == 0) {
-                if (matchCount == 0) {
+                matchCount++;
+                if (matchCount == 1) {
                     firstMatchOff = off;
-                } else if (matchCount == 1) {
+                } else if (matchCount == 2) {
                     secondMatchOff = off;
                     break;  // we have both — no need to scan further
                 }
-                matchCount++;
             }
         }
 
@@ -708,11 +708,17 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         // The symbol may be exported as `_jbrootat_alloc` or
         // `__private_jbrootat_alloc` (leading-underscore convention varies).
         // We accept any defined symbol whose name contains "jbrootat_alloc".
+        //
+        // IMPORTANT: In a FAT Mach-O, the LC_SYMTAB symoff/stroff fields
+        // are RELATIVE TO THE SLICE START (archOffset), NOT absolute file
+        // offsets.  We must add archOffset whenever we dereference them.
         uint64_t funcVirt = 0;
         BOOL foundFunc = NO;
         if (haveSymtab) {
+            NSUInteger symtabAbs = archOffset + (NSUInteger)symtabOff;
+            NSUInteger strtabAbs = archOffset + (NSUInteger)strtabOff;
             for (uint32_t k = 0; k < symtabNsyms; k++) {
-                NSUInteger nlistOff = symtabOff + (NSUInteger)k * 16;
+                NSUInteger nlistOff = symtabAbs + (NSUInteger)k * 16;
                 if (nlistOff + 16 > length) break;
                 uint32_t strx    = rh_u32le(bytes + nlistOff);
                 uint8_t  n_type  = bytes[nlistOff + 4];
@@ -722,9 +728,9 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                 // N_TYPE mask = 0x0e → N_SECT (defined in some section).
                 if ((n_type & 0x0e) != 0x0e) continue;
                 if (n_value == 0) continue;
-                if (strtabOff + strx >= length) continue;
+                if (strtabAbs + strx >= length) continue;
 
-                NSUInteger nameStart = strtabOff + strx;
+                NSUInteger nameStart = strtabAbs + strx;
                 NSUInteger nameEnd = nameStart;
                 while (nameEnd < length && bytes[nameEnd] != 0) nameEnd++;
                 if (nameEnd <= nameStart) continue;
