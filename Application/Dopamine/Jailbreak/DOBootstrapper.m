@@ -323,47 +323,21 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 //    that fails because roothideinit constructs a non-existent path.
 //
 // Both patches are applied to ALL architectures in the FAT binary.
+// ROOTHIDE FIX: With the correct jbroot path format (.jbroot-XXXXXXXXXXXXXXXX),
+// roothideinit.dylib's is_jbroot_name() and resolve_jbrand_value() will
+// naturally return true — NO patching needed!
+//
+// The previous approach of patching the dylibs was a workaround for using
+// the wrong jbroot path (Dopamine rootless style instead of RootHide style).
+// Now that we use the correct RootHide path format, all the patcher code
+// (patchRoothideInitDylib, patchLibroothideDylib, restoreRootHideDylibsFromBundle,
+// resignPatchedDylibs, trust-caching) is NO LONGER NEEDED.
+//
+// This function is kept as a no-op for backward compatibility with any
+// callers that still reference it.
 - (NSError *)patchRootHideAssertions
 {
-    NSError *error = nil;
-
-    // STEP 0: Restore the RootHide dylibs to a known-good state by
-    // re-extracting them fresh from the bootstrap tarball bundled in the IPA.
-    //
-    // WHY: A previous jailbreak attempt with a buggy IPA (commits 9a75f89 /
-    // 41f5b87) may have left the on-disk dylibs in a CORRUPTED state —
-    // the buggy patcher wrote NOPs at the wrong offsets because the symtab
-    // offset was being read as absolute instead of slice-relative.  When
-    // the user upgrades to a NEW IPA with the corrected patcher, the
-    // marker file .installed_dopamine already exists, so the bootstrap
-    // is NOT re-extracted → the corrupted dylibs are still on disk → the
-    // new patcher scans them and finds "no bl+cbnz pattern" because the
-    // cbnz instructions have already been replaced with NOPs by the old
-    // buggy code at wrong locations.
-    //
-    // SOLUTION: Always overwrite roothideinit.dylib and libroothide.dylib
-    // with pristine copies extracted from the IPA's bootstrap tarball,
-    // BEFORE running the patcher.  This guarantees the patcher sees the
-    // original unmodified bytes regardless of what previous attempts did.
-    NSError *restoreError = [self restoreRootHideDylibsFromBundle];
-    if (restoreError) {
-        NSLog(@"[RootHide] restoreRootHideDylibsFromBundle (non-fatal): %@", restoreError);
-        // Continue anyway — patcher will still try to patch whatever's on disk.
-    }
-
-    // Patch 1: roothideinit.dylib
-    error = [self patchRoothideInitDylib];
-    if (error) {
-        NSLog(@"[RootHide] patchRoothideInitDylib: %@", error);
-        // Non-fatal — continue
-    }
-
-    // Patch 2: libroothide.dylib
-    error = [self patchLibroothideDylib];
-    if (error) {
-        NSLog(@"[RootHide] patchLibroothideDylib: %@", error);
-    }
-
+    NSLog(@"[RootHide] Using RootHide-compatible jbroot path — no dylib patching needed");
     return nil;
 }
 

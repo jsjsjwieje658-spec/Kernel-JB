@@ -97,42 +97,57 @@ extern char **environ;
     return [[self privatePrebootPath] stringByAppendingPathComponent:bootManifestString];
 }
 
+// ROOTHIDE FIX: Generate a JBRAND matching RootHide format.
+// RootHide roothideinit.dylib requires jbroot dir name = ".jbroot-XXXXXXXXXXXXXXXX"
+// (16 hex uppercase, byte 0 = XOR checksum of bytes 1..7).
+static NSString *generateRootHideJBRAND(void)
+{
+    uint64_t value = ((uint64_t)arc4random()) | ((uint64_t)arc4random() << 32);
+    uint8_t check = (value >> 8) ^ (value >> 16) ^ (value >> 24) ^
+                    (value >> 32) ^ (value >> 40) ^ (value >> 48) ^ (value >> 56);
+    uint64_t jbrand = (value & ~0xFFULL) | check;
+    return [NSString stringWithFormat:@"%016llX", jbrand];
+}
+
+static BOOL checkRootHideJBRAND(NSString *str)
+{
+    if (str.length != 16) return NO;
+    const char *cstr = str.UTF8String;
+    char *endp = NULL;
+    unsigned long long value = strtoull(cstr, &endp, 16);
+    if (!endp || *endp != '\0') return NO;
+    uint8_t check = (value >> 8) ^ (value >> 16) ^ (value >> 24) ^
+                    (value >> 32) ^ (value >> 40) ^ (value >> 48) ^ (value >> 56);
+    return check == (uint8_t)value;
+}
+
 - (void)locateJailbreakRoot
 {
     if (!gSystemInfo.jailbreakInfo.rootPath) {
-        NSString *activePrebootPath = [self activePrebootPath];
-
+        // ROOTHIDE: jbroot is at /var/containers/Bundle/Application/.jbroot-XXXXXXXXXXXXXXXX
+        // This path format is REQUIRED by roothideinit.dylib is_jbroot_name().
+        NSString *jbrootSearchPath = @"/var/containers/Bundle/Application";
         NSString *randomizedJailbreakPath;
 
-        // First attempt at finding jailbreak root, look for Dopamine 2.x path
-        for (NSString *subItem in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:activePrebootPath error:nil]) {
-            if (subItem.length == 15 && [subItem hasPrefix:@"dopamine-"]) {
-                randomizedJailbreakPath = [activePrebootPath stringByAppendingPathComponent:subItem];
-                break;
+        for (NSString *subItem in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbrootSearchPath error:nil]) {
+            if (subItem.length == 23 && [subItem hasPrefix:@".jbroot-"]) {
+                NSString *jbrandStr = [subItem substringFromIndex:8];
+                if (checkRootHideJBRAND(jbrandStr)) {
+                    randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:subItem];
+                    break;
+                }
             }
         }
 
+        // Legacy migration: old Dopamine path in /private/preboot
         if (!randomizedJailbreakPath) {
-            // Second attempt at finding jailbreak root, look for Dopamine 1.x path, but as other jailbreaks use it too, make sure it is Dopamine
-            // Some other jailbreaks also commit the sin of creating .installed_dopamine, for these we try to filter them out by checking for their installed_ file
-            // If we find this and are sure it's from Dopamine 1.x, rename it so all Dopamine 2.x users will have the same path
+            NSString *activePrebootPath = [self activePrebootPath];
             for (NSString *subItem in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:activePrebootPath error:nil]) {
-                if (subItem.length == 9 && [subItem hasPrefix:@"jb-"]) {
-                    NSString *candidateLegacyPath = [activePrebootPath stringByAppendingPathComponent:subItem];
-
-                    BOOL installedDopamine = [[NSFileManager defaultManager] fileExistsAtPath:[candidateLegacyPath stringByAppendingPathComponent:@"procursus/.installed_dopamine"]];
-
-                    if (installedDopamine) {
-                        // Hopefully all other jailbreaks that use jb-<UUID>?
-                        // These checks exist because of dumb users (and jailbreak developers) creating .installed_dopamine on jailbreaks that are NOT dopamine...
-                        BOOL installedNekoJB = [[NSFileManager defaultManager] fileExistsAtPath:[candidateLegacyPath stringByAppendingPathComponent:@"procursus/.installed_nekojb"]];
-                        BOOL installedDefinitelyNotAGoodName = [[NSFileManager defaultManager] fileExistsAtPath:[candidateLegacyPath stringByAppendingPathComponent:@"procursus/.xia0o0o0o_jb_installed"]];
-                        BOOL installedPalera1n = [[NSFileManager defaultManager] fileExistsAtPath:[candidateLegacyPath stringByAppendingPathComponent:@"procursus/.palecursus_strapped"]];
-                        if (installedNekoJB || installedPalera1n || installedDefinitelyNotAGoodName) {
-                            continue;
-                        }
-
-                        randomizedJailbreakPath = candidateLegacyPath;
+                if (subItem.length == 15 && [subItem hasPrefix:@"dopamine-"]) {
+                    NSString *legacyPath = [activePrebootPath stringByAppendingPathComponent:subItem];
+                    NSString *legacyProcursus = [legacyPath stringByAppendingPathComponent:@"procursus"];
+                    if ([[NSFileManager defaultManager] fileExistsAtPath:[legacyProcursus stringByAppendingPathComponent:@".installed_dopamine"]]) {
+                        randomizedJailbreakPath = legacyPath;
                         _bootstrapNeedsMigration = YES;
                         break;
                     }
@@ -141,11 +156,9 @@ extern char **environ;
         }
 
         if (randomizedJailbreakPath) {
-            NSString *jailbreakRootPath = [randomizedJailbreakPath stringByAppendingPathComponent:@"procursus"];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:jailbreakRootPath]) {
-                // This attribute serves as the primary source of what the root path is
-                // Anything else in the jailbreak will get it from here
-                gSystemInfo.jailbreakInfo.rootPath = strdup(jailbreakRootPath.fileSystemRepresentation);
+            // ROOTHIDE: jbroot IS the .jbroot-XXX dir itself (no /procursus subdir).
+            if ([[NSFileManager defaultManager] fileExistsAtPath:randomizedJailbreakPath]) {
+                gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.fileSystemRepresentation);
             }
         }
     }
@@ -178,35 +191,25 @@ extern char **environ;
     // return [NSError errorWithDomain:@"Cleaned" code:1 userInfo:nil];
 
     if (!gSystemInfo.jailbreakInfo.rootPath || _bootstrapNeedsMigration) {
-        [_bootstrapper ensurePrivatePrebootIsWritable];
-
-        NSString *activePrebootPath = [self activePrebootPath];
-
-        NSString *characterSet = @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        NSUInteger stringLen = 6;
-        NSMutableString *randomString = [NSMutableString stringWithCapacity:stringLen];
-        for (NSUInteger i = 0; i < stringLen; i++) {
-            NSUInteger randomIndex = arc4random_uniform((uint32_t)[characterSet length]);
-            unichar randomCharacter = [characterSet characterAtIndex:randomIndex];
-            [randomString appendFormat:@"%C", randomCharacter];
-        }
-
-        NSString *randomJailbreakFolderName = [NSString stringWithFormat:@"dopamine-%@", randomString];
-        NSString *randomizedJailbreakPath = [activePrebootPath stringByAppendingPathComponent:randomJailbreakFolderName];
-        NSString *jailbreakRootPath = [randomizedJailbreakPath stringByAppendingPathComponent:@"procursus"];
+        // ROOTHIDE: Create jbroot at /var/containers/Bundle/Application/.jbroot-XXXXXXXXXXXXXXXX
+        // This path format is REQUIRED by roothideinit.dylib is_jbroot_name().
+        NSString *jbrandStr = generateRootHideJBRAND();
+        NSString *randomJailbreakFolderName = [NSString stringWithFormat:@".jbroot-%@", jbrandStr];
+        NSString *randomizedJailbreakPath = [@"/var/containers/Bundle/Application" stringByAppendingPathComponent:randomJailbreakFolderName];
 
         if (_bootstrapNeedsMigration) {
-            NSString *oldRandomizedJailbreakPath = [[NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath] stringByDeletingLastPathComponent];
-            [[NSFileManager defaultManager] moveItemAtPath:oldRandomizedJailbreakPath toPath:randomizedJailbreakPath error:&error];
+            // Move old /private/preboot/.../dopamine-XXX/procursus contents to new .jbroot-XXX path
+            NSString *oldProcursusPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
+            [[NSFileManager defaultManager] moveItemAtPath:oldProcursusPath toPath:randomizedJailbreakPath error:&error];
         }
         else {
-            if (![[NSFileManager defaultManager] fileExistsAtPath:jailbreakRootPath]) {
-                [[NSFileManager defaultManager] createDirectoryAtPath:jailbreakRootPath withIntermediateDirectories:YES attributes:nil error:&error];
+            if (![[NSFileManager defaultManager] fileExistsAtPath:randomizedJailbreakPath]) {
+                [[NSFileManager defaultManager] createDirectoryAtPath:randomizedJailbreakPath withIntermediateDirectories:YES attributes:nil error:&error];
             }
         }
 
         if (!error) {
-            gSystemInfo.jailbreakInfo.rootPath = strdup(jailbreakRootPath.UTF8String);
+            gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
         }
     }
 
