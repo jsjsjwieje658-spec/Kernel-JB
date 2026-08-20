@@ -433,12 +433,57 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     };
     
     
-    BOOL needsBootstrap = ![[NSFileManager defaultManager] fileExistsAtPath:installedPath];
+    // Determine whether we need to (re-)extract the bootstrap.
+    //
+    // CASE 1: First jailbreak — .installed_dopamine does not exist.
+    //   → Extract bootstrap.
+    //
+    // CASE 2: Re-jailbreak after a previous attempt with the OLD IPA that
+    //   shipped the standard Procursus bootstrap.  That bootstrap puts files
+    //   under ./var/jb/usr/bin/dpkg instead of ./usr/bin/dpkg, which is
+    //   incompatible with our RootHide patches (we removed /var/jb).
+    //   Detection: .installed_dopamine exists BUT ./usr/bin/dpkg does not.
+    //   → Force re-extract the new RootHide bootstrap.
+    //
+    // CASE 3: Re-jailbreak with the correct bootstrap already in place.
+    //   Detection: .installed_dopamine exists AND ./usr/bin/dpkg exists.
+    //   → Skip extraction.
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dpkgPath = JBROOT_PATH(@"/usr/bin/dpkg");
+    BOOL dpkgExists = [fm fileExistsAtPath:dpkgPath];
+    BOOL needsBootstrap = ![fm fileExistsAtPath:installedPath];
+
+    // CASE 2: bootstrap was extracted before but with the wrong structure.
+    // Force re-extraction so the new RootHide bootstrap replaces the old one.
+    if (!needsBootstrap && !dpkgExists) {
+        NSString *oldDpkgPath = JBROOT_PATH(@"/var/jb/usr/bin/dpkg");
+        if ([fm fileExistsAtPath:oldDpkgPath]) {
+            NSLog(@"[RootHide] Detected old Procursus bootstrap structure (dpkg at /var/jb/usr/bin/dpkg). Forcing re-extraction of RootHide bootstrap.");
+            [[DOUIManager sharedInstance] sendLog:@"Migrating bootstrap to RootHide structure" debug:NO];
+
+            // Wipe everything except basebin (we keep basebin because the
+            // new IPA's basebin.tar will be extracted again anyway in
+            // prepareBootstrap, and removing it here could break the
+            // currently-running launchdhook).  The bootstrap extraction
+            // will overwrite any conflicting files.
+            for (NSURL *subItemURL in [fm contentsOfDirectoryAtURL:[NSURL fileURLWithPath:JBROOT_PATH(@"/")] includingPropertiesForKeys:nil options:0 error:nil]) {
+                NSString *name = subItemURL.lastPathComponent;
+                if (![name isEqualToString:@"basebin"]) {
+                    [fm removeItemAtURL:subItemURL error:nil];
+                }
+            }
+
+            // Remove the marker so the code below re-extracts the bootstrap.
+            [fm removeItemAtPath:installedPath error:nil];
+            needsBootstrap = YES;
+        }
+    }
+
     if (needsBootstrap) {
         // First, wipe any existing content that's not basebin
-        for (NSURL *subItemURL in [[NSFileManager defaultManager] contentsOfDirectoryAtURL:[NSURL fileURLWithPath:JBROOT_PATH(@"/")] includingPropertiesForKeys:nil options:0 error:nil]) {
+        for (NSURL *subItemURL in [fm contentsOfDirectoryAtURL:[NSURL fileURLWithPath:JBROOT_PATH(@"/")] includingPropertiesForKeys:nil options:0 error:nil]) {
             if (![subItemURL.lastPathComponent isEqualToString:@"basebin"]) {
-                [[NSFileManager defaultManager] removeItemAtURL:subItemURL error:nil];
+                [fm removeItemAtURL:subItemURL error:nil];
             }
         }
         
