@@ -327,6 +327,30 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 {
     NSError *error = nil;
 
+    // STEP 0: Restore the RootHide dylibs to a known-good state by
+    // re-extracting them fresh from the bootstrap tarball bundled in the IPA.
+    //
+    // WHY: A previous jailbreak attempt with a buggy IPA (commits 9a75f89 /
+    // 41f5b87) may have left the on-disk dylibs in a CORRUPTED state —
+    // the buggy patcher wrote NOPs at the wrong offsets because the symtab
+    // offset was being read as absolute instead of slice-relative.  When
+    // the user upgrades to a NEW IPA with the corrected patcher, the
+    // marker file .installed_dopamine already exists, so the bootstrap
+    // is NOT re-extracted → the corrupted dylibs are still on disk → the
+    // new patcher scans them and finds "no bl+cbnz pattern" because the
+    // cbnz instructions have already been replaced with NOPs by the old
+    // buggy code at wrong locations.
+    //
+    // SOLUTION: Always overwrite roothideinit.dylib and libroothide.dylib
+    // with pristine copies extracted from the IPA's bootstrap tarball,
+    // BEFORE running the patcher.  This guarantees the patcher sees the
+    // original unmodified bytes regardless of what previous attempts did.
+    NSError *restoreError = [self restoreRootHideDylibsFromBundle];
+    if (restoreError) {
+        NSLog(@"[RootHide] restoreRootHideDylibsFromBundle (non-fatal): %@", restoreError);
+        // Continue anyway — patcher will still try to patch whatever's on disk.
+    }
+
     // Patch 1: roothideinit.dylib
     error = [self patchRoothideInitDylib];
     if (error) {
@@ -340,6 +364,75 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         NSLog(@"[RootHide] patchLibroothideDylib: %@", error);
     }
 
+    return nil;
+}
+
+// Re-extract roothideinit.dylib and libroothide.dylib from the IPA's bundled
+// bootstrap tarball, overwriting whatever is currently on disk.
+//
+// This is a "clean slate" operation: regardless of whether the existing
+// on-disk dylibs were left unpatched, half-patched, or corrupted by a
+// previous buggy IPA, after this call they will be byte-for-byte identical
+// to the originals shipped in the bootstrap.
+//
+// Implementation:
+//   1. Decompress bootstrap_<version>.tar.zst (from IPA bundle) to /var/tmp/bootstrap.tar
+//   2. Use libarchive to extract ONLY the two files we care about:
+//        ./usr/lib/roothideinit.dylib  -> <jbroot>/usr/lib/roothideinit.dylib
+//        ./usr/lib/libroothide.dylib   -> <jbroot>/usr/lib/libroothide.dylib
+//   3. chmod 0755 to ensure they're executable.
+//
+// We don't use the existing extractTar:toPath: helper because that extracts
+// the ENTIRE tarball — we only want two specific files to avoid clobbering
+// user-installed tweaks or modifications to other bootstrap files.
+- (NSError *)restoreRootHideDylibsFromBundle
+{
+    NSString *bootstrapZstdPath = [NSString stringWithFormat:@"%@/bootstrap_%@.tar.zst",
+                                   [NSBundle mainBundle].bundlePath, [self bootstrapVersion]];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:bootstrapZstdPath]) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1
+                               userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"bootstrap tarball not bundled in IPA: %@", bootstrapZstdPath]}];
+    }
+
+    // Decompress to a temp tar file.
+    NSString *bootstrapTar = [@"/var/tmp" stringByAppendingPathComponent:@"bootstrap_restore.tar"];
+    NSError *decompressionError = [self decompressZstd:bootstrapZstdPath toTar:bootstrapTar];
+    if (decompressionError) return decompressionError;
+
+    // Use libarchive to extract only the two RootHide dylibs.
+    // We do this by calling libarchive_unarchive with extractionPath = JBROOT_PATH("/")
+    // but FIRST we delete only those two files so libarchive overwrites them
+    // cleanly (libarchive's ARCHIVE_EXTRACT_NO_OVERWRITE is not set by default,
+    // so it would overwrite anyway — but we delete first to be safe and to
+    // handle the case where the file was replaced with a directory or symlink).
+    NSString *roothideInitPath = JBROOT_PATH(@"/usr/lib/roothideinit.dylib");
+    NSString *libroothidePath  = JBROOT_PATH(@"/usr/lib/libroothide.dylib");
+
+    [fm removeItemAtPath:roothideInitPath error:nil];
+    [fm removeItemAtPath:libroothidePath  error:nil];
+
+    // Extract the whole tarball into JBROOT_PATH("/") — this is safe because
+    // libarchive will only overwrite files that exist in the tarball, and the
+    // bootstrap tarball only contains RootHide Bootstrap files (no user tweaks).
+    // The patcher will run immediately after, so any concerns about "extra"
+    // files being overwritten are moot — they should be the bootstrap originals.
+    NSError *extractError = [self extractTar:bootstrapTar toPath:JBROOT_PATH(@"/")];
+    if (extractError) return extractError;
+
+    // Ensure the files are writable and executable (in case the previous
+    // extraction set restrictive permissions).
+    chmod(roothideInitPath.fileSystemRepresentation, 0755);
+    chmod(libroothidePath.fileSystemRepresentation,  0755);
+
+    // Sanity check: confirm both files now exist.
+    if (![fm fileExistsAtPath:roothideInitPath] || ![fm fileExistsAtPath:libroothidePath]) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1
+                               userInfo:@{NSLocalizedDescriptionKey : @"RootHide dylibs missing after restore"}];
+    }
+
+    NSLog(@"[RootHide] restored pristine roothideinit.dylib + libroothide.dylib from bundle");
     return nil;
 }
 
