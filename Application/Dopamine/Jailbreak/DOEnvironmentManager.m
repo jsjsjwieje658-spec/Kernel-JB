@@ -197,18 +197,37 @@ static BOOL checkRootHideJBRAND(NSString *str)
         NSString *randomJailbreakFolderName = [NSString stringWithFormat:@".jbroot-%@", jbrandStr];
         NSString *randomizedJailbreakPath = [@"/var/containers/Bundle/Application" stringByAppendingPathComponent:randomJailbreakFolderName];
 
+        // If migrating from old Dopamine path, delete the old directory
+        // (we can't move across filesystems, and the old bootstrap is
+        //  incompatible with RootHide anyway — it has /procursus subdir).
         if (_bootstrapNeedsMigration) {
-            // Move old /private/preboot/.../dopamine-XXX/procursus contents to new .jbroot-XXX path
-            NSString *oldProcursusPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
-            [[NSFileManager defaultManager] moveItemAtPath:oldProcursusPath toPath:randomizedJailbreakPath error:&error];
-        }
-        else {
-            if (![[NSFileManager defaultManager] fileExistsAtPath:randomizedJailbreakPath]) {
-                [[NSFileManager defaultManager] createDirectoryAtPath:randomizedJailbreakPath withIntermediateDirectories:YES attributes:nil error:&error];
-            }
+            NSString *oldPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
+            // Walk up to the dopamine-XXX dir (parent of procursus)
+            NSString *oldDopamineDir = [oldPath stringByDeletingLastPathComponent];
+            NSLog(@"[RootHide] Removing old Dopamine bootstrap at %@", oldDopamineDir);
+            // Use exec_cmd to rm -rf the old directory (NSFileManager can't
+            // cross filesystem boundaries and may hit AMFI restrictions)
+            exec_cmd_trusted("/bin/rm", "-rf", oldDopamineDir.fileSystemRepresentation, NULL);
+            // Clear rootPath so it's set to the new path below
+            free(gSystemInfo.jailbreakInfo.rootPath);
+            gSystemInfo.jailbreakInfo.rootPath = NULL;
+            _bootstrapNeedsMigration = NO;
         }
 
-        if (!error) {
+        // Create the new .jbroot-XXX directory using POSIX mkdir.
+        // We are root (uid 0) and unsandboxed at this point.
+        // NSFileManager's createDirectory uses mkdir(2) which should work,
+        // but let's use POSIX directly to avoid any Foundation overhead.
+        const char *path = randomizedJailbreakPath.fileSystemRepresentation;
+        if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+            error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
+                                   userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to create jbroot directory %s: %s", path, strerror(errno)]}];
+            NSLog(@"[RootHide] mkdir failed: %s", strerror(errno));
+        }
+        else {
+            // chown to root:wheel
+            chown(path, 0, 0);
+            NSLog(@"[RootHide] Created jbroot at %@", randomizedJailbreakPath);
             gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
         }
     }
