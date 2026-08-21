@@ -1664,39 +1664,45 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 - (void)trustCacheBootstrapBinaries
 {
     NSString *jbroot = [NSString stringWithUTF8String:JBROOT_PATH("/")];
-    NSString *usrDir = [jbroot stringByAppendingPathComponent:@"usr"];
 
     NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:usrDir]) {
-        NSLog(@"[RootHide] trustCacheBootstrapBinaries: %@ not found", usrDir);
-        return;
-    }
-
-    NSDirectoryEnumerator<NSURL *> *enumerator = [fm enumeratorAtURL:[NSURL fileURLWithPath:usrDir]
-                                                  includingPropertiesForKeys:@[NSURLIsRegularFileKey]
-                                                                     options:0
-                                                                 errorHandler:nil];
-
     NSUInteger trusted = 0;
     NSUInteger skipped = 0;
-    for (NSURL *url in enumerator) {
-        NSNumber *isRegular = nil;
-        [url getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil];
-        if (![isRegular boolValue]) continue;
 
-        // Skip symlinks (they point to real files which will be trusted)
-        NSDictionary *attrs = [fm attributesOfItemAtPath:url.path error:nil];
-        if (attrs[NSFileType] == NSFileTypeSymbolicLink) continue;
+    // Scan BOTH /usr/ and /Applications/ directories.
+    // /usr/ contains bootstrap binaries (dpkg, apt, sh, etc.)
+    // /Applications/ contains installed apps (Sileo, Zebra, RootHide)
+    //   → their main executable MUST be trust-cached or AMFI kills
+    //   them with SIGKILL when SpringBoard launches them → black screen crash
+    NSArray *scanDirs = @[
+        [jbroot stringByAppendingPathComponent:@"usr"],
+        [jbroot stringByAppendingPathComponent:@"Applications"],
+        [jbroot stringByAppendingPathComponent:@"Library"],
+    ];
 
-        // Trust-cache this file.  jbclient_trust_file_by_path opens the file,
-        // reads its code signature, calculates CDHash, and sends it to
-        // launchdhook via XPC.  launchdhook adds it to the kernel trust cache.
-        // Non-macho files will be rejected by the trust cache code, which is fine.
-        int r = jbclient_trust_file_by_path(url.path.fileSystemRepresentation);
-        if (r == 0) {
-            trusted++;
-        } else {
-            skipped++;
+    for (NSString *scanDir in scanDirs) {
+        if (![fm fileExistsAtPath:scanDir]) continue;
+
+        NSDirectoryEnumerator<NSURL *> *enumerator = [fm enumeratorAtURL:[NSURL fileURLWithPath:scanDir]
+                                                      includingPropertiesForKeys:@[NSURLIsRegularFileKey]
+                                                                         options:0
+                                                                     errorHandler:nil];
+
+        for (NSURL *url in enumerator) {
+            NSNumber *isRegular = nil;
+            [url getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil];
+            if (![isRegular boolValue]) continue;
+
+            // Skip symlinks
+            NSDictionary *attrs = [fm attributesOfItemAtPath:url.path error:nil];
+            if (attrs[NSFileType] == NSFileTypeSymbolicLink) continue;
+
+            int r = jbclient_trust_file_by_path(url.path.fileSystemRepresentation);
+            if (r == 0) {
+                trusted++;
+            } else {
+                skipped++;
+            }
         }
     }
 
@@ -1810,6 +1816,14 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             }
         }
     }
+
+    // ROOTHIDE: Re-trust-cache AFTER installing packages.
+    // Sileo/Zebra/RootHide app binaries are at <jbroot>/Applications/*.app/
+    // They were NOT there during the first trustCacheBootstrapBinaries call
+    // (which ran before installPackageManagers).  Without trust-caching,
+    // AMFI kills them with SIGKILL when SpringBoard launches them → black screen crash.
+    NSLog(@"[RootHide] Re-trust-caching after package install (includes /Applications/)...");
+    [self trustCacheBootstrapBinaries];
 
     return nil;
 }
