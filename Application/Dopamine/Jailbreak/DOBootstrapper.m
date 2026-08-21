@@ -1365,7 +1365,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         if (parts.count > 0) {
             *errorOut = [parts componentsJoinedByString:@"\n\n"];
         } else {
-            *errorOut = [NSString stringWithFormat:@"(no output captured, exit=%d, cmd=%@)", r, cmd];
+            *errorOut = [NSString stringWithFormat:@"(no output captured, exit=%d)", r];
         }
     }
     [fm removeItemAtPath:outFile error:nil];
