@@ -1459,6 +1459,53 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     return nil;
 }
 
+// Trust-cache ALL macho binaries in the bootstrap directory.
+// This enumerates <jbroot>/usr/ recursively, finds all macho files,
+// and adds their CDHashes to the kernel trust cache via
+// jbclient_trust_file_by_path().  After this, AMFI will accept all
+// bootstrap binaries (dpkg, apt, sh, etc.) without needing re-signing.
+- (void)trustCacheBootstrapBinaries
+{
+    NSString *jbroot = [NSString stringWithUTF8String:JBROOT_PATH("/")];
+    NSString *usrDir = [jbroot stringByAppendingPathComponent:@"usr"];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:usrDir]) {
+        NSLog(@"[RootHide] trustCacheBootstrapBinaries: %@ not found", usrDir);
+        return;
+    }
+
+    NSDirectoryEnumerator<NSURL *> *enumerator = [fm enumeratorAtURL:[NSURL fileURLWithPath:usrDir]
+                                                  includingPropertiesForKeys:@[NSURLIsRegularFileKey]
+                                                                     options:0
+                                                                 errorHandler:nil];
+
+    NSUInteger trusted = 0;
+    NSUInteger skipped = 0;
+    for (NSURL *url in enumerator) {
+        NSNumber *isRegular = nil;
+        [url getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil];
+        if (![isRegular boolValue]) continue;
+
+        // Skip symlinks (they point to real files which will be trusted)
+        NSDictionary *attrs = [fm attributesOfItemAtPath:url.path error:nil];
+        if (attrs[NSFileType] == NSFileTypeSymbolicLink) continue;
+
+        // Trust-cache this file.  jbclient_trust_file_by_path opens the file,
+        // reads its code signature, calculates CDHash, and sends it to
+        // launchdhook via XPC.  launchdhook adds it to the kernel trust cache.
+        // Non-macho files will be rejected by the trust cache code, which is fine.
+        int r = jbclient_trust_file_by_path(url.path.fileSystemRepresentation);
+        if (r == 0) {
+            trusted++;
+        } else {
+            skipped++;
+        }
+    }
+
+    NSLog(@"[RootHide] trust-cache: %lu binaries trusted, %lu skipped", (unsigned long)trusted, (unsigned long)skipped);
+}
+
 - (NSError *)finalizeBootstrap
 {
     // ─────────────────────────────────────────────────────────────────────
@@ -1495,6 +1542,21 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     if (resignError) {
         NSLog(@"[RootHide] resignPatchedDylibs (non-fatal): %@", resignError);
     }
+
+    // ─── Trust-cache ALL bootstrap binaries ─────────────────────────
+    // The bootstrap tarball extracts macho binaries (dpkg, apt, sh, etc.)
+    // to <jbroot>/usr/bin/, <jbroot>/usr/libexec/, etc.
+    // These binaries have code signatures from the build machine, but
+    // AMFI doesn't recognize them because their CDHashes are NOT in
+    // the kernel trust cache.  When we try to run dpkg, AMFI kills it
+    // with SIGKILL before it can produce ANY output.
+    //
+    // Solution: enumerate all macho files in <jbroot>/usr/ and add
+    // their CDHashes to the trust cache via jbclient_trust_file_by_path.
+    // This is equivalent to what RootHide Bootstrap's rebuildSignature()
+    // does, but using trust-cache instead of re-signing.
+    NSLog(@"[RootHide] trust-caching all bootstrap binaries...");
+    [self trustCacheBootstrapBinaries];
 
     // Initial setup on first jailbreak
     // prep_bootstrap.sh is a script that ships inside the RootHide bootstrap
