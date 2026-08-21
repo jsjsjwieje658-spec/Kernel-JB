@@ -174,7 +174,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
             }
         }
 
-        for (NSString *subItem in subItems) {
+        for (NSString *__strong subItem in subItems) {
             // Trim whitespace
             subItem = [subItem stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             if (subItem.length == 23 && [subItem hasPrefix:@".jbroot-"]) {
