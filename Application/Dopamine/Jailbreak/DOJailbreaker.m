@@ -615,17 +615,26 @@ void *boomerang_server(struct boomerang_info *info)
         return;
     }
 
-    // Now that we are unsandboxed, populate the jailbreak root path
-    *errOut = [[DOEnvironmentManager sharedManager] ensureJailbreakRootExists];
-    if (*errOut) {
+    // ROOTHIDE FIX: Check removeJailbreak BEFORE ensureJailbreakRootExists.
+    // If removeJailbreak is enabled, we need to locate the EXISTING .jbroot-XXX
+    // and delete it. We must NOT create a new one.
+    // The old code called ensureJailbreakRootExists first (which creates a new
+    // .jbroot-XXX), then deleteBootstrap deleted it — but then the jailbreak
+    // flow continued and created ANOTHER .jbroot-XXX.
+    if (removeJailbreakEnabled) {
+        [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Removing Jailbreak") debug:NO];
+        // Locate existing jbroot (don't create new one)
+        [[DOEnvironmentManager sharedManager] locateJailbreakRoot];
+        // Delete it
+        *errOut = [[DOEnvironmentManager sharedManager] deleteBootstrap];
+        *didRemove = YES;
         [self cleanUpPostExploitation];
         return;
     }
-    
-    if (removeJailbreakEnabled) {
-        [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Removing Jailbreak") debug:NO];
-        *errOut = [[DOEnvironmentManager sharedManager] deleteBootstrap];
-        *didRemove = YES;
+
+    // Now that we are unsandboxed, populate the jailbreak root path
+    *errOut = [[DOEnvironmentManager sharedManager] ensureJailbreakRootExists];
+    if (*errOut) {
         [self cleanUpPostExploitation];
         return;
     }
