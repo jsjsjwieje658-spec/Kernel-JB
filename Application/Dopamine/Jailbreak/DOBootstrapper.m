@@ -1107,23 +1107,9 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             return;
         }
 
-        // ROOTHIDE FIX: Always re-patch roothideinit.dylib and libroothide.dylib,
-        // regardless of whether we extracted the bootstrap this time.
-        //
-        // WHY: A previous jailbreak attempt with an OLDER IPA may have left
-        // UNPATCHED versions of these dylibs on disk (because the old IPA's
-        // patcher had bugs and silently skipped patching).  The marker file
-        // .installed_dopamine is written BEFORE the patcher runs in
-        // extractBootstrap:withCompletion:, so the next jailbreak skips
-        // extraction entirely — and skips the patcher too.
-        //
-        // Re-patching is idempotent: if the dylibs are already patched, the
-        // prologue/cbnz pattern check will fail to match and the patcher
-        // will simply log "skipping" without modifying anything.
-        //
-        // Without this call, a user who upgraded from a buggy IPA would be
-        // permanently stuck: the patcher would never run again because the
-        // bootstrap is already extracted.
+        // ROOTHIDE: With the correct jbroot path format (.jbroot-XXX),
+        // roothideinit.dylib's is_jbroot_name() returns true naturally.
+        // No patching needed.  This is a no-op.
         NSError *patchError = [self patchRootHideAssertions];
         if (patchError) {
             NSLog(@"[RootHide] patchRootHideAssertions (post-bootstrap) failed: %@", patchError);
@@ -1540,93 +1526,35 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
 - (NSError *)finalizeBootstrap
 {
-    // ─────────────────────────────────────────────────────────────────────
-    // STEP 0: Ensure the RootHide dylibs exist and are patched + signed.
-    //
-    // This is a BELT-AND-SUSPENDERS call.  The earlier patchRootHideAssertions
-    // (called from bootstrapFinishedCompletion during step 5) should have
-    // already restored + patched the dylibs.  But if it failed silently
-    // (e.g. decompressZstd failed, or libarchive extraction failed, or the
-    // user upgraded from an IPA that left the dylibs in a deleted state),
-    // the dylibs won't exist when finalizeBootstrap runs.
-    //
-    // Calling patchRootHideAssertions AGAIN here is safe because:
-    //   - restoreRootHideDylibsFromBundle is idempotent (overwrites with
-    //     pristine copies from the IPA bundle)
-    //   - patchRoothideInitDylib is idempotent (detects already-patched
-    //     state and returns success)
-    //   - patchLibroothideDylib is idempotent (NOPs are only written if
-    //     the bl+cbnz pattern is found; if already NOP'd, it skips)
-    //
-    // Now that launchdhook is loaded (step 8), the ldid re-sign inside
-    // the patchers will SUCCEED (previously returned exit 85 because
-    // jbclient_trust_file_by_path XPC had no listener).
-    // ─────────────────────────────────────────────────────────────────────
-    NSLog(@"[RootHide] finalizeBootstrap: calling patchRootHideAssertions (belt-and-suspenders)");
-    NSError *patchError2 = [self patchRootHideAssertions];
-    if (patchError2) {
-        NSLog(@"[RootHide] patchRootHideAssertions (in finalizeBootstrap) failed: %@", patchError2);
-    }
-
-    // Also explicitly re-sign, in case the patcher's internal ldid call
-    // failed for some reason but the patches were applied.
-    NSError *resignError = [self resignPatchedDylibs];
-    if (resignError) {
-        NSLog(@"[RootHide] resignPatchedDylibs (non-fatal): %@", resignError);
-    }
-
-    // ─── Trust-cache ALL bootstrap binaries ─────────────────────────
-    // The bootstrap tarball extracts macho binaries (dpkg, apt, sh, etc.)
-    // to <jbroot>/usr/bin/, <jbroot>/usr/libexec/, etc.
-    // These binaries have code signatures from the build machine, but
-    // AMFI doesn't recognize them because their CDHashes are NOT in
-    // the kernel trust cache.  When we try to run dpkg, AMFI kills it
-    // with SIGKILL before it can produce ANY output.
-    //
-    // Solution: enumerate all macho files in <jbroot>/usr/ and add
-    // their CDHashes to the trust cache via jbclient_trust_file_by_path.
-    // This is equivalent to what RootHide Bootstrap's rebuildSignature()
-    // does, but using trust-cache instead of re-signing.
-    NSLog(@"[RootHide] trust-caching all bootstrap binaries...");
+    // ROOTHIDE: Simplified finalizeBootstrap.
+    // With correct jbroot path (.jbroot-XXX), no dylib patching needed.
+    // Just trust-cache all bootstrap binaries so AMFI accepts them.
+    NSLog(@"[RootHide] finalizeBootstrap: trust-caching bootstrap binaries...");
     [self trustCacheBootstrapBinaries];
 
     // Initial setup on first jailbreak
-    // prep_bootstrap.sh is a script that ships inside the RootHide bootstrap
-    // tarball (at ./prep_bootstrap.sh).  It is extracted to <jbroot>/prep_bootstrap.sh
-    // during restoreRootHideDylibsFromBundle (which extracts the whole tarball).
-    //
-    // However, on a CACHED bootstrap (CASE 3), the previous jailbreak's
-    // prep_bootstrap.sh DELETED ITSELF (the script's last line is
-    // `rm -f /prep_bootstrap.sh`).  So we need to re-extract it.
-    //
-    // We do this by calling restoreRootHideDylibsFromBundle which extracts
-    // the whole tarball again — this restores prep_bootstrap.sh too.
-    // (This is already done by the belt-and-suspenders patchRootHideAssertions
-    // call above, so prep_bootstrap.sh should exist by now.)
+    // prep_bootstrap.sh only runs on FIRST jailbreak (when bootstrap was
+    // just extracted).  On re-jailbreak, it has already run and deleted
+    // itself.  RootHide does NOT re-run it.
     NSString *prepBootstrapPath = JBROOT_PATH(@"/prep_bootstrap.sh");
     if ([[NSFileManager defaultManager] fileExistsAtPath:prepBootstrapPath]) {
         [[DOUIManager sharedInstance] sendLog:@"Finalizing Bootstrap" debug:NO];
 
-        // Run prep_bootstrap.sh.  Now that roothideinit.dylib is patched
-        // (is_jbroot_name returns 1) and trust-cached (AMFI accepts it),
-        // the /usr/libexec/firmware binary will load it successfully.
+        // Run prep_bootstrap.sh via jbroot's /bin/sh (which has correct
+        // DYLD_LIBRARY_PATH and rpath setup from the RootHide bootstrap).
         int r = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), prepBootstrapPath.fileSystemRepresentation, NULL);
         if (r != 0) {
             NSLog(@"[RootHide] prep_bootstrap.sh returned %d (continuing — non-fatal)", r);
             [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"prep_bootstrap.sh returned %d (continuing)", r] debug:YES];
-            // Don't return an error — continue with installPackageManagers
-            // and the rest of finalizeBootstrap.
         }
 
         NSError *error = [self installPackageManagers];
         if (error) return error;
     } else {
-        // prep_bootstrap.sh doesn't exist (cached bootstrap, deleted by
-        // previous run).  This is OK — skip it and go straight to
-        // installPackageManagers.
-        NSLog(@"[RootHide] prep_bootstrap.sh not found (cached bootstrap) — skipping");
-        NSError *error = [self installPackageManagers];
-        if (error) return error;
+        // prep_bootstrap.sh not found (re-jailbreak, already bootstrapped).
+        // Skip prep_bootstrap.sh and installPackageManagers — packages
+        // are already installed from the first jailbreak.
+        NSLog(@"[RootHide] prep_bootstrap.sh not found (re-jailbreak) — skipping");
     }
     
     BOOL shouldInstallLibroot = [self shouldInstallPackage:@"libroot-dopamine"];
