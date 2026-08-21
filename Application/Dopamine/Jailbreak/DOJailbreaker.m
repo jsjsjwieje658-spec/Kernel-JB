@@ -308,11 +308,21 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
     }
     *pain = strdup("/var/tmp");*/
     
-    // Get CS_PLATFORM_BINARY
-    proc_csflags_set(proc, CS_PLATFORM_BINARY);
+    // Get CS_PLATFORM_BINARY + CS_INSTALLER + CS_DEBUGGED + CS_GET_TASK_ALLOW
+    // CS_PLATFORM_BINARY: treat as Apple platform binary (bypass AMFI)
+    // CS_INSTALLER: allow posix_spawnattr_set_persona_np (uid 0 override)
+    // CS_DEBUGGED: allow loading unsigned pages (needed for trust cache)
+    // CS_GET_TASK_ALLOW: allow task_for_pid (needed for opainject)
+    proc_csflags_set(proc, CS_PLATFORM_BINARY | CS_INSTALLER | CS_DEBUGGED | CS_GET_TASK_ALLOW);
     uint32_t csflags;
     csops(getpid(), CS_OPS_STATUS, &csflags, sizeof(csflags));
     if (!(csflags & CS_PLATFORM_BINARY)) return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedPlatformize userInfo:@{NSLocalizedDescriptionKey:@"Failed to get CS_PLATFORM_BINARY"}];
+    NSLog(@"[RootHide] CS flags: 0x%08x (PLATFORM=%d INSTALLER=%d DEBUGGED=%d GET_TASK_ALLOW=%d)",
+          csflags,
+          (csflags & CS_PLATFORM_BINARY) ? 1 : 0,
+          (csflags & CS_INSTALLER) ? 1 : 0,
+          (csflags & CS_DEBUGGED) ? 1 : 0,
+          (csflags & CS_GET_TASK_ALLOW) ? 1 : 0);
     
     return nil;
 }
