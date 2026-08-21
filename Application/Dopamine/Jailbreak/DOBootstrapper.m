@@ -1830,7 +1830,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // RootHide Bootstrap app doesn't have this issue because it spawns
     // itself via persona override.  Dopamine runs in-process, so its
     // binary must be trust-cached explicitly.
-    NSString *dopamineExePath = [[NSBundle mainBundle].executablePath];
+    NSString *dopamineExePath = [NSBundle mainBundle].executablePath;
     if (dopamineExePath) {
         NSLog(@"[RootHide] Trust-caching Dopamine app itself: %@", dopamineExePath);
         int tcR = jbclient_trust_file_by_path(dopamineExePath.fileSystemRepresentation);
