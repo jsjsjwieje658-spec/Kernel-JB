@@ -1396,6 +1396,13 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             NSLog(@"[RootHide] Failed to install %@ (exit %d): %@", name, r, errMsg);
             return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install %@: %d\n%@\n", name, r, errMsg ?: @"(no error output)"]}];
         }
+
+        // Run uicache to refresh the app icon after dpkg install.
+        // Without this, the app icon shows as a white placeholder.
+        // RootHide runs: spawn_bootstrap_binary({"/usr/bin/uicache", "-p", "/Applications/<App>.app"})
+        NSString *appPath = [NSString stringWithFormat:@"/Applications/%@.app", name];
+        NSLog(@"[RootHide] uicache -p %@", appPath);
+        exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", appPath.UTF8String, NULL);
     }
     return nil;
 }
@@ -1647,11 +1654,32 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 {
     NSError *error = [self ensurePrivatePrebootIsWritable];
     if (error) return error;
-    NSString *path = [[NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath] stringByDeletingLastPathComponent];
-    [[NSFileManager defaultManager] removeItemAtPath:path error:&error];
-    if (error) return error;
-    // Note: RootHide does not use /var/jb, so no need to remove it
-    return error;
+
+    // ROOTHIDE: Only delete the .jbroot-XXX directory and its secondary.
+    // Do NOT delete /var/containers/Bundle/Application/ contents — that
+    // would remove ALL installed apps (TrollStore apps, system apps, etc.).
+    //
+    // RootHide Bootstrap's uninstallBootstrap() removes:
+    //   /var/containers/Bundle/Application/.jbroot-<JBRAND>
+    //   /var/mobile/Containers/Shared/AppGroup/.jbroot-<JBRAND>
+    //   /var/mobile/Containers/Data/Application/.jbroot-<JBRAND> (old)
+    NSString *jbrootPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
+    NSLog(@"[RootHide] deleteBootstrap: removing %@", jbrootPath);
+
+    // Remove the jbroot directory itself
+    [[NSFileManager defaultManager] removeItemAtPath:jbrootPath error:nil];
+
+    // Remove the secondary AppGroup container
+    // Extract JBRAND from the path: .jbroot-XXXXXXXXXXXXXXXX
+    NSString *jbrootName = jbrootPath.lastPathComponent; // .jbroot-XXX
+    NSString *secondaryPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", jbrootName];
+    [[NSFileManager defaultManager] removeItemAtPath:secondaryPath error:nil];
+
+    // Also remove old-style path (Dopamine 1.x used /var/mobile/Containers/Data/Application)
+    NSString *oldSecondaryPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", jbrootName];
+    [[NSFileManager defaultManager] removeItemAtPath:oldSecondaryPath error:nil];
+
+    return nil;
 }
 
 - (void)URLSession:(NSURLSession *)session downloadTask:(NSURLSessionDownloadTask *)downloadTask didWriteData:(int64_t)bytesWritten totalBytesWritten:(int64_t)totalBytesWritten totalBytesExpectedToWrite:(int64_t)totalBytesExpectedToWrite
