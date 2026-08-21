@@ -1430,7 +1430,8 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 }
 
 // Manually install a .deb package without using the dpkg binary.
-// Extracts data.tar from the .deb to <jbroot>/ and updates dpkg status.
+// Parses the .deb ar archive in pure ObjC, extracts data.tar,
+// then uses libarchive to extract files to <jbroot>/.
 - (NSError *)manuallyInstallDeb:(NSString *)debPath appName:(NSString *)appName
 {
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -1439,100 +1440,135 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                                userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Deb file not found: %@", debPath]}];
     }
 
-    // Create a temp directory for extraction
-    NSString *tmpDir = [NSString stringWithFormat:@"/tmp/deb_extract_%d", getpid()];
-    [fm removeItemAtPath:tmpDir error:nil];
-    [fm createDirectoryAtPath:tmpDir withIntermediateDirectories:YES attributes:nil error:nil];
-
-    // Extract the .deb (ar archive) to get data.tar.* and control.tar.*
-    int arRet = exec_cmd_trusted("/usr/bin/ar", "x", debPath.fileSystemRepresentation, "-C", tmpDir.fileSystemRepresentation, NULL);
-    // Fallback: use /bin/tar to extract the ar archive
-    if (arRet != 0) {
-        NSLog(@"[RootHide] ar not available, trying tar");
-        // ar is actually just a simple format, we can use /bin/sh
-        NSString *cmd = [NSString stringWithFormat:@"cd \"%@\" && /usr/bin/ar x \"%@\" 2>/dev/null || /bin/tar xf \"%@\"", tmpDir, debPath, debPath];
-        exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-c", cmd.UTF8String, NULL);
+    // Read the entire .deb file into memory
+    NSError *readError = nil;
+    NSData *debData = [NSData dataWithContentsOfFile:debPath options:0 error:&readError];
+    if (!debData) {
+        return readError ?: [NSError errorWithDomain:bootstrapErrorDomain code:-1
+                                          userInfo:@{NSLocalizedDescriptionKey: @"Failed to read deb file"}];
     }
 
-    // Find data.tar.* and control.tar.*
-    NSString *dataTarPath = nil;
-    NSString *controlTarPath = nil;
-    for (NSString *item in [fm contentsOfDirectoryAtPath:tmpDir error:nil]) {
-        if ([item hasPrefix:@"data.tar"]) {
-            dataTarPath = [tmpDir stringByAppendingPathComponent:item];
-        }
-        if ([item hasPrefix:@"control.tar"]) {
-            controlTarPath = [tmpDir stringByAppendingPathComponent:item];
-        }
+    // Parse the ar archive format to find data.tar.* and control.tar.*
+    // ar format: 8-byte magic "!<arch>\n", then 60-byte headers + file data
+    const uint8_t *bytes = debData.bytes;
+    NSUInteger length = debData.length;
+
+    // Verify magic
+    if (length < 8 || memcmp(bytes, "!<arch>\n", 8) != 0) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1
+                               userInfo:@{NSLocalizedDescriptionKey: @"Not a valid ar archive (bad magic)"}];
     }
 
-    if (!dataTarPath) {
-        NSLog(@"[RootHide] data.tar not found in deb, trying system ar");
-        // Try system /usr/bin/ar
-        exec_cmd_trusted("/usr/bin/ar", "x", debPath.fileSystemRepresentation, NULL);
-        // Or use /bin/sh to change dir and extract
-        NSString *cmd = [NSString stringWithFormat:@"cd \"%@\" && ar x \"%@\"", tmpDir, debPath];
-        exec_cmd_trusted("/bin/sh", "-c", cmd.UTF8String, NULL);
-        for (NSString *item in [fm contentsOfDirectoryAtPath:tmpDir error:nil]) {
-            if ([item hasPrefix:@"data.tar"]) {
-                dataTarPath = [tmpDir stringByAppendingPathComponent:item];
-            }
-            if ([item hasPrefix:@"control.tar"]) {
-                controlTarPath = [tmpDir stringByAppendingPathComponent:item];
-            }
+    NSData *dataTarData = nil;
+    NSData *controlTarData = nil;
+    NSString *dataTarName = nil;
+
+    NSUInteger pos = 8; // skip magic
+    while (pos + 60 <= length) {
+        // Parse ar header (60 bytes)
+        char name[17] = {0};
+        memcpy(name, bytes + pos, 16);
+        // Trim trailing spaces
+        for (int i = 15; i >= 0 && name[i] == ' '; i--) name[i] = 0;
+
+        // Parse size (10 bytes at offset 48)
+        char sizeStr[11] = {0};
+        memcpy(sizeStr, bytes + pos + 48, 10);
+        unsigned long fileSize = strtoul(sizeStr, NULL, 10);
+
+        // Skip header (60 bytes) to get to file data
+        NSUInteger dataStart = pos + 60;
+        if (dataStart + fileSize > length) break;
+
+        NSString *entryName = [NSString stringWithUTF8String:name];
+        // Remove trailing slash from BSD format names
+        entryName = [entryName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+        NSLog(@"[RootHide] ar entry: %@ (size=%lu)", entryName, fileSize);
+
+        if ([entryName hasPrefix:@"data.tar"]) {
+            dataTarData = [debData subdataWithRange:NSMakeRange(dataStart, fileSize)];
+            dataTarName = entryName;
+        } else if ([entryName hasPrefix:@"control.tar"]) {
+            controlTarData = [debData subdataWithRange:NSMakeRange(dataStart, fileSize)];
         }
+
+        // Move to next entry (file data padded to even boundary)
+        pos = dataStart + fileSize;
+        if (pos % 2 != 0) pos++; // padding byte
     }
 
-    if (!dataTarPath) {
+    if (!dataTarData) {
         return [NSError errorWithDomain:bootstrapErrorDomain code:-1
                                userInfo:@{NSLocalizedDescriptionKey: @"data.tar not found in .deb file"}];
     }
 
-    NSLog(@"[RootHide] Found data.tar at %@", dataTarPath);
+    NSLog(@"[RootHide] Found %@ (%lu bytes)", dataTarName, (unsigned long)dataTarData.length);
 
-    // Extract data.tar to jbroot (this installs the app files)
-    // Use jbroot's /bin/tar which can handle xz/gz/lzma compression
-    NSString *jbroot = [NSString stringWithUTF8String:JBROOT_PATH("/")];
-    NSString *extractCmd = [NSString stringWithFormat:
-        @"\"%@\" -xf \"%@\" -C \"%@\"",
-        JBROOT_PATH("/bin/tar"), dataTarPath, jbroot];
-    NSLog(@"[RootHide] Extracting: %@", extractCmd);
-    int tarRet = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-c", extractCmd.UTF8String, NULL);
-    if (tarRet != 0) {
-        NSLog(@"[RootHide] jbroot tar failed (%d), trying system tar", tarRet);
-        // Fallback: use system tar
-        exec_cmd_trusted("/bin/sh", "-c", extractCmd.UTF8String, NULL);
+    // Write data.tar to a temp file
+    NSString *tmpDir = [NSString stringWithFormat:@"/tmp/deb_%d", getpid()];
+    [fm createDirectoryAtPath:tmpDir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *dataTarPath = [tmpDir stringByAppendingPathComponent:dataTarName];
+    [dataTarData writeToFile:dataTarPath atomically:YES];
+
+    // Extract data.tar to jbroot using libarchive
+    // libarchive can handle xz, gzip, lzma compression automatically
+    NSString *jbrootPath = [NSString stringWithUTF8String:JBROOT_PATH("/")];
+    NSLog(@"[RootHide] Extracting data.tar to %@", jbrootPath);
+
+    // Write data.tar and use libarchive_unarchive to extract
+    int extractRet = libarchive_unarchive(dataTarPath.fileSystemRepresentation,
+                                          jbrootPath.fileSystemRepresentation);
+    if (extractRet != 0) {
+        NSLog(@"[RootHide] libarchive extraction failed (%d), trying jbroot tar", extractRet);
+        // Fallback: use jbroot's /bin/tar
+        NSString *tarCmd = [NSString stringWithFormat:
+            @"\"%@\" -xf \"%@\" -C \"%@\"",
+            JBROOT_PATH("/bin/tar"), dataTarPath, jbrootPath];
+        int tarRet = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-c", tarCmd.UTF8String, NULL);
+        if (tarRet != 0) {
+            NSLog(@"[RootHide] jbroot tar also failed (%d)", tarRet);
+        }
     }
 
-    // Parse control file and update dpkg status
-    NSString *controlContent = nil;
-    if (controlTarPath) {
-        NSString *controlExtractCmd = [NSString stringWithFormat:
-            @"cd \"%@\" && \"%@\" -xf \"%@\" ./control 2>/dev/null && cat control",
-            tmpDir, JBROOT_PATH("/bin/tar"), controlTarPath];
-        char outBuf[8192] = {0};
-        // Can't easily capture output, so write to temp file
-        NSString *controlOutFile = [tmpDir stringByAppendingPathComponent:@"control.txt"];
-        NSString *fullCmd = [NSString stringWithFormat:@"%@ > \"%@\" 2>/dev/null", controlExtractCmd, controlOutFile];
-        exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-c", fullCmd.UTF8String, NULL);
-        controlContent = [NSString stringWithContentsOfFile:controlOutFile encoding:NSUTF8StringEncoding error:nil];
-    }
+    // Parse control file if available
+    if (controlTarData) {
+        NSString *controlTarPath = [tmpDir stringByAppendingPathComponent:@"control.tar"];
+        [controlTarData writeToFile:controlTarPath atomically:YES];
 
-    // Update dpkg status file
-    if (controlContent) {
-        NSString *statusFile = JBROOT_PATH(@"/var/lib/dpkg/status");
-        // Create dpkg dir if needed
-        [fm createDirectoryAtPath:JBROOT_PATH(@"/var/lib/dpkg") withIntermediateDirectories:YES attributes:nil error:nil];
-        // Append to status file
-        NSArray *controlLines = [controlContent componentsSeparatedByString:@"\n"];
-        NSString *packageName = controlLines.count > 0 ? controlLines[0] : @"unknown";
-        NSString *statusEntry = [NSString stringWithFormat:
-            @"\n%@\nStatus: install ok installed\nPriority: optional\nSection: Packaging\n%@\n\n",
-            packageName, controlContent];
-        // Read existing, check if already installed
-        NSString *existing = [NSString stringWithContentsOfFile:statusFile encoding:NSUTF8StringEncoding error:nil];
-        if (!existing || ![existing containsString:packageName]) {
-            [statusEntry writeToFile:statusFile atomically:NO encoding:NSUTF8StringEncoding error:nil];
+        // Extract control file from control.tar
+        NSString *controlTmpDir = [tmpDir stringByAppendingPathComponent:@"control"];
+        [fm createDirectoryAtPath:controlTmpDir withIntermediateDirectories:YES attributes:nil error:nil];
+        libarchive_unarchive(controlTarPath.fileSystemRepresentation,
+                             controlTmpDir.fileSystemRepresentation);
+
+        NSString *controlContent = [NSString stringWithContentsOfFile:[controlTmpDir stringByAppendingPathComponent:@"control"]
+                                                            encoding:NSUTF8StringEncoding error:nil];
+
+        if (controlContent) {
+            // Update dpkg status file
+            NSString *statusFile = JBROOT_PATH(@"/var/lib/dpkg/status");
+            [fm createDirectoryAtPath:JBROOT_PATH(@"/var/lib/dpkg") withIntermediateDirectories:YES attributes:nil error:nil];
+
+            NSArray *controlLines = [controlContent componentsSeparatedByString:@"\n"];
+            NSString *packageLine = controlLines.count > 0 ? controlLines[0] : @"Package: unknown";
+
+            NSString *existing = [NSString stringWithContentsOfFile:statusFile encoding:NSUTF8StringEncoding error:nil];
+            if (!existing || ![existing containsString:packageLine]) {
+                NSString *statusEntry = [NSString stringWithFormat:
+                    @"\n%@\nStatus: install ok installed\nPriority: optional\nSection: Packaging\n%@\n\n",
+                    packageLine, controlContent];
+                // Append to status file
+                if (existing) {
+                    [existing writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:statusFile];
+                    [fh seekToEndOfFile];
+                    [fh writeData:[statusEntry dataUsingEncoding:NSUTF8StringEncoding]];
+                    [fh closeFile];
+                } else {
+                    [statusEntry writeToFile:statusFile atomically:NO encoding:NSUTF8StringEncoding error:nil];
+                }
+            }
         }
     }
 
