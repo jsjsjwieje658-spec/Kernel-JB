@@ -129,68 +129,89 @@ static BOOL checkRootHideJBRAND(NSString *str)
         NSString *jbrootSearchPath = @"/var/containers/Bundle/Application";
         NSString *randomizedJailbreakPath;
 
-        // Try NSFileManager first
-        NSError *listError = nil;
-        NSArray *subItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbrootSearchPath error:&listError];
-        if (listError) {
-            NSLog(@"[RootHide] locateJailbreakRoot: NSFileManager listing failed: %@", listError);
-            // Fallback: use /bin/ls via exec_cmd_root (AMFI may block NSFileManager)
-            char outBuf[8192] = {0};
-            int pipefd[2];
-            if (pipe(pipefd) == 0) {
-                pid_t pid = 0;
-                posix_spawn_file_actions_t action;
-                posix_spawn_file_actions_init(&action);
-                posix_spawn_file_actions_adddup2(&action, pipefd[1], STDOUT_FILENO);
-                posix_spawn_file_actions_addclose(&action, pipefd[0]);
-                posix_spawn_file_actions_addclose(&action, pipefd[1]);
+        // AMFI blocks NSFileManager from listing /var/containers/Bundle/Application/
+        // even when running as root. We MUST use exec_cmd_root to spawn /bin/ls
+        // with persona override — the child process gets a fresh AMFI context.
+        NSLog(@"[RootHide] locateJailbreakRoot: listing %@ via exec_cmd_root", jbrootSearchPath);
 
-                posix_spawnattr_t attr;
-                posix_spawnattr_init(&attr);
-                posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-                posix_spawnattr_set_persona_uid_np(&attr, 0);
-                posix_spawnattr_set_persona_gid_np(&attr, 0);
-
-                char *argv[] = {"/bin/ls", "-1", (char *)jbrootSearchPath.UTF8String, NULL};
-                int spawnErr = posix_spawn(&pid, "/bin/ls", &action, &attr, argv, NULL);
-                posix_spawnattr_destroy(&attr);
-                posix_spawn_file_actions_destroy(&action);
-                close(pipefd[1]);
-
-                if (spawnErr == 0) {
-                    ssize_t n = read(pipefd[0], outBuf, sizeof(outBuf) - 1);
-                    close(pipefd[0]);
-                    if (n > 0) {
-                        NSString *output = [NSString stringWithUTF8String:outBuf];
-                        subItems = [output componentsSeparatedByString:@"\n"];
-                        NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls found %lu items", (unsigned long)subItems.count);
-                    }
-                } else {
-                    close(pipefd[0]);
-                    NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls spawn failed: %d", spawnErr);
-                }
-                int status = 0;
-                if (pid > 0) waitpid(pid, &status, 0);
-            }
+        // Create a pipe to capture /bin/ls output
+        int pipefd[2];
+        if (pipe(pipefd) != 0) {
+            NSLog(@"[RootHide] locateJailbreakRoot: pipe() failed");
+            return;
         }
 
-        NSLog(@"[RootHide] locateJailbreakRoot: scanning %@ (%lu items)", jbrootSearchPath, (unsigned long)subItems.count);
+        pid_t pid = 0;
+        posix_spawn_file_actions_t action;
+        posix_spawn_file_actions_init(&action);
+        posix_spawn_file_actions_adddup2(&action, pipefd[1], STDOUT_FILENO);
+        posix_spawn_file_actions_addclose(&action, pipefd[0]);
+        posix_spawn_file_actions_addclose(&action, pipefd[1]);
 
-        for (NSString *__strong subItem in subItems) {
-            subItem = [subItem stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (subItem.length == 0) continue;
-            // Log all items that start with . (hidden dirs)
-            if ([subItem hasPrefix:@"."]) {
-                NSLog(@"[RootHide] locateJailbreakRoot: found hidden dir: %@ (len=%lu)", subItem, (unsigned long)subItem.length);
-            }
-            if (subItem.length == 23 && [subItem hasPrefix:@".jbroot-"]) {
-                NSString *jbrandStr = [subItem substringFromIndex:8];
-                NSLog(@"[RootHide] locateJailbreakRoot: checking .jbroot jbrand=%@ valid=%d", jbrandStr, checkRootHideJBRAND(jbrandStr));
-                if (checkRootHideJBRAND(jbrandStr)) {
-                    randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:subItem];
-                    NSLog(@"[RootHide] locateJailbreakRoot: FOUND existing jbroot at %@", randomizedJailbreakPath);
-                    break;
+        posix_spawnattr_t attr;
+        posix_spawnattr_init(&attr);
+        posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+        posix_spawnattr_set_persona_uid_np(&attr, 0);
+        posix_spawnattr_set_persona_gid_np(&attr, 0);
+
+        char *argv[] = {"/bin/ls", "-1a", (char *)jbrootSearchPath.UTF8String, NULL};
+        int spawnErr = posix_spawn(&pid, "/bin/ls", &action, &attr, argv, NULL);
+        posix_spawnattr_destroy(&attr);
+        posix_spawn_file_actions_destroy(&action);
+        close(pipefd[1]);
+
+        if (spawnErr != 0) {
+            close(pipefd[0]);
+            NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls spawn failed: %d", spawnErr);
+            // Fallback: try NSFileManager (might work after unsandbox)
+            NSError *listError = nil;
+            NSArray *fmItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbrootSearchPath error:&listError];
+            if (listError) {
+                NSLog(@"[RootHide] locateJailbreakRoot: NSFileManager also failed: %@", listError);
+            } else {
+                for (NSString *subItem in fmItems) {
+                    if (subItem.length == 23 && [subItem hasPrefix:@".jbroot-"]) {
+                        NSString *jbrandStr = [subItem substringFromIndex:8];
+                        if (checkRootHideJBRAND(jbrandStr)) {
+                            randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:subItem];
+                            NSLog(@"[RootHide] locateJailbreakRoot: FOUND via NSFileManager: %@", randomizedJailbreakPath);
+                            break;
+                        }
+                    }
                 }
+            }
+        } else {
+            // Read /bin/ls output
+            char outBuf[16384] = {0};
+            ssize_t n = read(pipefd[0], outBuf, sizeof(outBuf) - 1);
+            close(pipefd[0]);
+            int status = 0;
+            if (pid > 0) waitpid(pid, &status, 0);
+
+            if (n > 0) {
+                NSString *output = [NSString stringWithUTF8String:outBuf];
+                NSArray *subItems = [output componentsSeparatedByString:@"\n"];
+                NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls -1a found %lu items", (unsigned long)subItems.count);
+
+                for (NSString *subItem in subItems) {
+                    NSString *trimmed = [subItem stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                    if (trimmed.length == 0) continue;
+                    if ([trimmed hasPrefix:@"."]) {
+                        NSLog(@"[RootHide] locateJailbreakRoot: found hidden: %@", trimmed);
+                    }
+                    if (trimmed.length == 23 && [trimmed hasPrefix:@".jbroot-"]) {
+                        NSString *jbrandStr = [trimmed substringFromIndex:8];
+                        BOOL valid = checkRootHideJBRAND(jbrandStr);
+                        NSLog(@"[RootHide] locateJailbreakRoot: .jbroot- found, jbrand=%@ valid=%d", jbrandStr, valid);
+                        if (valid) {
+                            randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:trimmed];
+                            NSLog(@"[RootHide] locateJailbreakRoot: FOUND existing jbroot at %@", randomizedJailbreakPath);
+                            break;
+                        }
+                    }
+                }
+            } else {
+                NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls produced no output");
             }
         }
 
