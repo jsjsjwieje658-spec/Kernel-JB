@@ -20,7 +20,7 @@
 #import "DOSceneDelegate.h"
 #import "DOPSJetsamListItemsController.h"
 #import "DOButtonCell.h"
-#import "DORootHideManager.h"
+// DORootHideManager.h removed — RootHide settings UI causes crash
 
 @interface DOSettingsController ()
 
@@ -341,27 +341,9 @@
                     [specifiers addObject:removeJailbreakSpecifier];
                 }
                 
-                // ========== ROOTHIDE MANAGER SECTION ==========
-                // Add RootHide Manager for advanced jailbreak hiding
-                if (envManager.isJailbroken) {
-                    PSSpecifier *roothideGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
-                    roothideGroupSpecifier.name = @"ROOTHIDE MANAGER";
-                    [roothideGroupSpecifier setProperty:@"Advanced jailbreak hiding with selective injection and path randomization. Hide JB from specific apps." forKey:@"footerText"];
-                    [specifiers addObject:roothideGroupSpecifier];
-                    
-                    PSSpecifier *roothideSpecifier = [PSSpecifier 
-                        preferenceSpecifierNamed:@"RootHide Settings" 
-                        target:self 
-                        set:defSetter 
-                        get:defGetter 
-                        detail:[DORootHideManager class] 
-                        cell:PSLinkCell 
-                        edit:nil];
-                    [roothideSpecifier setProperty:@YES forKey:@"enabled"];
-                    [roothideSpecifier setProperty:@"eye.slash.fill" forKey:@"iconImage"];
-                    [specifiers addObject:roothideSpecifier];
-                }
-                // ========== END ROOTHIDE SECTION ==========
+                // RootHide Manager section removed — causes Settings crash
+                // when scrolling down.  RootHide hiding is handled
+                // automatically by the bootstrap, no UI needed.
             }
         }
         

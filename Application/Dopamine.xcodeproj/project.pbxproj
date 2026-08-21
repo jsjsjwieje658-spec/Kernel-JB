@@ -48,7 +48,6 @@
 		04DD0B442B7CBE2E0055DE4F /* DOThemeManager.m in Sources */ = {isa = PBXBuildFile; fileRef = 04DD0B432B7CBE2E0055DE4F /* DOThemeManager.m */; };
 		04DD0B472B7CBEEA0055DE4F /* DOTheme.m in Sources */ = {isa = PBXBuildFile; fileRef = 04DD0B462B7CBEEA0055DE4F /* DOTheme.m */; };
 		04DD0B592B7D19E60055DE4F /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 04DD0B5B2B7D19E60055DE4F /* Localizable.strings */; };
-		AA30B809199FD7946D37DEB0 /* DORootHideManager.m in Sources */ = {isa = PBXBuildFile; fileRef = ACE952DED9AFA24E5866CFF9 /* DORootHideManager.m */; };
 		2F11A317301BFDAE00C1C9F0 /* libjailbreak.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 8C3B2E03301BC1F400C979A6 /* libjailbreak.dylib */; platformFilter = ios; };
 		2F11A325301BFE9200C1C9F0 /* momentarius.c in Sources */ = {isa = PBXBuildFile; fileRef = 2F11A322301BFE9200C1C9F0 /* momentarius.c */; };
 		2F11A326301BFEC900C1C9F0 /* momentarius.c in Sources */ = {isa = PBXBuildFile; fileRef = 2F11A322301BFE9200C1C9F0 /* momentarius.c */; };
@@ -396,8 +395,6 @@
 		0424796E2B66916B0082581B /* DOCreditsViewController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DOCreditsViewController.h; sourceTree = "<group>"; };
 		0424796F2B66916B0082581B /* Credits.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; path = Credits.plist; sourceTree = "<group>"; };
 		042479702B66916B0082581B /* DOSettingsController.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DOSettingsController.h; sourceTree = "<group>"; };
-		ABA71EF6989D22732C013237 /* DORootHideManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DORootHideManager.h; sourceTree = "<group>"; };
-		ACE952DED9AFA24E5866CFF9 /* DORootHideManager.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = DORootHideManager.m; sourceTree = "<group>"; };
 		042479722B66916B0082581B /* DOHeaderCell.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DOHeaderCell.h; sourceTree = "<group>"; };
 		042479732B66916B0082581B /* DOCreditsCell.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = DOCreditsCell.m; sourceTree = "<group>"; };
 		042479742B66916B0082581B /* DOButtonCell.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = DOButtonCell.h; sourceTree = "<group>"; };
@@ -891,8 +888,6 @@
 				0424796B2B66916B0082581B /* DOCreditsViewController.m */,
 				042479702B66916B0082581B /* DOSettingsController.h */,
 				0424796C2B66916B0082581B /* DOSettingsController.m */,
-					ABA71EF6989D22732C013237 /* DORootHideManager.h */,
-					ACE952DED9AFA24E5866CFF9 /* DORootHideManager.m */,
 				04DD0B332B7BA38C0055DE4F /* DOLicenseViewController.h */,
 				04DD0B342B7BA38C0055DE4F /* DOLicenseViewController.m */,
 			);
@@ -2331,7 +2326,6 @@
 				8C71981D2ABF0E82003C6658 /* DOSceneDelegate.m in Sources */,
 				042479A32B66916B0082581B /* DOSettingsController.m in Sources */,
 
-				AA30B809199FD7946D37DEB0 /* DORootHideManager.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
