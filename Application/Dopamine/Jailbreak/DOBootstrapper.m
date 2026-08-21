@@ -1821,12 +1821,40 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     }
 
     // ROOTHIDE: Re-trust-cache AFTER installing packages.
-    // Sileo/Zebra/RootHide app binaries are at <jbroot>/Applications/*.app/
-    // They were NOT there during the first trustCacheBootstrapBinaries call
-    // (which ran before installPackageManagers).  Without trust-caching,
-    // AMFI kills them with SIGKILL when SpringBoard launches them → black screen crash.
     NSLog(@"[RootHide] Re-trust-caching after package install (includes /Applications/)...");
     [self trustCacheBootstrapBinaries];
+
+    // ROOTHIDE: Also trust-cache the Dopamine app itself!
+    // After jailbreak, SpringBoard may try to relaunch Dopamine.
+    // If Dopamine's binary is NOT in the trust cache, AMFI kills it → crash.
+    // RootHide Bootstrap app doesn't have this issue because it spawns
+    // itself via persona override.  Dopamine runs in-process, so its
+    // binary must be trust-cached explicitly.
+    NSString *dopamineExePath = [[NSBundle mainBundle].executablePath];
+    if (dopamineExePath) {
+        NSLog(@"[RootHide] Trust-caching Dopamine app itself: %@", dopamineExePath);
+        int tcR = jbclient_trust_file_by_path(dopamineExePath.fileSystemRepresentation);
+        NSLog(@"[RootHide] Trust-cache Dopamine: %d", tcR);
+        // Also trust-cache all .dylib files in the app bundle
+        NSString *frameworksPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Frameworks"];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if ([fm fileExistsAtPath:frameworksPath]) {
+            for (NSString *item in [fm contentsOfDirectoryAtPath:frameworksPath error:nil]) {
+                if ([item hasSuffix:@".dylib"] || [item hasSuffix:@".framework"]) {
+                    NSString *itemPath = [frameworksPath stringByAppendingPathComponent:item];
+                    jbclient_trust_file_by_path(itemPath.fileSystemRepresentation);
+                }
+            }
+        }
+        // Trust-cache all files in the app bundle (dylibs, frameworks, etc.)
+        for (NSString *item in [fm contentsOfDirectoryAtPath:[NSBundle mainBundle].bundlePath error:nil]) {
+            NSString *itemPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:item];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:itemPath error:nil];
+            if (attrs[NSFileType] == NSFileTypeRegular) {
+                jbclient_trust_file_by_path(itemPath.fileSystemRepresentation);
+            }
+        }
+    }
 
     return nil;
 }
