@@ -1757,27 +1757,23 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
         if (shouldInstallLaunchctl) {
             NSString *launchctlPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"launchctl_1_1.2.0_iphoneos-arm64e.deb"];
-            NSString *errMsg = nil;
-            int r = [self installPackage:launchctlPath captureError:&errMsg];
-            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install launchctl: %d\n%@\n", r, errMsg ?: @""]}];
+            NSError *installErr = [self manuallyInstallDeb:launchctlPath appName:@"launchctl"];
+            if (installErr) NSLog(@"[RootHide] launchctl install (non-fatal): %@", installErr);
         }
 
         if (shouldInstallLibroot) {
             NSString *librootPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libroot.deb"];
-            NSString *errMsg = nil;
-            int r = [self installPackage:librootPath captureError:&errMsg];
-            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install libroot: %d\n%@\n", r, errMsg ?: @""]}];
+            NSError *installErr = [self manuallyInstallDeb:librootPath appName:@"libroot"];
+            if (installErr) NSLog(@"[RootHide] libroot install (non-fatal): %@", installErr);
         }
-        
+
         if (shouldInstallLibkrw) {
             NSString *libkrwPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libkrw-dopamine.deb"];
-            NSString *errMsg = nil;
-            int r = [self installPackage:libkrwPath captureError:&errMsg];
-            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install the libkrw plugin: %d\n%@\n", r, errMsg ?: @""]}];
+            NSError *installErr = [self manuallyInstallDeb:libkrwPath appName:@"libkrw"];
+            if (installErr) NSLog(@"[RootHide] libkrw install (non-fatal): %@", installErr);
         }
-        
+
         if (shouldInstallBasebinLink) {
-            // Clean symlinks from earlier Dopamine versions
             if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/bin/opainject")]) {
                 [[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/bin/opainject") error:nil];
             }
@@ -1787,15 +1783,10 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/lib/libjailbreak.dylib")]) {
                 [[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/lib/libjailbreak.dylib") error:nil];
             }
-            if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/bin/libjailbreak.dylib")]) {
-                // Yes this exists >.< was a typo
-                [[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/bin/libjailbreak.dylib") error:nil];
-            }
-            
+
             NSString *basebinLinkPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"basebin-link.deb"];
-            NSString *errMsg = nil;
-            int r = [self installPackage:basebinLinkPath captureError:&errMsg];
-            if (r != 0) return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install basebin link: %d\n%@\n", r, errMsg ?: @""]}];
+            NSError *installErr = [self manuallyInstallDeb:basebinLinkPath appName:@"basebin-link"];
+            if (installErr) NSLog(@"[RootHide] basebin-link install (non-fatal): %@", installErr);
         }
 
         // RootHide Manager app auto-install.  We look for the .deb under
@@ -1809,11 +1800,12 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             NSString *roothideAppDeb = [packagesDir stringByAppendingPathComponent:@"roothideapp_1.3.9_iphoneos-arm64e.deb"];
             if ([[NSFileManager defaultManager] fileExistsAtPath:roothideAppDeb]) {
                 [[DOUIManager sharedInstance] sendLog:@"Installing RootHide Manager" debug:NO];
-                int r = [self installPackage:roothideAppDeb];
-                if (r != 0) {
-                    // Non-fatal: log and continue.  The user can install
-                    // RootHide Manager later from a package manager.
-                    NSLog(@"[RootHide] Failed to auto-install RootHide Manager app: %d (non-fatal)", r);
+                NSError *installErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
+                if (installErr) {
+                    NSLog(@"[RootHide] RootHide Manager install (non-fatal): %@", installErr);
+                } else {
+                    // uicache for RootHide Manager
+                    exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", "/Applications/RootHide.app", NULL);
                 }
             }
         }
