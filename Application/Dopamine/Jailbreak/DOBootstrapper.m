@@ -1524,12 +1524,14 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         // Create dpkg dir if needed
         [fm createDirectoryAtPath:JBROOT_PATH(@"/var/lib/dpkg") withIntermediateDirectories:YES attributes:nil error:nil];
         // Append to status file
+        NSArray *controlLines = [controlContent componentsSeparatedByString:@"\n"];
+        NSString *packageName = controlLines.count > 0 ? controlLines[0] : @"unknown";
         NSString *statusEntry = [NSString stringWithFormat:
-            @"\nPackage: %@\nStatus: install ok installed\nPriority: optional\nSection: Packaging\n%@\n\n",
-            [controlContent lines][0] ?: @"unknown", controlContent];
+            @"\n%@\nStatus: install ok installed\nPriority: optional\nSection: Packaging\n%@\n\n",
+            packageName, controlContent];
         // Read existing, check if already installed
         NSString *existing = [NSString stringWithContentsOfFile:statusFile encoding:NSUTF8StringEncoding error:nil];
-        if (!existing || ![existing containsString:[controlContent lines][0] ?: @""]) {
+        if (!existing || ![existing containsString:packageName]) {
             [statusEntry writeToFile:statusFile atomically:NO encoding:NSUTF8StringEncoding error:nil];
         }
     }
