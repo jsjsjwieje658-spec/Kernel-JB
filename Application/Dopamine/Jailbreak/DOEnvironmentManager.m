@@ -197,36 +197,54 @@ static BOOL checkRootHideJBRAND(NSString *str)
         NSString *randomJailbreakFolderName = [NSString stringWithFormat:@".jbroot-%@", jbrandStr];
         NSString *randomizedJailbreakPath = [@"/var/containers/Bundle/Application" stringByAppendingPathComponent:randomJailbreakFolderName];
 
-        // If migrating from old Dopamine path, delete the old directory
-        // (we can't move across filesystems, and the old bootstrap is
-        //  incompatible with RootHide anyway — it has /procursus subdir).
+        // If migrating from old Dopamine path, delete the old directory.
         if (_bootstrapNeedsMigration) {
             NSString *oldPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
-            // Walk up to the dopamine-XXX dir (parent of procursus)
             NSString *oldDopamineDir = [oldPath stringByDeletingLastPathComponent];
             NSLog(@"[RootHide] Removing old Dopamine bootstrap at %@", oldDopamineDir);
-            // Use exec_cmd to rm -rf the old directory (NSFileManager can't
-            // cross filesystem boundaries and may hit AMFI restrictions)
-            exec_cmd_trusted("/bin/rm", "-rf", oldDopamineDir.fileSystemRepresentation, NULL);
-            // Clear rootPath so it's set to the new path below
+            // Use exec_cmd_root (persona override) for rm -rf
+            exec_cmd_root("/bin/rm", "-rf", oldDopamineDir.fileSystemRepresentation, NULL);
             free(gSystemInfo.jailbreakInfo.rootPath);
             gSystemInfo.jailbreakInfo.rootPath = NULL;
             _bootstrapNeedsMigration = NO;
         }
 
-        // Create the new .jbroot-XXX directory using POSIX mkdir.
-        // We are root (uid 0) and unsandboxed at this point.
-        // NSFileManager's createDirectory uses mkdir(2) which should work,
-        // but let's use POSIX directly to avoid any Foundation overhead.
-        const char *path = randomizedJailbreakPath.fileSystemRepresentation;
-        if (mkdir(path, 0755) != 0 && errno != EEXIST) {
-            error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
-                                   userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to create jbroot directory %s: %s", path, strerror(errno)]}];
-            NSLog(@"[RootHide] mkdir failed: %s", strerror(errno));
+        // Create the new .jbroot-XXX directory.
+        //
+        // WHY exec_cmd_root instead of mkdir(2):
+        //   Even though we setuid(0) and unsandbox (mac_label_set), the AMFI
+        //   MAC policy still blocks direct mkdir on /var/containers/Bundle/Application/
+        //   from within the Dopamine app process.  The RootHide Bootstrap app
+        //   avoids this by spawning a CHILD process via posix_spawn with
+        //   persona override (POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE + uid 0).
+        //   The child process runs with a FRESH AMFI context that allows
+        //   the mkdir to succeed.
+        //
+        //   We use the same approach: spawn /bin/mkdir via exec_cmd_root,
+        //   which calls posix_spawnattr_set_persona_np(99, OVERRIDE) +
+        //   posix_spawnattr_set_persona_uid_np(0) + gid 0.
+        NSLog(@"[RootHide] Creating jbroot at %@ via root spawn", randomizedJailbreakPath);
+        int mkdirRet = exec_cmd_root("/bin/mkdir", "-m", "0755",
+                                      randomizedJailbreakPath.fileSystemRepresentation, NULL);
+        if (mkdirRet != 0) {
+            // Fallback: try mkdir(2) directly
+            NSLog(@"[RootHide] exec_cmd_root mkdir returned %d, trying direct mkdir(2)", mkdirRet);
+            const char *path = randomizedJailbreakPath.fileSystemRepresentation;
+            if (mkdir(path, 0755) != 0 && errno != EEXIST) {
+                error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
+                                       userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to create jbroot directory %s: %s", path, strerror(errno)]}];
+                NSLog(@"[RootHide] mkdir(2) also failed: %s", strerror(errno));
+            }
+            else {
+                chown(path, 0, 0);
+                NSLog(@"[RootHide] mkdir(2) succeeded for %@", randomizedJailbreakPath);
+                gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
+            }
         }
         else {
-            // chown to root:wheel
-            chown(path, 0, 0);
+            // chown to root:wheel via root spawn too
+            exec_cmd_root("/usr/sbin/chown", "root:wheel",
+                          randomizedJailbreakPath.fileSystemRepresentation, NULL);
             NSLog(@"[RootHide] Created jbroot at %@", randomizedJailbreakPath);
             gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
         }
