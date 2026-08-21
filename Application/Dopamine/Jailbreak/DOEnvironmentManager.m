@@ -248,6 +248,21 @@ static BOOL checkRootHideJBRAND(NSString *str)
 {
     NSError *error = nil;
 
+    // ROOTHIDE FIX: Clear rootPath and re-scan.
+    // locateJailbreakRoot was called in init() BEFORE elevatePrivileges,
+    // so it found the legacy /private/preboot path (not .jbroot-XXX).
+    // Now that we ARE root, clear rootPath and re-scan so we can find
+    // existing .jbroot-XXX via /bin/ls (which needs root for AMFI).
+    if (gSystemInfo.jailbreakInfo.rootPath) {
+        NSString *oldPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
+        // Only clear if it's the legacy path (contains /private/preboot)
+        if ([oldPath containsString:@"/private/preboot/"]) {
+            NSLog(@"[RootHide] ensureJailbreakRootExists: clearing legacy rootPath %@ to re-scan", oldPath);
+            free(gSystemInfo.jailbreakInfo.rootPath);
+            gSystemInfo.jailbreakInfo.rootPath = NULL;
+        }
+    }
+
     [self locateJailbreakRoot];
 
     // DOPACLEAN logic to move a corrupted dopamine directory to a different path to at least make jailbreaking work again
