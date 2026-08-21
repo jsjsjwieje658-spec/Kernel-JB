@@ -1170,7 +1170,10 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     BOOL dpkgExists = [fm fileExistsAtPath:dpkgPath];
     NSString *bootstrappedPath = JBROOT_PATH(@"/.thebootstrapped");
     BOOL isBootstrapped = [fm fileExistsAtPath:bootstrappedPath];
-    BOOL needsBootstrap = !isBootstrapped && ![fm fileExistsAtPath:installedPath];
+    BOOL installedExists = [fm fileExistsAtPath:installedPath];
+    BOOL needsBootstrap = !isBootstrapped && !installedExists;
+    NSLog(@"[RootHide] prepareBootstrap: .thebootstrapped=%d .installed_dopamine=%d dpkg=%d needsBootstrap=%d",
+          isBootstrapped, installedExists, dpkgExists, needsBootstrap);
 
     // CASE 2: bootstrap was extracted before but with the wrong structure.
     // Force re-extraction so the new RootHide bootstrap replaces the old one.

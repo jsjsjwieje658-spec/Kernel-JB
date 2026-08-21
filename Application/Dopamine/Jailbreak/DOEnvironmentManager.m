@@ -174,21 +174,29 @@ static BOOL checkRootHideJBRAND(NSString *str)
             }
         }
 
+        NSLog(@"[RootHide] locateJailbreakRoot: scanning %@ (%lu items)", jbrootSearchPath, (unsigned long)subItems.count);
+
         for (NSString *__strong subItem in subItems) {
-            // Trim whitespace
             subItem = [subItem stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (subItem.length == 0) continue;
+            // Log all items that start with . (hidden dirs)
+            if ([subItem hasPrefix:@"."]) {
+                NSLog(@"[RootHide] locateJailbreakRoot: found hidden dir: %@ (len=%lu)", subItem, (unsigned long)subItem.length);
+            }
             if (subItem.length == 23 && [subItem hasPrefix:@".jbroot-"]) {
                 NSString *jbrandStr = [subItem substringFromIndex:8];
+                NSLog(@"[RootHide] locateJailbreakRoot: checking .jbroot jbrand=%@ valid=%d", jbrandStr, checkRootHideJBRAND(jbrandStr));
                 if (checkRootHideJBRAND(jbrandStr)) {
                     randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:subItem];
-                    NSLog(@"[RootHide] locateJailbreakRoot: found existing jbroot at %@", randomizedJailbreakPath);
+                    NSLog(@"[RootHide] locateJailbreakRoot: FOUND existing jbroot at %@", randomizedJailbreakPath);
                     break;
                 }
             }
         }
 
-        // Legacy migration: old Dopamine path in /private/preboot
+        // Legacy migration
         if (!randomizedJailbreakPath) {
+            NSLog(@"[RootHide] locateJailbreakRoot: no .jbroot-XXX found, checking legacy /private/preboot");
             NSString *activePrebootPath = [self activePrebootPath];
             for (NSString *subItem in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:activePrebootPath error:nil]) {
                 if (subItem.length == 15 && [subItem hasPrefix:@"dopamine-"]) {
@@ -197,6 +205,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
                     if ([[NSFileManager defaultManager] fileExistsAtPath:[legacyProcursus stringByAppendingPathComponent:@".installed_dopamine"]]) {
                         randomizedJailbreakPath = legacyPath;
                         _bootstrapNeedsMigration = YES;
+                        NSLog(@"[RootHide] locateJailbreakRoot: found legacy dopamine path: %@", legacyPath);
                         break;
                     }
                 }
@@ -209,7 +218,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
                 NSLog(@"[RootHide] locateJailbreakRoot: set rootPath to %s", gSystemInfo.jailbreakInfo.rootPath);
             }
         } else {
-            NSLog(@"[RootHide] locateJailbreakRoot: no existing jbroot found");
+            NSLog(@"[RootHide] locateJailbreakRoot: NO existing jbroot found — will create new");
         }
     }
 }
