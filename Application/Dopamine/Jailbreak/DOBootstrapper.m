@@ -1372,9 +1372,11 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     for (NSDictionary *packageManagerDict in enabledPackageManagers) {
         NSString *path = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:packageManagerDict[@"Package"]];
         NSString *name = packageManagerDict[@"Display Name"];
-        int r = [self installPackage:path];
+        NSString *errMsg = nil;
+        int r = [self installPackage:path captureError:&errMsg];
         if (r != 0) {
-            return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install %@: %d\n", name, r]}];
+            NSLog(@"[RootHide] Failed to install %@ (exit %d): %@", name, r, errMsg);
+            return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install %@: %d\n%@\n", name, r, errMsg ?: @"(no error output)"]}];
         }
     }
     return nil;
