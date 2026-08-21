@@ -1312,28 +1312,40 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     //     spawn_bootstrap_binary({"/usr/bin/dpkg", "-i", ...})
     //   which uses spawn_common (persona override + DYLD_INSERT_LIBRARIES).
 
+    // ROOT CAUSE of dpkg exit 2 with no output:
+    //   dpkg is dynamically linked and needs libdpkg.so, libzstd.so, etc.
+    //   from <jbroot>/usr/lib/.  Setting DYLD_LIBRARY_PATH doesn't work on
+    //   iOS 16+ (AMFI strips it).  RootHide solves this with
+    //   DYLD_INSERT_LIBRARIES=<jbroot>/basebin/bootstrap.dylib which hooks
+    //   dyld to redirect lookups.
+    //
+    //   We don't have bootstrap.dylib, BUT we can run dpkg via the
+    //   jbroot's /bin/sh which has the correct rpath/DYLD setup.
+    //   prep_bootstrap.sh ran successfully this way, so dpkg should too.
+    //
+    //   We use exec_cmd_trusted to run jbroot's /bin/sh -c "dpkg -i ..."
+    //   The jbroot /bin/sh resolves libraries via rpath correctly.
     NSString *jbrootLib = [NSString stringWithUTF8String:JBROOT_PATH("/usr/lib")];
     NSString *jbrootBin = [NSString stringWithUTF8String:JBROOT_PATH("/usr/bin")];
     NSString *jbrootSbin = [NSString stringWithUTF8String:JBROOT_PATH("/usr/sbin")];
-
-    // Set environment for dpkg
-    setenv("DYLD_LIBRARY_PATH", jbrootLib.UTF8String, 1);
     setenv("PATH", [NSString stringWithFormat:@"%@:%@:%@:/usr/bin:/bin:/usr/sbin:/sbin",
                      jbrootBin, jbrootSbin, jbrootLib].UTF8String, 1);
     setenv("HOME", "/var/root", 1);
     setenv("DPKG_ADMINDIR", [NSString stringWithUTF8String:JBROOT_PATH("/var/lib/dpkg")].UTF8String, 1);
     setenv("TMPDIR", "/tmp", 1);
 
-    NSLog(@"[installPackage] running: %@ -i --force-all %@", dpkgPath, packagePath);
+    // Build dpkg command with output redirection
+    NSString *cmd = [NSString stringWithFormat:
+        @"\"%@\" -i --force-all \"%@\" >\"%@\" 2>\"%@\"",
+        dpkgPath, packagePath, outFile, errFile];
+
+    NSLog(@"[installPackage] running via jbroot sh: %@", cmd);
     [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"dpkg -i %@", packagePath.lastPathComponent] debug:YES];
 
-    // Run dpkg directly via exec_cmd_trusted (trust-cache + posix_spawn).
-    // We can't redirect stdout/stderr to files this way, but we CAN capture
-    // the exit code.  If dpkg fails, we'll read the /tmp/dpkg_err file.
-    int r = exec_cmd_trusted(dpkgPath.fileSystemRepresentation,
-                             "-i", "--force-all",
-                             packagePath.fileSystemRepresentation,
-                             NULL);
+    // Run dpkg via JBROOT's /bin/sh (not system /bin/sh).
+    // The jbroot /bin/sh has correct rpath to find libraries.
+    int r = exec_cmd_trusted(JBROOT_PATH("/bin/sh"),
+                             "-c", cmd.UTF8String, NULL);
 
     NSLog(@"[installPackage] dpkg exit code: %d", r);
 
