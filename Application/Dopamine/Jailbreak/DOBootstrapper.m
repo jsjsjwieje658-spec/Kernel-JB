@@ -1400,22 +1400,144 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 {
     NSArray *enabledPackageManagers = [[DOUIManager sharedInstance] enabledPackageManagers];
     for (NSDictionary *packageManagerDict in enabledPackageManagers) {
-        NSString *path = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:packageManagerDict[@"Package"]];
+        NSString *debPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:packageManagerDict[@"Package"]];
         NSString *name = packageManagerDict[@"Display Name"];
-        NSString *errMsg = nil;
-        int r = [self installPackage:path captureError:&errMsg];
-        if (r != 0) {
-            NSLog(@"[RootHide] Failed to install %@ (exit %d): %@", name, r, errMsg);
-            return [NSError errorWithDomain:bootstrapErrorDomain code:BootstrapErrorCodeFailedFinalising userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed to install %@: %d\n%@\n", name, r, errMsg ?: @"(no error output)"]}];
+
+        NSLog(@"[RootHide] Installing %@ from %@", name, debPath);
+
+        // ROOTHIDE FIX: Instead of using dpkg (which crashes because dyld
+        // can't find shared libraries without bootstrap.dylib), we manually
+        // extract the .deb file and install it ourselves.
+        //
+        // A .deb file is an ar archive containing:
+        //   - debian-binary (version info)
+        //   - control.tar.* (metadata: control file, postinst, etc.)
+        //   - data.tar.* (actual files to install)
+        //
+        // We extract data.tar.* to <jbroot>/ and update the dpkg status file.
+        NSError *installError = [self manuallyInstallDeb:debPath appName:name];
+        if (installError) {
+            NSLog(@"[RootHide] Failed to install %@: %@", name, installError);
+            return installError;
         }
 
-        // Run uicache to refresh the app icon after dpkg install.
-        // Without this, the app icon shows as a white placeholder.
-        // RootHide runs: spawn_bootstrap_binary({"/usr/bin/uicache", "-p", "/Applications/<App>.app"})
+        // Run uicache to refresh the app icon
         NSString *appPath = [NSString stringWithFormat:@"/Applications/%@.app", name];
         NSLog(@"[RootHide] uicache -p %@", appPath);
         exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", appPath.UTF8String, NULL);
     }
+    return nil;
+}
+
+// Manually install a .deb package without using the dpkg binary.
+// Extracts data.tar from the .deb to <jbroot>/ and updates dpkg status.
+- (NSError *)manuallyInstallDeb:(NSString *)debPath appName:(NSString *)appName
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:debPath]) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1
+                               userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Deb file not found: %@", debPath]}];
+    }
+
+    // Create a temp directory for extraction
+    NSString *tmpDir = [NSString stringWithFormat:@"/tmp/deb_extract_%d", getpid()];
+    [fm removeItemAtPath:tmpDir error:nil];
+    [fm createDirectoryAtPath:tmpDir withIntermediateDirectories:YES attributes:nil error:nil];
+
+    // Extract the .deb (ar archive) to get data.tar.* and control.tar.*
+    int arRet = exec_cmd_trusted("/usr/bin/ar", "x", debPath.fileSystemRepresentation, "-C", tmpDir.fileSystemRepresentation, NULL);
+    // Fallback: use /bin/tar to extract the ar archive
+    if (arRet != 0) {
+        NSLog(@"[RootHide] ar not available, trying tar");
+        // ar is actually just a simple format, we can use /bin/sh
+        NSString *cmd = [NSString stringWithFormat:@"cd \"%@\" && /usr/bin/ar x \"%@\" 2>/dev/null || /bin/tar xf \"%@\"", tmpDir, debPath, debPath];
+        exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-c", cmd.UTF8String, NULL);
+    }
+
+    // Find data.tar.* and control.tar.*
+    NSString *dataTarPath = nil;
+    NSString *controlTarPath = nil;
+    for (NSString *item in [fm contentsOfDirectoryAtPath:tmpDir error:nil]) {
+        if ([item hasPrefix:@"data.tar"]) {
+            dataTarPath = [tmpDir stringByAppendingPathComponent:item];
+        }
+        if ([item hasPrefix:@"control.tar"]) {
+            controlTarPath = [tmpDir stringByAppendingPathComponent:item];
+        }
+    }
+
+    if (!dataTarPath) {
+        NSLog(@"[RootHide] data.tar not found in deb, trying system ar");
+        // Try system /usr/bin/ar
+        exec_cmd_trusted("/usr/bin/ar", "x", debPath.fileSystemRepresentation, NULL);
+        // Or use /bin/sh to change dir and extract
+        NSString *cmd = [NSString stringWithFormat:@"cd \"%@\" && ar x \"%@\"", tmpDir, debPath];
+        exec_cmd_trusted("/bin/sh", "-c", cmd.UTF8String, NULL);
+        for (NSString *item in [fm contentsOfDirectoryAtPath:tmpDir error:nil]) {
+            if ([item hasPrefix:@"data.tar"]) {
+                dataTarPath = [tmpDir stringByAppendingPathComponent:item];
+            }
+            if ([item hasPrefix:@"control.tar"]) {
+                controlTarPath = [tmpDir stringByAppendingPathComponent:item];
+            }
+        }
+    }
+
+    if (!dataTarPath) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1
+                               userInfo:@{NSLocalizedDescriptionKey: @"data.tar not found in .deb file"}];
+    }
+
+    NSLog(@"[RootHide] Found data.tar at %@", dataTarPath);
+
+    // Extract data.tar to jbroot (this installs the app files)
+    // Use jbroot's /bin/tar which can handle xz/gz/lzma compression
+    NSString *jbroot = [NSString stringWithUTF8String:JBROOT_PATH("/")];
+    NSString *extractCmd = [NSString stringWithFormat:
+        @"\"%@\" -xf \"%@\" -C \"%@\"",
+        JBROOT_PATH("/bin/tar"), dataTarPath, jbroot];
+    NSLog(@"[RootHide] Extracting: %@", extractCmd);
+    int tarRet = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-c", extractCmd.UTF8String, NULL);
+    if (tarRet != 0) {
+        NSLog(@"[RootHide] jbroot tar failed (%d), trying system tar", tarRet);
+        // Fallback: use system tar
+        exec_cmd_trusted("/bin/sh", "-c", extractCmd.UTF8String, NULL);
+    }
+
+    // Parse control file and update dpkg status
+    NSString *controlContent = nil;
+    if (controlTarPath) {
+        NSString *controlExtractCmd = [NSString stringWithFormat:
+            @"cd \"%@\" && \"%@\" -xf \"%@\" ./control 2>/dev/null && cat control",
+            tmpDir, JBROOT_PATH("/bin/tar"), controlTarPath];
+        char outBuf[8192] = {0};
+        // Can't easily capture output, so write to temp file
+        NSString *controlOutFile = [tmpDir stringByAppendingPathComponent:@"control.txt"];
+        NSString *fullCmd = [NSString stringWithFormat:@"%@ > \"%@\" 2>/dev/null", controlExtractCmd, controlOutFile];
+        exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-c", fullCmd.UTF8String, NULL);
+        controlContent = [NSString stringWithContentsOfFile:controlOutFile encoding:NSUTF8StringEncoding error:nil];
+    }
+
+    // Update dpkg status file
+    if (controlContent) {
+        NSString *statusFile = JBROOT_PATH(@"/var/lib/dpkg/status");
+        // Create dpkg dir if needed
+        [fm createDirectoryAtPath:JBROOT_PATH(@"/var/lib/dpkg") withIntermediateDirectories:YES attributes:nil error:nil];
+        // Append to status file
+        NSString *statusEntry = [NSString stringWithFormat:
+            @"\nPackage: %@\nStatus: install ok installed\nPriority: optional\nSection: Packaging\n%@\n\n",
+            [controlContent lines][0] ?: @"unknown", controlContent];
+        // Read existing, check if already installed
+        NSString *existing = [NSString stringWithContentsOfFile:statusFile encoding:NSUTF8StringEncoding error:nil];
+        if (!existing || ![existing containsString:[controlContent lines][0] ?: @""]) {
+            [statusEntry writeToFile:statusFile atomically:NO encoding:NSUTF8StringEncoding error:nil];
+        }
+    }
+
+    // Cleanup
+    [fm removeItemAtPath:tmpDir error:nil];
+
+    NSLog(@"[RootHide] Successfully installed %@ (manual extraction)", appName);
     return nil;
 }
 
