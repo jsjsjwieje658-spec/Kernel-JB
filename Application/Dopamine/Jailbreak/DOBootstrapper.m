@@ -1288,7 +1288,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     NSString *dpkgPath = [NSString stringWithUTF8String:JBROOT_PATH("/usr/bin/dpkg")];
 
     // Use /tmp/ instead of NSTemporaryDirectory() — /tmp is always writable
-    // by root and doesn't have sandbox restrictions that NSTemporaryDirectory
+    // by root and doesn't have sandbox restrictions that NSTemporaryDirectory()
     // might have for the app container.
     NSString *outFile = [NSString stringWithFormat:@"/tmp/dpkg_out_%d.txt", getpid()];
     NSString *errFile = [NSString stringWithFormat:@"/tmp/dpkg_err_%d.txt", getpid()];
@@ -1306,16 +1306,48 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         return -101;
     }
 
-    // Build the dpkg command.  Use --force-all to bypass dependency checks.
-    // Capture stdout and stderr separately so we can distinguish them.
-    NSString *cmd = [NSString stringWithFormat:
-        @"\"%@\" -i --force-all \"%@\" >\"%@\" 2>\"%@\"",
-        dpkgPath, packagePath, outFile, errFile];
+    // ROOT CAUSE of dpkg exit 2 with no output:
+    //   We were running dpkg via system "/bin/sh -c ...", but the system
+    //   /bin/sh doesn't have DYLD_LIBRARY_PATH set to <jbroot>/usr/lib/.
+    //   dpkg is dynamically linked and needs libdpkg.so, libzstd.so, etc.
+    //   from <jbroot>/usr/lib/. Without the library path, dyld can't find
+    //   them → dpkg crashes with SIGKILL before producing any output.
+    //
+    // FIX:
+    //   Run dpkg DIRECTLY (not through /bin/sh) using exec_cmd_trusted,
+    //   which calls jbclient_trust_file_by_path first (to add dpkg's
+    //   CDHash to the trust cache) then posix_spawn.
+    //
+    //   We set DYLD_LIBRARY_PATH to <jbroot>/usr/lib/ so dyld can find
+    //   the shared libraries.  We also set PATH and HOME for dpkg's
+    //   postinst scripts.
+    //
+    //   This matches how RootHide Bootstrap runs dpkg:
+    //     spawn_bootstrap_binary({"/usr/bin/dpkg", "-i", ...})
+    //   which uses spawn_common (persona override + DYLD_INSERT_LIBRARIES).
 
-    NSLog(@"[installPackage] running: %@", cmd);
+    NSString *jbrootLib = [NSString stringWithUTF8String:JBROOT_PATH("/usr/lib")];
+    NSString *jbrootBin = [NSString stringWithUTF8String:JBROOT_PATH("/usr/bin")];
+    NSString *jbrootSbin = [NSString stringWithUTF8String:JBROOT_PATH("/usr/sbin")];
+
+    // Set environment for dpkg
+    setenv("DYLD_LIBRARY_PATH", jbrootLib.UTF8String, 1);
+    setenv("PATH", [NSString stringWithFormat:@"%@:%@:%@:/usr/bin:/bin:/usr/sbin:/sbin",
+                     jbrootBin, jbrootSbin, jbrootLib].UTF8String, 1);
+    setenv("HOME", "/var/root", 1);
+    setenv("DPKG_ADMINDIR", [NSString stringWithUTF8String:JBROOT_PATH("/var/lib/dpkg")].UTF8String, 1);
+    setenv("TMPDIR", "/tmp", 1);
+
+    NSLog(@"[installPackage] running: %@ -i --force-all %@", dpkgPath, packagePath);
     [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"dpkg -i %@", packagePath.lastPathComponent] debug:YES];
 
-    int r = exec_cmd_trusted("/bin/sh", "-c", cmd.UTF8String, NULL);
+    // Run dpkg directly via exec_cmd_trusted (trust-cache + posix_spawn).
+    // We can't redirect stdout/stderr to files this way, but we CAN capture
+    // the exit code.  If dpkg fails, we'll read the /tmp/dpkg_err file.
+    int r = exec_cmd_trusted(dpkgPath.fileSystemRepresentation,
+                             "-i", "--force-all",
+                             packagePath.fileSystemRepresentation,
+                             NULL);
 
     NSLog(@"[installPackage] dpkg exit code: %d", r);
 
