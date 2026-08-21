@@ -307,7 +307,11 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         NSLog(@"[RootHide] patchRootHideAssertions failed (continuing): %@", patchError);
     }
 
+    // Write marker files so re-jailbreak skips extraction.
+    // .installed_dopamine: Dopamine's marker (backward compat)
+    // .thebootstrapped: RootHide's marker (checked by prepareBootstrap)
     [[NSData data] writeToFile:JBROOT_PATH(@"/.installed_dopamine") atomically:YES];
+    [[NSData data] writeToFile:JBROOT_PATH(@"/.thebootstrapped") atomically:YES];
     completion(nil);
 }
 
@@ -1154,23 +1158,19 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     
     // Determine whether we need to (re-)extract the bootstrap.
     //
-    // CASE 1: First jailbreak — .installed_dopamine does not exist.
-    //   → Extract bootstrap.
+    // ROOTHIDE: RootHide uses .thebootstrapped as the marker file.
+    // If .thebootstrapped exists in the jbroot, the bootstrap was already
+    // installed in a previous jailbreak → SKIP extraction entirely.
+    // This preserves user-installed packages (Sileo, Zebra, tweaks, etc.)
+    // across re-jailbreaks.
     //
-    // CASE 2: Re-jailbreak after a previous attempt with the OLD IPA that
-    //   shipped the standard Procursus bootstrap.  That bootstrap puts files
-    //   under ./var/jb/usr/bin/dpkg instead of ./usr/bin/dpkg, which is
-    //   incompatible with our RootHide patches (we removed /var/jb).
-    //   Detection: .installed_dopamine exists BUT ./usr/bin/dpkg does not.
-    //   → Force re-extract the new RootHide bootstrap.
-    //
-    // CASE 3: Re-jailbreak with the correct bootstrap already in place.
-    //   Detection: .installed_dopamine exists AND ./usr/bin/dpkg exists.
-    //   → Skip extraction.
+    // We also check .installed_dopamine for backward compatibility.
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *dpkgPath = JBROOT_PATH(@"/usr/bin/dpkg");
     BOOL dpkgExists = [fm fileExistsAtPath:dpkgPath];
-    BOOL needsBootstrap = ![fm fileExistsAtPath:installedPath];
+    NSString *bootstrappedPath = JBROOT_PATH(@"/.thebootstrapped");
+    BOOL isBootstrapped = [fm fileExistsAtPath:bootstrappedPath];
+    BOOL needsBootstrap = !isBootstrapped && ![fm fileExistsAtPath:installedPath];
 
     // CASE 2: bootstrap was extracted before but with the wrong structure.
     // Force re-extraction so the new RootHide bootstrap replaces the old one.
@@ -1666,18 +1666,21 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     NSString *jbrootPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
     NSLog(@"[RootHide] deleteBootstrap: removing %@", jbrootPath);
 
-    // Remove the jbroot directory itself
-    [[NSFileManager defaultManager] removeItemAtPath:jbrootPath error:nil];
+    // Remove the jbroot directory itself — use exec_cmd_root (rm -rf) because
+    // NSFileManager removeItemAtPath fails on /var/containers/Bundle/Application/
+    // due to AMFI restrictions (same reason mkdir fails).
+    exec_cmd_root("/bin/rm", "-rf", jbrootPath.fileSystemRepresentation, NULL);
+    NSLog(@"[RootHide] Removed jbroot at %@", jbrootPath);
 
     // Remove the secondary AppGroup container
-    // Extract JBRAND from the path: .jbroot-XXXXXXXXXXXXXXXX
-    NSString *jbrootName = jbrootPath.lastPathComponent; // .jbroot-XXX
+    NSString *jbrootName = jbrootPath.lastPathComponent;
     NSString *secondaryPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", jbrootName];
-    [[NSFileManager defaultManager] removeItemAtPath:secondaryPath error:nil];
+    exec_cmd_root("/bin/rm", "-rf", secondaryPath.fileSystemRepresentation, NULL);
+    NSLog(@"[RootHide] Removed secondary at %@", secondaryPath);
 
-    // Also remove old-style path (Dopamine 1.x used /var/mobile/Containers/Data/Application)
+    // Also remove old-style path
     NSString *oldSecondaryPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", jbrootName];
-    [[NSFileManager defaultManager] removeItemAtPath:oldSecondaryPath error:nil];
+    exec_cmd_root("/bin/rm", "-rf", oldSecondaryPath.fileSystemRepresentation, NULL);
 
     return nil;
 }
