@@ -168,9 +168,14 @@ static BOOL checkRootHideJBRAND(NSString *str)
             NSArray *fmItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbrootSearchPath error:&listError];
             if (listError) {
                 NSLog(@"[RootHide] locateJailbreakRoot: NSFileManager also failed: %@", listError);
-            } else {
+            } else if (fmItems) {
+                // FIX: length must be 24 (8 prefix `.jbroot-` + 16 hex jbrand),
+                // not 23. With length==23, substringFromIndex:8 returns 15 chars
+                // and checkRootHideJBRAND() always returns NO (it requires 16),
+                // causing every jailbreak to create a NEW .jbroot-XXX instead
+                // of reusing the existing one.
                 for (NSString *subItem in fmItems) {
-                    if (subItem.length == 23 && [subItem hasPrefix:@".jbroot-"]) {
+                    if (subItem.length == 24 && [subItem hasPrefix:@".jbroot-"]) {
                         NSString *jbrandStr = [subItem substringFromIndex:8];
                         if (checkRootHideJBRAND(jbrandStr)) {
                             randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:subItem];
@@ -181,15 +186,29 @@ static BOOL checkRootHideJBRAND(NSString *str)
                 }
             }
         } else {
-            // Read /bin/ls output
-            char outBuf[16384] = {0};
-            ssize_t n = read(pipefd[0], outBuf, sizeof(outBuf) - 1);
+            // Read /bin/ls output.
+            // FIX: 16 KB is too small for /var/containers/Bundle/Application,
+            // which can hold 500+ app UUIDs once tweaks are installed
+            // (each UUID = 36 chars + newline = 37 bytes; 16 KB / 37 ≈ 440).
+            // Use a growable NSMutableData and read until EOF so the .jbroot-
+            // entry is never truncated off the end of the buffer.
+            NSMutableData *outData = [NSMutableData dataWithCapacity:262144];
+            char chunk[8192];
+            ssize_t n;
+            while ((n = read(pipefd[0], chunk, sizeof(chunk))) > 0) {
+                [outData appendBytes:chunk length:(NSUInteger)n];
+                if (outData.length >= 4 * 1024 * 1024) break; // 4 MB hard cap
+            }
             close(pipefd[0]);
             int status = 0;
             if (pid > 0) waitpid(pid, &status, 0);
 
-            if (n > 0) {
-                NSString *output = [NSString stringWithUTF8String:outBuf];
+            if (outData.length > 0) {
+                NSString *output = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding];
+                if (!output) {
+                    NSLog(@"[RootHide] locateJailbreakRoot: failed to decode /bin/ls output (length=%lu)", (unsigned long)outData.length);
+                    output = @"";
+                }
                 NSArray *subItems = [output componentsSeparatedByString:@"\n"];
                 NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls -1a found %lu items", (unsigned long)subItems.count);
 
@@ -199,7 +218,8 @@ static BOOL checkRootHideJBRAND(NSString *str)
                     if ([trimmed hasPrefix:@"."]) {
                         NSLog(@"[RootHide] locateJailbreakRoot: found hidden: %@", trimmed);
                     }
-                    if (trimmed.length == 23 && [trimmed hasPrefix:@".jbroot-"]) {
+                    // FIX: length == 24 (not 23) — see comment above.
+                    if (trimmed.length == 24 && [trimmed hasPrefix:@".jbroot-"]) {
                         NSString *jbrandStr = [trimmed substringFromIndex:8];
                         BOOL valid = checkRootHideJBRAND(jbrandStr);
                         NSLog(@"[RootHide] locateJailbreakRoot: .jbroot- found, jbrand=%@ valid=%d", jbrandStr, valid);
@@ -539,6 +559,13 @@ static BOOL checkRootHideJBRAND(NSString *str)
     __block int pid = 0;
     __block int r = -1;
 
+    // Capture the jbctl path string BEFORE we free argBuf[] below so that
+    // if posix_spawn fails we can log which path we tried (the user-reported
+    // "app crashes at final step" is almost always posix_spawn returning
+    // ENOENT because <jbroot>/basebin/jbctl doesn't exist or is the wrong
+    // path; without this log it was impossible to diagnose).
+    NSString *jbctlPathForLog = [NSString stringWithUTF8String:argBuf[0]];
+
     [self runAsRoot:^{
         [self runUnsandboxed:^{
             r = posix_spawn(&pid, argBuf[0], &act, &attr, (char *const *)argBuf, (char *const *)environ);
@@ -563,6 +590,27 @@ static BOOL checkRootHideJBRAND(NSString *str)
             // We left the root/unsandbox block, now resume jbctl by writing to pipe
             char w = 'w';
             write(waitPipe[1], &w, sizeof(w));
+        }
+        else {
+            // FIX: posix_spawn FAILED. The previous code silently fell through
+            // to `return cmd_wait_for_exit(pid)` with pid == 0 (still its
+            // initial value because posix_spawn never overwrote it).
+            // `cmd_wait_for_exit(0)` calls `waitpid(0, ...)` which on POSIX
+            // means "wait for ANY child in the calling process group" —
+            // this blocks forever, and the iOS watchdog eventually kills
+            // the app. The user perceives this as "app crashes at the
+            // final jailbreak step, no userspace reboot".
+            //
+            // Common causes of posix_spawn failure here:
+            //   ENOENT — <jbroot>/basebin/jbctl doesn't exist (ensureJailbreakRootExists
+            //             picked the wrong jbroot path, or bootstrap extraction failed)
+            //   EACCES — AMFI rejected the binary (cdhash not in trustcache)
+            //   E2BIG  — argv too long (shouldn't happen here)
+            NSLog(@"[RootHide] spawnJbctlAsRootWithArgs: posix_spawn FAILED for '%@' (errno=%d: %s)",
+                  jbctlPathForLog, r, strerror(r));
+            close(waitPipe[0]);
+            close(waitPipe[1]);
+            return r;
         }
 
         close(waitPipe[0]);
