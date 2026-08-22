@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/param.h>
 #include <sys/mount.h>
+#include <fstab.h>   // ROOTHIDE FIX LỖI 2: for struct fstab + getfsent()
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -137,12 +138,21 @@ static struct {
     int (*orig_open)(const char *, int, ...);
     
     // ROOTHIDE FIX LỖI 2: filesystem mount API originals
-    struct statfs *(*orig_getmntinfo)(struct statfs *, int);
-    struct statfs64 *(*orig_getmntinfo64)(struct statfs64 *, int);
+    //
+    // iOS signatures (from <sys/mount.h>):
+    //   int getmntinfo(struct statfs **mntbufp, int flags);
+    //   int statfs(const char *path, struct statfs *buf);
+    //   int getfsstat(struct statfs *buf, int bufsize, int mode);
+    //   struct fstab *getfsent(void);  (from <fstab.h>)
+    //
+    // NOTE: iOS does NOT have statfs64, getmntinfo64, or getfsstat64 —
+    // those are macOS-only APIs. On iOS, struct statfs is already
+    // 64-bit (f_mntonname[1024], f_fstypename[16], etc.). We must NOT
+    // reference them or the build will fail with implicit function
+    // declaration errors.
+    int (*orig_getmntinfo)(struct statfs **, int);
     int (*orig_statfs)(const char *, struct statfs *);
-    int (*orig_statfs64)(const char *, struct statfs64 *);
     int (*orig_getfsstat)(struct statfs *, int, int);
-    int (*orig_getfsstat64)(struct statfs64 *, int, int);
     struct fstab *(*orig_getfsent)(void);
     
     pthread_mutex_t mutex;
@@ -156,11 +166,8 @@ static struct {
     .orig_lstat = NULL,
     .orig_open = NULL,
     .orig_getmntinfo = NULL,
-    .orig_getmntinfo64 = NULL,
     .orig_statfs = NULL,
-    .orig_statfs64 = NULL,
     .orig_getfsstat = NULL,
-    .orig_getfsstat64 = NULL,
     .orig_getfsent = NULL,
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
@@ -369,30 +376,37 @@ static int hooked_open(const char *pathname, int flags, ...)
 // entries lạ (e.g. /System, /usr mounted từ /private/preboot/...) → cảnh báo
 // "Unknown Binds Mount(s)".
 //
-// Fix: Hook getmntinfo(), call orig, sau đó filter out entries có
-// f_mntonname hoặc f_mntfromname match với g_hidden_mount_locations /
-// g_hidden_mount_devices. Trả về count mới (sau khi filter).
-static int hooked_getmntinfo(struct statfs *mntbufp, int flags)
+// iOS signature: int getmntinfo(struct statfs **mntbufp, int flags);
+//   - mntbufp là pointer-to-pointer: getmntinfo cấp phát buffer và trả về
+//     qua *mntbufp. Caller KHÔNG pre-allocate buffer.
+//   - Return value: số entries, hoặc -1 nếu error.
+//
+// Fix: Hook getmntinfo(), call orig (nó cấp phát buffer), sau đó filter
+// in-place các entries có f_mntonname/f_mntfromname match với jailbreak.
+// Trả về count mới (sau khi filter).
+static int hooked_getmntinfo(struct statfs **mntbufp, int flags)
 {
     if (!g_roothide_hide.orig_getmntinfo) {
         // Fallback: gọi getmntinfo trực tiếp (sẽ không filter)
         return getmntinfo(mntbufp, flags);
     }
-    
+
     int count = g_roothide_hide.orig_getmntinfo(mntbufp, flags);
-    if (count <= 0 || !g_roothide_hide.is_clean_mode) {
+    if (count <= 0 || !g_roothide_hide.is_clean_mode || !mntbufp || !*mntbufp) {
         return count;
     }
-    
+
+    struct statfs *buf = *mntbufp;
+
     // Filter in-place: shift non-hidden entries to front
     int write_idx = 0;
     for (int read_idx = 0; read_idx < count; read_idx++) {
-        const char *mntonname = mntbufp[read_idx].f_mntonname;
-        const char *mntfromname = mntbufp[read_idx].f_mntfromname;
-        
+        const char *mntonname = buf[read_idx].f_mntonname;
+        const char *mntfromname = buf[read_idx].f_mntfromname;
+
         if (!should_hide_mount_entry(mntonname, mntfromname)) {
             if (write_idx != read_idx) {
-                mntbufp[write_idx] = mntbufp[read_idx];
+                buf[write_idx] = buf[read_idx];
             }
             write_idx++;
         } else {
@@ -402,35 +416,7 @@ static int hooked_getmntinfo(struct statfs *mntbufp, int flags)
                     mntfromname ? mntfromname : "(null)");
         }
     }
-    
-    return write_idx;
-}
 
-// ROOTHIDE FIX LỖI 2: Hooked getmntinfo64() - 64-bit version
-static int hooked_getmntinfo64(struct statfs64 *mntbufp, int flags)
-{
-    if (!g_roothide_hide.orig_getmntinfo64) {
-        return getmntinfo64(mntbufp, flags);
-    }
-    
-    int count = g_roothide_hide.orig_getmntinfo64(mntbufp, flags);
-    if (count <= 0 || !g_roothide_hide.is_clean_mode) {
-        return count;
-    }
-    
-    int write_idx = 0;
-    for (int read_idx = 0; read_idx < count; read_idx++) {
-        const char *mntonname = mntbufp[read_idx].f_mntonname;
-        const char *mntfromname = mntbufp[read_idx].f_mntfromname;
-        
-        if (!should_hide_mount_entry(mntonname, mntfromname)) {
-            if (write_idx != read_idx) {
-                mntbufp[write_idx] = mntbufp[read_idx];
-            }
-            write_idx++;
-        }
-    }
-    
     return write_idx;
 }
 
@@ -438,6 +424,9 @@ static int hooked_getmntinfo64(struct statfs64 *mntbufp, int flags)
 // Nếu app detection query statfs("/System") hoặc statfs("/usr/lib"), nó sẽ thấy
 // f_mntfromname = "/private/preboot/..." → detect jailbreak.
 // Fix: return -1 + errno=ENOENT cho các path nằm trong g_hidden_mount_locations.
+//
+// iOS signature: int statfs(const char *path, struct statfs *buf);
+// (Không có statfs64 trên iOS — struct statfs đã là 64-bit)
 static int hooked_statfs(const char *path, struct statfs *buf)
 {
     if (g_roothide_hide.is_clean_mode) {
@@ -453,7 +442,7 @@ static int hooked_statfs(const char *path, struct statfs *buf)
             }
         }
     }
-    
+
     if (g_roothide_hide.orig_statfs) {
         int r = g_roothide_hide.orig_statfs(path, buf);
         // Post-filter: nếu statfs thành công, kiểm tra f_mntfromname
@@ -470,82 +459,25 @@ static int hooked_statfs(const char *path, struct statfs *buf)
     return statfs(path, buf);
 }
 
-// ROOTHIDE FIX LỖI 2: Hooked statfs64() - 64-bit version
-static int hooked_statfs64(const char *path, struct statfs64 *buf)
-{
-    if (g_roothide_hide.is_clean_mode) {
-        if (path) {
-            for (int i = 0; g_hidden_mount_locations[i] != NULL; i++) {
-                if (strcmp(path, g_hidden_mount_locations[i]) == 0) {
-                    fprintf(stderr, "[RootHide] statfs64: hiding %s\n", path);
-                    errno = ENOENT;
-                    return -1;
-                }
-            }
-        }
-    }
-    
-    if (g_roothide_hide.orig_statfs64) {
-        int r = g_roothide_hide.orig_statfs64(path, buf);
-        if (r == 0 && g_roothide_hide.is_clean_mode && buf) {
-            if (should_hide_mount_entry(buf->f_mntonname, buf->f_mntfromname)) {
-                fprintf(stderr, "[RootHide] statfs64: hiding result for %s (mount %s from %s)\n",
-                        path, buf->f_mntonname, buf->f_mntfromname);
-                errno = ENOENT;
-                return -1;
-            }
-        }
-        return r;
-    }
-    return statfs64(path, buf);
-}
-
 // ROOTHIDE FIX LỖI 2: Hooked getfsstat() - filter mount entries
-// getfsstat trả về array của statfs structs. Filter in-place như getmntinfo.
+// iOS signature: int getfsstat(struct statfs *buf, int bufsize, int mode);
+// (Không có getfsstat64 trên iOS)
 static int hooked_getfsstat(struct statfs *buf, int bufsize, int mode)
 {
     if (!g_roothide_hide.orig_getfsstat) {
         return getfsstat(buf, bufsize, mode);
     }
-    
+
     int count = g_roothide_hide.orig_getfsstat(buf, bufsize, mode);
     if (count <= 0 || !g_roothide_hide.is_clean_mode || !buf) {
         return count;
     }
-    
-    int write_idx = 0;
-    for (int read_idx = 0; read_idx < count; read_idx++) {
-        const char *mntonname = buf[read_idx].f_mntonname;
-        const char *mntfromname = buf[read_idx].f_mntfromname;
-        
-        if (!should_hide_mount_entry(mntonname, mntfromname)) {
-            if (write_idx != read_idx) {
-                buf[write_idx] = buf[read_idx];
-            }
-            write_idx++;
-        }
-    }
-    
-    return write_idx;
-}
 
-// ROOTHIDE FIX LỖI 2: Hooked getfsstat64() - 64-bit version
-static int hooked_getfsstat64(struct statfs64 *buf, int bufsize, int mode)
-{
-    if (!g_roothide_hide.orig_getfsstat64) {
-        return getfsstat64(buf, bufsize, mode);
-    }
-    
-    int count = g_roothide_hide.orig_getfsstat64(buf, bufsize, mode);
-    if (count <= 0 || !g_roothide_hide.is_clean_mode || !buf) {
-        return count;
-    }
-    
     int write_idx = 0;
     for (int read_idx = 0; read_idx < count; read_idx++) {
         const char *mntonname = buf[read_idx].f_mntonname;
         const char *mntfromname = buf[read_idx].f_mntfromname;
-        
+
         if (!should_hide_mount_entry(mntonname, mntfromname)) {
             if (write_idx != read_idx) {
                 buf[write_idx] = buf[read_idx];
@@ -553,7 +485,7 @@ static int hooked_getfsstat64(struct statfs64 *buf, int bufsize, int mode)
             write_idx++;
         }
     }
-    
+
     return write_idx;
 }
 
@@ -561,13 +493,15 @@ static int hooked_getfsstat64(struct statfs64 *buf, int bufsize, int mode)
 // getfsent đọc /etc/fstab line-by-line. Trên iOS không có fstab thật, nhưng
 // RootHide IPA gốc có thể dùng getfsent để enumerate mount entries khác.
 // Trả về NULL để app nghĩ không có fstab entries.
+//
+// iOS signature: struct fstab *getfsent(void);  (from <fstab.h>)
 static struct fstab *hooked_getfsent(void)
 {
     if (g_roothide_hide.is_clean_mode) {
         fprintf(stderr, "[RootHide] getfsent: hiding all fstab entries\n");
         return NULL;
     }
-    
+
     if (g_roothide_hide.orig_getfsent) {
         return g_roothide_hide.orig_getfsent();
     }
@@ -652,12 +586,10 @@ int roothide_hide_init(bool clean_mode)
     g_roothide_hide.orig_open = dlsym(RTLD_NEXT, "open");
     
     // FIX LỖI 2: filesystem mount API originals
+    // iOS chỉ có getmntinfo/statfs/getfsstat/getfsent - không có *64 versions
     g_roothide_hide.orig_getmntinfo = dlsym(RTLD_NEXT, "getmntinfo");
-    g_roothide_hide.orig_getmntinfo64 = dlsym(RTLD_NEXT, "getmntinfo64");
     g_roothide_hide.orig_statfs = dlsym(RTLD_NEXT, "statfs");
-    g_roothide_hide.orig_statfs64 = dlsym(RTLD_NEXT, "statfs64");
     g_roothide_hide.orig_getfsstat = dlsym(RTLD_NEXT, "getfsstat");
-    g_roothide_hide.orig_getfsstat64 = dlsym(RTLD_NEXT, "getfsstat64");
     g_roothide_hide.orig_getfsent = dlsym(RTLD_NEXT, "getfsent");
 
     // FIX BUG #24: rebind GOT để hooks thật sự chạy.
@@ -679,19 +611,14 @@ int roothide_hide_init(bool clean_mode)
                                (void *)open,    (void *)hooked_open,    NULL);
         
         // FIX LỖI 2: filesystem mount API hooks
-        // Ẩn bind mounts khỏi RootHide IPA detection
+        // Ẩn bind mounts khỏi RootHide IPA detection.
+        // iOS chỉ có 4 APIs (không có *64 versions như macOS).
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
                                (void *)getmntinfo,    (void *)hooked_getmntinfo,    NULL);
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-                               (void *)getmntinfo64,  (void *)hooked_getmntinfo64,  NULL);
-        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
                                (void *)statfs,        (void *)hooked_statfs,        NULL);
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-                               (void *)statfs64,      (void *)hooked_statfs64,      NULL);
-        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
                                (void *)getfsstat,     (void *)hooked_getfsstat,     NULL);
-        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-                               (void *)getfsstat64,   (void *)hooked_getfsstat64,   NULL);
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
                                (void *)getfsent,      (void *)hooked_getfsent,      NULL);
 
