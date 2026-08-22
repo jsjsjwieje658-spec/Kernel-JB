@@ -13,13 +13,13 @@ CFLAGS = -framework Foundation -framework CoreServices -framework Security -fram
 LDFLAGS = -larchive -lbsm -L../.build -F ../_external/frameworks -lchoma
 
 sign: $(TARGET)
-        @ldid -Cadhoc -S $<
+	@ldid -Cadhoc -S $<
 
 # ROOTHIDE FIX LỖI 2: Include src/*.mm (Objective-C++ files) in source list
 # This compiles roothide_objc.mm which exports the jbroot(NSString*) symbol
 # required by the RootHide app.
 $(TARGET): $(wildcard src/*.c src/*.m src/*.mm src/*.S ../_external/modules/litehook/src/*.c)
-        $(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 clean:
-        @rm -f $(TARGET)
+	@rm -f $(TARGET)
