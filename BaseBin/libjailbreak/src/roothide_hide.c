@@ -19,12 +19,28 @@
 #include <unistd.h>
 #include <errno.h>
 #include <dlfcn.h>
-// FIX BUG #24: include litehook để gọi rebind_symbol (fishhook-style GOT rebind).
+#include <mach/mach.h>
+#include <mach-o/loader.h>
+
+// FIX BUG #24: khai báo extern trực tiếp litehook_rebind_symbol thay vì
+// include <litehook.h>, vì dopamine/Makefile không có -I../_external/modules/litehook/src
+// trong include path. Cách này tránh phải sửa nhiều Makefile.
+//
 // Trước đây roothide_hide chỉ dlsym(RTLD_NEXT, ...) để save function pointer,
 // nhưng KHÔNG hook function nào → access/fopen/opendir/stat/lstat/open vẫn là
 // syscall gốc → file hiding KHÔNG hoạt động → app detection vẫn thấy /var/lib/dpkg,
 // /Library/MobileSubstrate, etc. → crash hoặc refuse to run.
-#include <litehook.h>
+//
+// litehook_rebind_symbol là fishhook-style GOT rebind: thay thế function pointer
+// trong GOT của tất cả images đã load → khi app gọi access()/stat()/... control
+// flow sẽ đi qua hàm hooked_*.
+#ifdef __arm64__
+typedef struct mach_header_64 mach_header_u;
+#else
+typedef struct mach_header mach_header_u;
+#endif
+#define LITEHOOK_REBIND_GLOBAL NULL
+extern void litehook_rebind_symbol(const mach_header_u *targetHeader, void *replacee, void *replacement, bool (*exceptionFilter)(const mach_header_u *header));
 
 // ============ Hidden Path Patterns ============
 // These paths should be hidden from blacklisted apps
@@ -304,10 +320,10 @@ int roothide_hide_init(bool clean_mode)
     pthread_mutex_lock(&g_roothide_hide.mutex);
 
     if (g_roothide_hide.initialized) {
-	// Đã init rồi, chỉ update clean_mode
-	g_roothide_hide.is_clean_mode = clean_mode;
-	if (clean_mode) {
-	    roothide_clean_environment();
+        // Đã init rồi, chỉ update clean_mode
+        g_roothide_hide.is_clean_mode = clean_mode;
+        if (clean_mode) {
+            roothide_clean_environment();
         }
         pthread_mutex_unlock(&g_roothide_hide.mutex);
         return 0;
@@ -328,21 +344,21 @@ int roothide_hide_init(bool clean_mode)
     // FIX BUG #24: rebind GOT để hooks thật sự chạy.
     // litehook_rebind_symbol(NULL, replacee, replacement, NULL) rebind globally.
     if (clean_mode) {
-	// Chỉ hook khi clean_mode=true (đừng hook mọi process — performance)
-	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-			       (void *)access,  (void *)hooked_access,  NULL);
-	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-			       (void *)fopen,   (void *)hooked_fopen,   NULL);
-	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-			       (void *)opendir, (void *)hooked_opendir, NULL);
-	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-			       (void *)stat,    (void *)hooked_stat,    NULL);
-	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-			       (void *)lstat,   (void *)hooked_lstat,   NULL);
-	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
-			       (void *)open,    (void *)hooked_open,    NULL);
+        // Chỉ hook khi clean_mode=true (đừng hook mọi process — performance)
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)access,  (void *)hooked_access,  NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)fopen,   (void *)hooked_fopen,   NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)opendir, (void *)hooked_opendir, NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)stat,    (void *)hooked_stat,    NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)lstat,   (void *)hooked_lstat,   NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)open,    (void *)hooked_open,    NULL);
 
-	// Clean environment sau khi hook (để env check không bị phát hiện)
+        // Clean environment sau khi hook (để env check không bị phát hiện)
         roothide_clean_environment();
     }
 
