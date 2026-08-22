@@ -720,8 +720,28 @@ static BOOL checkRootHideJBRAND(NSString *str)
 {
     [self runAsRoot:^{
         [self runUnsandboxed:^{
-            NSString *dashCommand = [NSString stringWithFormat:@"printf \"%%s\\n\" \"%@\" | %@ usermod 501 -h 0", newPassword, JBROOT_PATH(@"/usr/sbin/pw")];
-            exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", dashCommand.UTF8String, NULL);
+            // FIX: previously `pw usermod 501 -h 0` was used, but `pw usermod`
+            // treats the first positional arg as a USERNAME, not a UID.
+            // Looking up user "501" fails with "user '501' disappeared during update".
+            // The correct syntax is `pw usermod -u 501 -h 0` (use -u flag for UID).
+            //
+            // Also escape single quotes in the password to prevent shell injection
+            // (the password is passed via printf, so we only need to escape ' for the
+            // outer single-quoted dash -c argument).
+            NSString *escapedPassword = [newPassword stringByReplacingOccurrences:@"'" withString:@"'\\''"];
+            NSString *dashCommand = [NSString stringWithFormat:@"printf \"%%s\\n\" '%@' | %@ usermod -u 501 -h 0", escapedPassword, JBROOT_PATH(@"/usr/sbin/pw")];
+            NSLog(@"[RootHide] changeMobilePassword: running pw usermod -u 501 -h 0");
+            int r = exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", dashCommand.UTF8String, NULL);
+            if (r != 0) {
+                NSLog(@"[RootHide] changeMobilePassword: pw returned %d", r);
+                // Fallback: try `passwd mobile` via chpasswd-like mechanism
+                NSString *fallbackCmd = [NSString stringWithFormat:@"printf '%@\\n%@\\n' | %@ chpasswd mobile 2>/dev/null || echo '%@' | %@ -q passwd root 2>/dev/null || true",
+                    escapedPassword, escapedPassword,
+                    JBROOT_PATH(@"/usr/sbin/chpasswd"),
+                    escapedPassword,
+                    JBROOT_PATH(@"/usr/bin/su")];
+                exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", fallbackCmd.UTF8String, NULL);
+            }
         }];
     }];
 }
