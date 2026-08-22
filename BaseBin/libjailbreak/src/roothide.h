@@ -104,7 +104,7 @@ const char* rothide_get_blacklist_entry(int index);
  * Clear all blacklist entries
  * @return 0 on success, -1 on error
  */
-int roothide_clear_blacklist(void);
+int rothide_clear_blacklist(void);
 
 /**
  * Get the full blacklist as a comma-separated string
@@ -114,7 +114,7 @@ int roothide_clear_blacklist(void);
  * @param outSize Size of output buffer
  * @return 0 on success, -1 on error
  */
-int roothide_get_blacklist_string(char* outBuf, size_t outSize);
+int rothide_get_blacklist_string(char* outBuf, size_t outSize);
 
 // ============ Clean Mode Detection ============
 
@@ -142,7 +142,7 @@ unsigned long long jbrand(void);
  * Get the current session ID (alias for jbrand())
  * @return 64-bit session identifier
  */
-unsigned long long roothide_get_session_id(void);
+unsigned long long rothide_get_session_id(void);
 
 /**
  * Get the jbroot UUID (preboot UUID)
@@ -150,7 +150,7 @@ unsigned long long roothide_get_session_id(void);
  * @param uuid_len Size of output buffer
  * @return 0 on success, -1 on error
  */
-int roothide_get_jbroot_uuid(char* uuid_out, size_t uuid_len);
+int rothide_get_jbroot_uuid(char* uuid_out, size_t uuid_len);
 
 // ============ Path Conversion Helpers ============
 
@@ -177,7 +177,7 @@ const char* roothide_sanitize_path_v2(const char* path);
  * @param outSize Size of output buffer
  * @return 0 on success, -1 on error
  */
-int roothide_translate_path(const char* path, char* outBuf, size_t outSize);
+int rothide_translate_path(const char* path, char* outBuf, size_t outSize);
 
 // === Backward compatibility shims ===
 // These keep older call sites (if any) compiling. They are thin wrappers
@@ -200,7 +200,7 @@ static inline const char* roothide_rootfs(const char* path)
  * @param bundleID The bundle identifier to check
  * @return true if app should be hidden, false otherwise
  */
-bool roothide_is_app_hidden(const char* bundleID);
+bool rothide_is_app_hidden(const char* bundleID);
 
 /**
  * Check if current process is running in clean mode

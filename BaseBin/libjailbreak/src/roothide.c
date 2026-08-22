@@ -442,7 +442,7 @@ int rothide_get_blacklist_string(char* outBuf, size_t outSize)
 }
 
 // ROOTHIDE FIX LỖI 2: Get session ID (alias for jbrand)
-unsigned long long roothide_get_session_id(void)
+unsigned long long rothide_get_session_id(void)
 {
         if (!g_roothide.initialized) {
                 roothide_init();
@@ -452,7 +452,7 @@ unsigned long long roothide_get_session_id(void)
 
 // ROOTHIDE FIX LỖI 2: Get jbroot UUID (preboot UUID)
 // Returns the 36-char UUID extracted from jbroot path
-int roothide_get_jbroot_uuid(char* uuid_out, size_t uuid_len)
+int rothide_get_jbroot_uuid(char* uuid_out, size_t uuid_len)
 {
         if (!uuid_out || uuid_len < 37) return -1;
         if (!g_roothide.initialized) {
@@ -469,7 +469,7 @@ int roothide_get_jbroot_uuid(char* uuid_out, size_t uuid_len)
 // For compatibility with RootHide Bootstrap apps that expect /var/jb
 // In RootHide mode we use the real jbroot path, so this just replaces
 // "/var/jb" prefix with the actual jbroot path.
-int roothide_translate_path(const char* path, char* outBuf, size_t outSize)
+int rothide_translate_path(const char* path, char* outBuf, size_t outSize)
 {
         if (!path || !outBuf || outSize == 0) return -1;
         if (!g_roothide.initialized) {
@@ -491,7 +491,7 @@ int roothide_translate_path(const char* path, char* outBuf, size_t outSize)
 }
 
 // ROOTHIDE FIX LỖI 2: Check if an app should be hidden (alias for rothide_should_be_clean)
-bool roothide_is_app_hidden(const char* bundleID)
+bool rothide_is_app_hidden(const char* bundleID)
 {
         if (!bundleID) return false;
         if (!g_roothide.initialized) {

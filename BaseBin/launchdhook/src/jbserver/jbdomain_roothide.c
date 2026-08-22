@@ -258,7 +258,7 @@ static int roothide_action_get_blacklist_string(char **blacklistOut)
     // Allocate a large enough buffer (256 entries * 256 chars each)
     char *buf = malloc(256 * 256);
     if (!buf) return -1;
-    if (roothide_get_blacklist_string(buf, 256 * 256) != 0) {
+    if (rothide_get_blacklist_string(buf, 256 * 256) != 0) {
         free(buf);
         return -1;
     }
@@ -283,7 +283,7 @@ static int roothide_action_get_session_id(uint64_t *sessionIDOut)
 {
     if (!sessionIDOut) return -1;
     roothide_server_ensure_init();
-    *sessionIDOut = roothide_get_session_id();
+    *sessionIDOut = rothide_get_session_id();
     return 0;
 }
 
@@ -295,7 +295,7 @@ static int roothide_action_get_jbroot_uuid(char **uuidOut)
     roothide_server_ensure_init();
     char *buf = malloc(37);
     if (!buf) return -1;
-    if (roothide_get_jbroot_uuid(buf, 37) != 0) {
+    if (rothide_get_jbroot_uuid(buf, 37) != 0) {
         free(buf);
         return -1;
     }
@@ -311,7 +311,7 @@ static int roothide_action_translate_path(const char *path, char **translatedOut
     roothide_server_ensure_init();
     char *buf = malloc(PATH_MAX);
     if (!buf) return -1;
-    if (roothide_translate_path(path, buf, PATH_MAX) != 0) {
+    if (rothide_translate_path(path, buf, PATH_MAX) != 0) {
         free(buf);
         return -1;
     }
@@ -326,7 +326,7 @@ static int roothide_action_is_app_hidden(const char *bundleID, bool *hiddenOut)
 {
     if (!bundleID || !bundleID[0] || !hiddenOut) return -1;
     roothide_server_ensure_init();
-    *hiddenOut = roothide_is_app_hidden(bundleID);
+    *hiddenOut = rothide_is_app_hidden(bundleID);
     return 0;
 }
 
