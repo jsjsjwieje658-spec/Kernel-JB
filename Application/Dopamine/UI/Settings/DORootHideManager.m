@@ -465,33 +465,39 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
 {
     @try {
         NSUInteger count = self.mutableBlacklist.count;
-        
+
         if (count == 0) {
-            UIAlertController *alert = [UIAlertController 
-                alertControllerWithTitle:@"Already Empty" 
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:@"Already Empty"
                 message:@"The blacklist is already empty."
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];
             return;
         }
-        
-        UIAlertController *alert = [UIAlertController 
-            alertControllerWithTitle:@"⚠️ Clear Blacklist?" 
+
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"⚠️ Clear Blacklist?"
             message:[NSString stringWithFormat:@"Remove all %lu app(s) from blacklist?\n\nThis cannot be undone!", (unsigned long)count]
             preferredStyle:UIAlertControllerStyleAlert];
-        
+
         [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
         [alert addAction:[UIAlertAction actionWithTitle:@"Clear All" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
             @try {
+                // ROOTHIDE FIX LỖI 2: Clear local blacklist AND server-side blacklist.
+                // Trước đây chỉ clear local NSUserDefaults, server vẫn giữ entries cũ
+                // → systemhook vẫn skip injection cho apps đã bị xóa khỏi UI.
+                // Fix: gọi jbclient_roothide_clear_blacklist() để clear cả server state.
                 [self.mutableBlacklist removeAllObjects];
                 [self saveBlacklist];
+                int r = jbclient_roothide_clear_blacklist();
+                NSLog(@"[RootHide] jbclient_roothide_clear_blacklist() returned %d", r);
                 [self reloadSpecifiers];
-                
+
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    UIAlertController *clearedAlert = [UIAlertController 
-                        alertControllerWithTitle:@"Cleared" 
-                        message:@"All apps removed from blacklist."
+                    UIAlertController *clearedAlert = [UIAlertController
+                        alertControllerWithTitle:@"Cleared"
+                        message:[NSString stringWithFormat:@"All apps removed from blacklist (server r=%d).", r]
                         preferredStyle:UIAlertControllerStyleAlert];
                     [clearedAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
                     [self presentViewController:clearedAlert animated:YES completion:nil];
@@ -501,7 +507,7 @@ static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
                 NSLog(@"[RootHide] clearBlacklist action error: %@", ex.reason);
             }
         }]];
-        
+
         [self presentViewController:alert animated:YES completion:nil];
     }
     @catch (NSException *exception) {

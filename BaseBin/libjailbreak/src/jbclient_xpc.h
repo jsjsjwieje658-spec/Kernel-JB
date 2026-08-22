@@ -104,4 +104,57 @@ int jbclient_roothide_apply_settings(bool shouldReboot);
  */
 bool jbclient_roothide_is_blacklisted(const char *bundleID);
 
+// ========== ROOTHIDE FIX LỖI 2: Full APIs for RootHide app compatibility ==========
+
+/**
+ * Get the current number of blacklisted apps
+ * @return Number of entries in blacklist, or -1 on error
+ */
+int jbclient_roothide_get_blacklist_count(void);
+
+/**
+ * Get a specific blacklist entry by index
+ * @param index Index into blacklist array (0-based)
+ * @return Bundle ID string (must be freed by caller), or NULL if out of range
+ */
+char *jbclient_roothide_get_blacklist_entry(int index);
+
+/**
+ * Get the full blacklist as a comma-separated string
+ * @return Comma-separated string (must be freed by caller), or NULL on error
+ */
+char *jbclient_roothide_get_blacklist_string(void);
+
+/**
+ * Clear all blacklist entries
+ * @return 0 on success, -1 on error
+ */
+int jbclient_roothide_clear_blacklist(void);
+
+/**
+ * Get the jailbreak session ID
+ * @return 64-bit session identifier
+ */
+uint64_t jbclient_roothide_get_session_id(void);
+
+/**
+ * Get the jbroot preboot UUID
+ * @return UUID string (must be freed by caller), or NULL on error
+ */
+char *jbclient_roothide_get_jbroot_uuid(void);
+
+/**
+ * Translate a /var/jb style path to the actual jbroot path
+ * @param path Input path (e.g., "/var/jb/usr/bin/dpkg")
+ * @return Translated path (must be freed by caller), or NULL on error
+ */
+char *jbclient_roothide_translate_path(const char *path);
+
+/**
+ * Check if an app should be hidden (alias for is_blacklisted)
+ * @param bundleID The bundle identifier to check
+ * @return true if app should be hidden, false otherwise
+ */
+bool jbclient_roothide_is_app_hidden(const char *bundleID);
+
 #endif

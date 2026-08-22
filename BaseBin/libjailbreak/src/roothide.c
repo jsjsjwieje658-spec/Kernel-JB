@@ -165,13 +165,13 @@ bool roothide_is_blacklisted(const char* bundleID)
 {
         if (!bundleID || !g_roothide.initialized) return false;
 
-	// FIX BUG #14: trước đây đọc `g_roothide.blacklist_count` và mảng
-	// `blacklist[]` mà không có lock → race với `rothide_add_blacklist` /
-	// `rothide_remove_blacklist` (đang write). Có thể đọc count > array size
-	// hoặc đọc entry đang được shift.
-	//
-	// Fix: dùng pthread_mutex. Trade-off: lock overhead ~100ns, không đáng
-	// kể vì blacklist check chỉ chạy 1 lần mỗi launch app (systemhook constructor).
+        // FIX BUG #14: trước đây đọc `g_roothide.blacklist_count` và mảng
+        // `blacklist[]` mà không có lock → race với `rothide_add_blacklist` /
+        // `rothide_remove_blacklist` (đang write). Có thể đọc count > array size
+        // hoặc đọc entry đang được shift.
+        //
+        // Fix: dùng pthread_mutex. Trade-off: lock overhead ~100ns, không đáng
+        // kể vì blacklist check chỉ chạy 1 lần mỗi launch app (systemhook constructor).
         pthread_mutex_lock(&g_roothide.mutex);
         for (int i = 0; i < g_roothide.blacklist_count; i++) {
                 if (strcmp(g_roothide.blacklist[i], bundleID) == 0) {
@@ -399,3 +399,104 @@ const char* rothide_get_blacklist_entry(int index)
         if (index < 0 || index >= g_roothide.blacklist_count) return NULL;
         return g_roothide.blacklist[index];
 }
+
+// ROOTHIDE FIX LỖI 2: Clear all blacklist entries
+// Required by RootHide app's "Clear All" UI button
+int rothide_clear_blacklist(void)
+{
+        if (!g_roothide.initialized) {
+                roothide_init();
+        }
+        pthread_mutex_lock(&g_roothide.mutex);
+        memset(g_roothide.blacklist, 0, sizeof(g_roothide.blacklist));
+        g_roothide.blacklist_count = 0;
+        pthread_mutex_unlock(&g_roothide.mutex);
+        return 0;
+}
+
+// ROOTHIDE FIX LỖI 2: Get blacklist as comma-separated string
+// Used by RootHide app to display current blacklist in alert
+int rothide_get_blacklist_string(char* outBuf, size_t outSize)
+{
+        if (!outBuf || outSize == 0) return -1;
+        if (!g_roothide.initialized) {
+                roothide_init();
+        }
+        size_t written = 0;
+        outBuf[0] = '\0';
+        pthread_mutex_lock(&g_roothide.mutex);
+        for (int i = 0; i < g_roothide.blacklist_count; i++) {
+                const char *entry = g_roothide.blacklist[i];
+                size_t entryLen = strlen(entry);
+                // +1 for separator (comma) or null terminator
+                if (written + entryLen + 1 >= outSize) break;
+                if (written > 0) {
+                        outBuf[written++] = ',';
+                }
+                memcpy(outBuf + written, entry, entryLen);
+                written += entryLen;
+        }
+        outBuf[written] = '\0';
+        pthread_mutex_unlock(&g_roothide.mutex);
+        return 0;
+}
+
+// ROOTHIDE FIX LỖI 2: Get session ID (alias for jbrand)
+unsigned long long roothide_get_session_id(void)
+{
+        if (!g_roothide.initialized) {
+                roothide_init();
+        }
+        return g_roothide.session_id;
+}
+
+// ROOTHIDE FIX LỖI 2: Get jbroot UUID (preboot UUID)
+// Returns the 36-char UUID extracted from jbroot path
+int roothide_get_jbroot_uuid(char* uuid_out, size_t uuid_len)
+{
+        if (!uuid_out || uuid_len < 37) return -1;
+        if (!g_roothide.initialized) {
+                roothide_init();
+        }
+        if (g_roothide.preboot_uuid[0]) {
+                strlcpy(uuid_out, g_roothide.preboot_uuid, uuid_len);
+                return 0;
+        }
+        return -1;
+}
+
+// ROOTHIDE FIX LỖI 2: Translate /var/jb style path to jbroot path
+// For compatibility with RootHide Bootstrap apps that expect /var/jb
+// In RootHide mode we use the real jbroot path, so this just replaces
+// "/var/jb" prefix with the actual jbroot path.
+int roothide_translate_path(const char* path, char* outBuf, size_t outSize)
+{
+        if (!path || !outBuf || outSize == 0) return -1;
+        if (!g_roothide.initialized) {
+                roothide_init();
+        }
+        // If path starts with "/var/jb", replace with jbroot path
+        if (strncmp(path, "/var/jb", 7) == 0) {
+                const char *jbroot = rothide_get_jbroot();
+                if (jbroot) {
+                        const char *suffix = path + 7; // skip "/var/jb"
+                        int written = snprintf(outBuf, outSize, "%s%s", jbroot, suffix);
+                        if (written < 0 || (size_t)written >= outSize) return -1;
+                        return 0;
+                }
+        }
+        // Otherwise just copy path as-is
+        strlcpy(outBuf, path, outSize);
+        return 0;
+}
+
+// ROOTHIDE FIX LỖI 2: Check if an app should be hidden (alias for rothide_should_be_clean)
+bool roothide_is_app_hidden(const char* bundleID)
+{
+        if (!bundleID) return false;
+        if (!g_roothide.initialized) {
+                roothide_init();
+        }
+        return roothide_is_blacklisted(bundleID);
+}
+

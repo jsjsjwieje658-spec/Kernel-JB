@@ -1,5 +1,13 @@
 // roothide.h - RootHide Public Interface
 // Header for RootHide jailbreak hiding functionality
+//
+// This header provides the FULL set of RootHide APIs needed for compatibility
+// with the RootHide IPA app (com.roothide.manager). The RootHide app expects:
+//   - jbroot(NSString*) — C++ function exported by libroothide.dylib
+//   - roothide_* C APIs for blacklist, path translation, hiding
+//
+// All public APIs are listed below. Implementation in roothide.c and
+// roothide_hide.c.
 
 #ifndef ROOTHIDE_H
 #define ROOTHIDE_H
@@ -92,6 +100,22 @@ int rothide_get_blacklist_count(void);
  */
 const char* rothide_get_blacklist_entry(int index);
 
+/**
+ * Clear all blacklist entries
+ * @return 0 on success, -1 on error
+ */
+int roothide_clear_blacklist(void);
+
+/**
+ * Get the full blacklist as a comma-separated string
+ * Caller must NOT free the returned buffer (owned by RootHide subsystem)
+ * 
+ * @param outBuf Output buffer to fill
+ * @param outSize Size of output buffer
+ * @return 0 on success, -1 on error
+ */
+int roothide_get_blacklist_string(char* outBuf, size_t outSize);
+
 // ============ Clean Mode Detection ============
 
 /**
@@ -114,6 +138,20 @@ bool rothide_should_be_clean(const char* executable_path, const char* bundle_id)
  */
 unsigned long long jbrand(void);
 
+/**
+ * Get the current session ID (alias for jbrand())
+ * @return 64-bit session identifier
+ */
+unsigned long long roothide_get_session_id(void);
+
+/**
+ * Get the jbroot UUID (preboot UUID)
+ * @param uuid_out Output buffer for UUID (must be at least 37 bytes)
+ * @param uuid_len Size of output buffer
+ * @return 0 on success, -1 on error
+ */
+int roothide_get_jbroot_uuid(char* uuid_out, size_t uuid_len);
+
 // ============ Path Conversion Helpers ============
 
 /**
@@ -130,6 +168,17 @@ unsigned long long jbrand(void);
  */
 const char* roothide_sanitize_path_v2(const char* path);
 
+/**
+ * Translate a path - replaces /var/jb prefix with jbroot path
+ * (compatibility with RootHide Bootstrap apps that expect /var/jb style paths)
+ * 
+ * @param path Input path (e.g., "/var/jb/usr/bin/dpkg")
+ * @param outBuf Output buffer
+ * @param outSize Size of output buffer
+ * @return 0 on success, -1 on error
+ */
+int roothide_translate_path(const char* path, char* outBuf, size_t outSize);
+
 // === Backward compatibility shims ===
 // These keep older call sites (if any) compiling. They are thin wrappers
 // over roothide_sanitize_path_v2() and behave identically.
@@ -141,6 +190,23 @@ static inline const char* roothide_rootfs(const char* path)
 {
         return roothide_sanitize_path_v2(path);
 }
+
+// ============ App Hiding Detection ============
+
+/**
+ * Check if an app should be hidden (alias for rothide_should_be_clean)
+ * Used by systemhook to decide whether to inject tweaks
+ * 
+ * @param bundleID The bundle identifier to check
+ * @return true if app should be hidden, false otherwise
+ */
+bool roothide_is_app_hidden(const char* bundleID);
+
+/**
+ * Check if current process is running in clean mode
+ * @return true if clean mode is active
+ */
+bool roothide_is_clean_mode(void);
 
 // ============ Advanced Hiding Functions (arm64e optimized) ============
 
@@ -162,12 +228,6 @@ int roothide_hide_init(bool clean_mode);
 void roothide_set_clean_mode(bool enabled);
 
 /**
- * Check if current process is running in clean mode
- * @return true if clean mode is active
- */
-bool roothide_is_clean_mode(void);
-
-/**
  * Sanitize a path for use in clean mode
  * Converts hidden paths to safe alternatives
  * 
@@ -182,8 +242,51 @@ const char* roothide_sanitize_path(const char* path);
  */
 void roothide_clean_environment(void);
 
+/**
+ * Hide a specific path dynamically
+ * Useful for user-configured paths
+ * 
+ * @param path Path to hide
+ * @return 0 on success, -1 on error
+ */
+int roothide_hide_path(const char* path);
+
+/**
+ * Get list of currently hidden paths (for debugging/UI)
+ * 
+ * @param count Output: number of hidden paths
+ * @return Array of hidden path strings (NULL-terminated)
+ */
+const char** roothide_get_hidden_paths(int *count);
+
 #ifdef __cplusplus
-}
-#endif
+} // extern "C"
+
+// ============ C++ API for RootHide app compatibility ============
+//
+// The RootHide app (com.roothide.manager) is a pre-compiled IPA that links
+// against libroothide.dylib via @loader_path/.jbroot/usr/lib/libroothide.dylib
+// and calls the C++ function `jbroot(NSString*)` (mangled: __Z6jbrootP8NSString).
+//
+// To make the RootHide app work WITHOUT modification, we export this exact
+// symbol from our libroothide.dylib (which is loaded as a replacement for
+// the original). The implementation simply calls our get_jbroot() C function
+// and wraps the result in an NSString.
+//
+// This is declared here (in the C++ section) so that any translation unit
+// compiled as C++ will see the declaration and emit the mangled symbol.
+
+#ifdef __OBJC__
+#import <Foundation/Foundation.h>
+
+// C++ function exported to match RootHide app's expected symbol.
+// Returns the jbroot path as an autoreleased NSString.
+// Implemented in roothide.cpp (or roothide_objc.mm).
+NSString* jbroot(NSString* path);
+
+#endif // __OBJC__
+
+#endif // __cplusplus
 
 #endif // ROOTHIDE_H
+

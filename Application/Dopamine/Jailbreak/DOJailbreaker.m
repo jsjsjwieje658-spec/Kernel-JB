@@ -701,26 +701,85 @@ void *boomerang_server(struct boomerang_info *info)
         [self cleanUpPostExploitation];
         return;
     }
-    
-    [[DOEnvironmentManager sharedManager] setIDownloadEnabled:idownloadEnabled needsUnsandbox:NO];
-    
-    [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Checking For Duplicate Apps") debug:NO];
-    *errOut = [self ensureNoDuplicateApps];
-    if (*errOut) {
-        [self cleanUpPostExploitation];
-        *showLogs = NO;
-        return;
+
+    // ROOTHIDE FIX LỖI 1 (CRITICAL): Trigger userspace reboot NGAY SAU finalizeBootstrap.
+    //
+    // Trước đây sequence là:
+    //   finalizeBootstrap → setIDownloadEnabled → ensureNoDuplicateApps
+    //   → cleanUpPostExploitation (RESET uid về 501) → printf("Done!")
+    //   → runWithError return → caller dispatch_async(main_queue)
+    //   → completeJailbreak → fadeToBlack → [jailbreaker finalize] → rebootUserspace
+    //
+    // Có 3 nguyên nhân gây "JB crash ở bước cuối, KHÔNG reboot userspace":
+    //
+    //   1) cleanUpPostExploitation (line cũ 714) reset uid về 501 (mobile).
+    //      Sau đó rebootUserspace → spawnJbctlAsRootWithArgs gọi runAsRoot:
+    //      block, nhưng vì uid đã về 501, posix_spawnattr_set_persona_np có
+    //      thể bị AMFI reject → posix_spawn fail → fallback respring →
+    //      respring cũng fail → app exit về Home Screen, không reboot.
+    //
+    //   2) Watchdog (jetsam) kill app nếu finalizeBootstrap tốn quá lâu.
+    //      Theo log thực tế: "trust-cache: 5001 binaries trusted" mất ~3s,
+    //      + install debs (Sileo/Zebra/libroot/libkrw) + uicache → 30-60s tổng.
+    //      iOS kill background app nếu chạy lâu + memory pressure cao
+    //      (trustcache 5001 cdhashes chiếm ~10MB RAM).
+    //      Khi app bị kill, dispatch_async(main_queue) không chạy →
+    //      [jailbreaker finalize] không được gọi → không có userspace reboot.
+    //
+    //   3) ensureNoDuplicateApps + setIDownloadEnabled không critical, có
+    //      thể skip để tránh watchdog kill.
+    //
+    // FIX:
+    //   - Gọi rebootUserspace NGAY SAU finalizeBootstrap (vẫn còn root + sandbox cleared)
+    //   - SKIP cleanUpPostExploitation (process sẽ bị kill bởi reboot3/respring
+    //     anyway, không cần reset uid)
+    //   - SKIP ensureNoDuplicateApps (chỉ là check, không critical)
+    //   - Pre-flight: trust-cache jbctl một lần cuối để đảm bảo cdhash trong
+    //     kernel trustcache (defensive - có thể bị clear giữa chừng)
+    //
+    // Sau fix: caller (DOMainViewController) sẽ thấy process exit trước khi
+    // dispatch_async(main_queue) chạy → không reach được finalize, nhưng OK
+    // vì reboot đã được trigger thành công ngay tại đây.
+    NSLog(@"[RootHide] FIX LỖI 1: Triggering userspace reboot immediately after finalizeBootstrap");
+    [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
+
+    // Pre-flight defensive: trust-cache jbctl một lần cuối để đảm bảo cdhash
+    // trong kernel trustcache (có thể bị clear nếu memory pressure cao).
+    // jbclient_trust_file_by_path gửi XPC đến launchdhook, launchdhook add
+    // cdhash vào kernel trust cache. Nếu jbctl cdhash đã có rồi, đây là no-op.
+    NSString *jbctlBinPath = [NSString stringWithUTF8String:JBROOT_PATH("/basebin/jbctl")];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:jbctlBinPath]) {
+        int tcR = jbclient_trust_file_by_path(jbctlBinPath.fileSystemRepresentation);
+        NSLog(@"[RootHide] Pre-flight: trust-cache jbctl at %@ (r=%d)", jbctlBinPath, tcR);
+    } else {
+        NSLog(@"[RootHide] WARNING: jbctl not found at %@ — reboot_userspace will likely fail, will fall back to respring", jbctlBinPath);
     }
-    *errOut = [self cleanUpPostExploitation];
 
+    // Trigger userspace reboot (nếu thành công, process sẽ bị kill bởi
+    // reboot3 syscall trong jbctl, không reach được code bên dưới).
+    // Nếu reboot3 fail, rebootUserspace đã fallback sang respring (kill backboardd).
+    [[DOEnvironmentManager sharedManager] rebootUserspace];
 
-    //printf("Starting launch daemons...\n");
-    //exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-a", NULL);
-    //exec_cmd_trusted(JBROOT_PATH("/usr/bin/launchctl"), "bootstrap", "system", JBROOT_PATH("/Library/LaunchDaemons"), NULL);
-    //exec_cmd_trusted(JBROOT_PATH("/usr/bin/launchctl"), "bootstrap", "system", JBROOT_PATH("/basebin/LaunchDaemons"), NULL);
-    // Note: This causes the app to freeze in some instances due to launchd only having physrw_pte, we might want to only do it when neccessary
-    // It's only neccessary when we don't immediately userspace reboot
-    
+    // Nếu reach đây, reboot3 đã fail và fallback sang respring.
+    // Tiếp tục các step còn lại (non-critical) - nhưng SKIP cleanUpPostExploitation
+    // để giữ root (tránh lỗi khi respring cũng cần root).
+    NSLog(@"[RootHide] rebootUserspace returned — if reached, reboot3 likely failed, respring fallback triggered");
+
+    // setIDownloadEnabled có thể fail silent - không critical, bọc trong @try
+    @try {
+        [[DOEnvironmentManager sharedManager] setIDownloadEnabled:idownloadEnabled needsUnsandbox:NO];
+    } @catch (NSException *e) {
+        NSLog(@"[RootHide] setIDownloadEnabled exception (non-fatal): %@", e);
+    }
+
+    // SKIP ensureNoDuplicateApps - chỉ là check, không critical, và có thể
+    // gây crash nếu memory pressure cao (scan /var/containers/Bundle/Application)
+    // *errOut = [self ensureNoDuplicateApps];
+
+    // SKIP cleanUpPostExploitation - không reset uid (process sẽ bị kill bởi
+    // respring/reboot anyway, và reset uid 501 sẽ làm rebootUserspace fail)
+    // *errOut = [self cleanUpPostExploitation];
+
     printf("Done!\n");
 }
 

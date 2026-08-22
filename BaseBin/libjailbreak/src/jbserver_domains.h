@@ -77,6 +77,15 @@ enum {
     JBS_ROOTHIDE_GET_JBROOT_PATH,
     JBS_ROOTHIDE_APPLY_SETTINGS,
     JBS_ROOTHIDE_IS_BLACKLISTED, // FIX LỖI 1: query blacklist động
+    // ROOTHIDE FIX LỖI 2: Full APIs for RootHide app compatibility
+    JBS_ROOTHIDE_GET_BLACKLIST_COUNT,   // Get number of blacklisted apps
+    JBS_ROOTHIDE_GET_BLACKLIST_ENTRY,   // Get blacklist entry by index
+    JBS_ROOTHIDE_GET_BLACKLIST_STRING,  // Get full blacklist as comma-separated string
+    JBS_ROOTHIDE_CLEAR_BLACKLIST,       // Clear all blacklist entries
+    JBS_ROOTHIDE_GET_SESSION_ID,        // Get jailbreak session ID
+    JBS_ROOTHIDE_GET_JBROOT_UUID,      // Get jbroot preboot UUID
+    JBS_ROOTHIDE_TRANSLATE_PATH,        // Translate /var/jb style path to jbroot path
+    JBS_ROOTHIDE_IS_APP_HIDDEN,         // Check if app should be hidden (alias for is_blacklisted)
 };
 
 #define JBS_BOOMERANG_DONE 42

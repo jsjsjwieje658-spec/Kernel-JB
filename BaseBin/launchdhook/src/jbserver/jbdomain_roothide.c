@@ -30,6 +30,7 @@
 #include <pthread.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>  // ROOTHIDE FIX LỖI 2: for uint64_t in new action handlers
 
 // ---------- In-process RootHide state ----------
 //
@@ -217,6 +218,118 @@ static int roothide_action_is_blacklisted(const char *bundleID, bool *blackliste
     return 0;
 }
 
+// ROOTHIDE FIX LỖI 2: Full APIs for RootHide app compatibility
+// These handlers expose the new roothide_* APIs via XPC to clients
+// (RootHide app, systemhook, jbctl).
+
+// JBS_ROOTHIDE_GET_BLACKLIST_COUNT (9) — out: uint64 count
+//   Open to all callers (RootHide app needs this for UI display).
+//   Note: Uses uint64 because jbserver only supports JBS_TYPE_UINT64, not INT.
+static int roothide_action_get_blacklist_count(uint64_t *countOut)
+{
+    if (!countOut) return -1;
+    roothide_server_ensure_init();
+    *countOut = (uint64_t)rothide_get_blacklist_count();
+    return 0;
+}
+
+// JBS_ROOTHIDE_GET_BLACKLIST_ENTRY (10) — in: uint64 index, out: string entry
+//   Open to all callers (RootHide app needs this to display each entry).
+static int roothide_action_get_blacklist_entry(uint64_t *index, char **entryOut)
+{
+    if (!index || !entryOut) return -1;
+    roothide_server_ensure_init();
+    const char *entry = rothide_get_blacklist_entry((int)*index);
+    if (!entry) {
+        *entryOut = NULL;
+        return -1;
+    }
+    *entryOut = strdup(entry);
+    return 0;
+}
+
+// JBS_ROOTHIDE_GET_BLACKLIST_STRING (11) — out: string blacklist
+//   Returns the full blacklist as a comma-separated string.
+//   Used by RootHide app to display current blacklist in an alert.
+static int roothide_action_get_blacklist_string(char **blacklistOut)
+{
+    if (!blacklistOut) return -1;
+    roothide_server_ensure_init();
+    // Allocate a large enough buffer (256 entries * 256 chars each)
+    char *buf = malloc(256 * 256);
+    if (!buf) return -1;
+    if (roothide_get_blacklist_string(buf, 256 * 256) != 0) {
+        free(buf);
+        return -1;
+    }
+    *blacklistOut = buf;
+    return 0;
+}
+
+// JBS_ROOTHIDE_CLEAR_BLACKLIST (12) — no args
+//   Caller must be the Dopamine app (or launchd itself, pid 1).
+//   Clears all blacklist entries. Used by RootHide app's "Clear All" button.
+static int roothide_action_clear_blacklist(audit_token_t *callerToken)
+{
+    if (!callerToken) return -1;
+    REQUIRE_DOPAMINE_OR_ROOT(*callerToken);
+    roothide_server_ensure_init();
+    return rothide_clear_blacklist();
+}
+
+// JBS_ROOTHIDE_GET_SESSION_ID (13) — out: uint64 sessionID
+//   Open to all callers. Returns the jailbreak session ID.
+static int roothide_action_get_session_id(uint64_t *sessionIDOut)
+{
+    if (!sessionIDOut) return -1;
+    roothide_server_ensure_init();
+    *sessionIDOut = roothide_get_session_id();
+    return 0;
+}
+
+// JBS_ROOTHIDE_GET_JBROOT_UUID (14) — out: string uuid
+//   Open to all callers. Returns the jbroot preboot UUID (36 chars).
+static int roothide_action_get_jbroot_uuid(char **uuidOut)
+{
+    if (!uuidOut) return -1;
+    roothide_server_ensure_init();
+    char *buf = malloc(37);
+    if (!buf) return -1;
+    if (roothide_get_jbroot_uuid(buf, 37) != 0) {
+        free(buf);
+        return -1;
+    }
+    *uuidOut = buf;
+    return 0;
+}
+
+// JBS_ROOTHIDE_TRANSLATE_PATH (15) — in: string path, out: string translated
+//   Open to all callers. Translates /var/jb style paths to jbroot paths.
+static int roothide_action_translate_path(const char *path, char **translatedOut)
+{
+    if (!path || !path[0] || !translatedOut) return -1;
+    roothide_server_ensure_init();
+    char *buf = malloc(PATH_MAX);
+    if (!buf) return -1;
+    if (roothide_translate_path(path, buf, PATH_MAX) != 0) {
+        free(buf);
+        return -1;
+    }
+    *translatedOut = buf;
+    return 0;
+}
+
+// JBS_ROOTHIDE_IS_APP_HIDDEN (16) — in: string bundleID, out: bool hidden
+//   Open to all callers. Alias for is_blacklisted (kept separate for semantic
+//   clarity — "is_app_hidden" is what RootHide app's UI conceptually checks).
+static int roothide_action_is_app_hidden(const char *bundleID, bool *hiddenOut)
+{
+    if (!bundleID || !bundleID[0] || !hiddenOut) return -1;
+    roothide_server_ensure_init();
+    *hiddenOut = roothide_is_app_hidden(bundleID);
+    return 0;
+}
+
 // ---------- Domain descriptor ----------
 //
 // The actions array MUST be in the same order as the JBS_ROOTHIDE_* enum in
@@ -282,12 +395,80 @@ struct jbserver_domain gRoothideDomain = {
                 { 0 },
             },
         },
-	// JBS_ROOTHIDE_IS_BLACKLISTED (8) — FIX LỖI 1
+        // JBS_ROOTHIDE_IS_BLACKLISTED (8) — FIX LỖI 1
         {
-	    .handler = roothide_action_is_blacklisted,
+            .handler = roothide_action_is_blacklisted,
             .args = (jbserver_arg[]){
-		{ .name = "bundleID",     .type = JBS_TYPE_STRING, .out = false },
-		{ .name = "blacklisted",  .type = JBS_TYPE_BOOL,   .out = true  },
+                { .name = "bundleID",     .type = JBS_TYPE_STRING, .out = false },
+                { .name = "blacklisted",  .type = JBS_TYPE_BOOL,   .out = true  },
+                { 0 },
+            },
+        },
+        // ROOTHIDE FIX LỖI 2: Full APIs for RootHide app compatibility
+        // JBS_ROOTHIDE_GET_BLACKLIST_COUNT (9)
+        {
+            .handler = roothide_action_get_blacklist_count,
+            .args = (jbserver_arg[]){
+                { .name = "count", .type = JBS_TYPE_UINT64, .out = true },
+                { 0 },
+            },
+        },
+        // JBS_ROOTHIDE_GET_BLACKLIST_ENTRY (10)
+        {
+            .handler = roothide_action_get_blacklist_entry,
+            .args = (jbserver_arg[]){
+                { .name = "index", .type = JBS_TYPE_UINT64, .out = false },
+                { .name = "entry", .type = JBS_TYPE_STRING, .out = true  },
+                { 0 },
+            },
+        },
+        // JBS_ROOTHIDE_GET_BLACKLIST_STRING (11)
+        {
+            .handler = roothide_action_get_blacklist_string,
+            .args = (jbserver_arg[]){
+                { .name = "blacklist", .type = JBS_TYPE_STRING, .out = true },
+                { 0 },
+            },
+        },
+        // JBS_ROOTHIDE_CLEAR_BLACKLIST (12)
+        {
+            .handler = roothide_action_clear_blacklist,
+            .args = (jbserver_arg[]){
+                { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
+                { 0 },
+            },
+        },
+        // JBS_ROOTHIDE_GET_SESSION_ID (13)
+        {
+            .handler = roothide_action_get_session_id,
+            .args = (jbserver_arg[]){
+                { .name = "sessionID", .type = JBS_TYPE_UINT64, .out = true },
+                { 0 },
+            },
+        },
+        // JBS_ROOTHIDE_GET_JBROOT_UUID (14)
+        {
+            .handler = roothide_action_get_jbroot_uuid,
+            .args = (jbserver_arg[]){
+                { .name = "uuid", .type = JBS_TYPE_STRING, .out = true },
+                { 0 },
+            },
+        },
+        // JBS_ROOTHIDE_TRANSLATE_PATH (15)
+        {
+            .handler = roothide_action_translate_path,
+            .args = (jbserver_arg[]){
+                { .name = "path",       .type = JBS_TYPE_STRING, .out = false },
+                { .name = "translated", .type = JBS_TYPE_STRING, .out = true  },
+                { 0 },
+            },
+        },
+        // JBS_ROOTHIDE_IS_APP_HIDDEN (16)
+        {
+            .handler = roothide_action_is_app_hidden,
+            .args = (jbserver_arg[]){
+                { .name = "bundleID", .type = JBS_TYPE_STRING, .out = false },
+                { .name = "hidden",  .type = JBS_TYPE_BOOL,   .out = true  },
                 { 0 },
             },
         },

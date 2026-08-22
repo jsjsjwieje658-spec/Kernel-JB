@@ -4,6 +4,7 @@
 // - Environment variable cleaning
 // - File/directory access interception
 // - Syscall-level hiding
+// - Filesystem mount hiding (getfsent/getmntinfo/statfs/getfsstat)
 // NOTE: RootHide does NOT use /var/jb - uses randomized jbroot path only
 
 #include "roothide.h"
@@ -14,6 +15,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/param.h>
+#include <sys/mount.h>
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -54,6 +56,37 @@ static const char *g_hidden_paths[] = {
     "/usr/lib/substrate",
     "/usr/lib/TweakInject",
     "/var/mobile/Library/Preferences/com.cydia",
+    // ROOTHIDE FIX LỖI 2: thêm các bind mount points mà jailbreak tạo ra.
+    // RootHide IPA gốc phát hiện các bind mounts này qua getfsent()/statfs()
+    // và cảnh báo "Unknown Binds Mount(s)". Cần ẩn chúng khỏi app detection.
+    "/System",        // bind mount protect (setPrivatePrebootProtected)
+    "/usr",           // bind mount protect (setPrivatePrebootProtected)
+    "/usr/lib",       // fakelib mount (createFakeLib)
+    "/Developer",     // Xcode Developer mount (unmount trong userspace reboot)
+    NULL
+};
+
+// ROOTHIDE FIX LỖI 2: Hidden mount device names (f_mntfromname trong statfs).
+// RootHide IPA gốc check statfs().f_mntfromname để phát hiện bind mounts lạ.
+// Các device names này là dấu hiệu jailbreak:
+static const char *g_hidden_mount_devices[] = {
+    "/private/preboot",                              // jbroot gốc
+    "/var/containers/Bundle/Application/.jbroot-",   // jbroot format RootHide
+    "live.dmg",                                       // Dopamine fakelib
+    "fakelib",                                        // Dopamine fakelib
+    "BaseBin",                                        // BaseBin mount
+    NULL
+};
+
+// ROOTHIDE FIX LỖI 2: Hidden mount on-locations (f_mntonname trong statfs).
+// Đây là các mount points mà jailbreak tạo bind mount lên đó.
+// Khi app detection query statfs() hoặc getmntinfo() trên path này, nó sẽ thấy
+// f_mntonname = "/System", "/usr", "/usr/lib" → detect jailbreak.
+static const char *g_hidden_mount_locations[] = {
+    "/System",
+    "/usr",
+    "/usr/lib",
+    "/Developer",
     NULL
 };
 
@@ -85,6 +118,8 @@ static const char *g_hidden_env_vars[] = {
     "JBROOT",
     "_MSSafeMode",
     "SAFE_MODE",
+    "DOPAMINE_IS_HIDDEN",
+    "STAGED_JAILBREAK_UPDATE",
     NULL
 };
 
@@ -101,6 +136,15 @@ static struct {
     int (*orig_lstat)(const char *, struct stat *);
     int (*orig_open)(const char *, int, ...);
     
+    // ROOTHIDE FIX LỖI 2: filesystem mount API originals
+    struct statfs *(*orig_getmntinfo)(struct statfs *, int);
+    struct statfs64 *(*orig_getmntinfo64)(struct statfs64 *, int);
+    int (*orig_statfs)(const char *, struct statfs *);
+    int (*orig_statfs64)(const char *, struct statfs64 *);
+    int (*orig_getfsstat)(struct statfs *, int, int);
+    int (*orig_getfsstat64)(struct statfs64 *, int, int);
+    struct fstab *(*orig_getfsent)(void);
+    
     pthread_mutex_t mutex;
 } g_roothide_hide = {
     .initialized = false,
@@ -111,6 +155,13 @@ static struct {
     .orig_stat = NULL,
     .orig_lstat = NULL,
     .orig_open = NULL,
+    .orig_getmntinfo = NULL,
+    .orig_getmntinfo64 = NULL,
+    .orig_statfs = NULL,
+    .orig_statfs64 = NULL,
+    .orig_getfsstat = NULL,
+    .orig_getfsstat64 = NULL,
+    .orig_getfsent = NULL,
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
@@ -177,6 +228,41 @@ static int fake_not_found(const char *path)
 {
     errno = ENOENT;
     return -1;
+}
+
+// ROOTHIDE FIX LỖI 2: Check if a mount entry should be hidden
+// Mount entry should be hidden if:
+//   - f_mntonname is in g_hidden_mount_locations (e.g. /System, /usr, /usr/lib)
+//   - f_mntfromname contains jbroot path or known jailbreak device names
+//   - f_mntfromname starts with /private/preboot (jbroot gốc)
+//   - f_mntfromname contains /var/containers/Bundle/Application/.jbroot-
+static bool should_hide_mount_entry(const char *mntonname, const char *mntfromname)
+{
+    // Hide entries mounted on jailbreak bind-mount locations
+    if (mntonname) {
+        for (int i = 0; g_hidden_mount_locations[i] != NULL; i++) {
+            if (strcmp(mntonname, g_hidden_mount_locations[i]) == 0) {
+                return true;
+            }
+        }
+    }
+    
+    // Hide entries from jailbreak device names
+    if (mntfromname) {
+        for (int i = 0; g_hidden_mount_devices[i] != NULL; i++) {
+            if (strstr(mntfromname, g_hidden_mount_devices[i]) != NULL) {
+                return true;
+            }
+        }
+        
+        // Check against dynamic jbroot path
+        const char *dynamic_jbroot = get_dynamic_jbroot();
+        if (dynamic_jbroot && strstr(mntfromname, dynamic_jbroot) != NULL) {
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 // ============ Hooked Functions ============
@@ -278,6 +364,216 @@ static int hooked_open(const char *pathname, int flags, ...)
     return open(pathname, flags);
 }
 
+// ROOTHIDE FIX LỖI 2: Hooked getmntinfo() - filter out jailbreak mount entries
+// RootHide IPA gốc gọi getmntinfo() để list tất cả mount points, nếu thấy
+// entries lạ (e.g. /System, /usr mounted từ /private/preboot/...) → cảnh báo
+// "Unknown Binds Mount(s)".
+//
+// Fix: Hook getmntinfo(), call orig, sau đó filter out entries có
+// f_mntonname hoặc f_mntfromname match với g_hidden_mount_locations /
+// g_hidden_mount_devices. Trả về count mới (sau khi filter).
+static int hooked_getmntinfo(struct statfs *mntbufp, int flags)
+{
+    if (!g_roothide_hide.orig_getmntinfo) {
+        // Fallback: gọi getmntinfo trực tiếp (sẽ không filter)
+        return getmntinfo(mntbufp, flags);
+    }
+    
+    int count = g_roothide_hide.orig_getmntinfo(mntbufp, flags);
+    if (count <= 0 || !g_roothide_hide.is_clean_mode) {
+        return count;
+    }
+    
+    // Filter in-place: shift non-hidden entries to front
+    int write_idx = 0;
+    for (int read_idx = 0; read_idx < count; read_idx++) {
+        const char *mntonname = mntbufp[read_idx].f_mntonname;
+        const char *mntfromname = mntbufp[read_idx].f_mntfromname;
+        
+        if (!should_hide_mount_entry(mntonname, mntfromname)) {
+            if (write_idx != read_idx) {
+                mntbufp[write_idx] = mntbufp[read_idx];
+            }
+            write_idx++;
+        } else {
+            // Log để debug (chỉ khi clean mode)
+            fprintf(stderr, "[RootHide] getmntinfo: hiding mount %s from %s\n",
+                    mntonname ? mntonname : "(null)",
+                    mntfromname ? mntfromname : "(null)");
+        }
+    }
+    
+    return write_idx;
+}
+
+// ROOTHIDE FIX LỖI 2: Hooked getmntinfo64() - 64-bit version
+static int hooked_getmntinfo64(struct statfs64 *mntbufp, int flags)
+{
+    if (!g_roothide_hide.orig_getmntinfo64) {
+        return getmntinfo64(mntbufp, flags);
+    }
+    
+    int count = g_roothide_hide.orig_getmntinfo64(mntbufp, flags);
+    if (count <= 0 || !g_roothide_hide.is_clean_mode) {
+        return count;
+    }
+    
+    int write_idx = 0;
+    for (int read_idx = 0; read_idx < count; read_idx++) {
+        const char *mntonname = mntbufp[read_idx].f_mntonname;
+        const char *mntfromname = mntbufp[read_idx].f_mntfromname;
+        
+        if (!should_hide_mount_entry(mntonname, mntfromname)) {
+            if (write_idx != read_idx) {
+                mntbufp[write_idx] = mntbufp[read_idx];
+            }
+            write_idx++;
+        }
+    }
+    
+    return write_idx;
+}
+
+// ROOTHIDE FIX LỖI 2: Hooked statfs() - return ENOENT cho hidden mount points
+// Nếu app detection query statfs("/System") hoặc statfs("/usr/lib"), nó sẽ thấy
+// f_mntfromname = "/private/preboot/..." → detect jailbreak.
+// Fix: return -1 + errno=ENOENT cho các path nằm trong g_hidden_mount_locations.
+static int hooked_statfs(const char *path, struct statfs *buf)
+{
+    if (g_roothide_hide.is_clean_mode) {
+        // Check nếu path là một hidden mount location
+        if (path) {
+            for (int i = 0; g_hidden_mount_locations[i] != NULL; i++) {
+                if (strcmp(path, g_hidden_mount_locations[i]) == 0) {
+                    // Return ENOENT để app nghĩ path không tồn tại
+                    fprintf(stderr, "[RootHide] statfs: hiding %s\n", path);
+                    errno = ENOENT;
+                    return -1;
+                }
+            }
+        }
+    }
+    
+    if (g_roothide_hide.orig_statfs) {
+        int r = g_roothide_hide.orig_statfs(path, buf);
+        // Post-filter: nếu statfs thành công, kiểm tra f_mntfromname
+        if (r == 0 && g_roothide_hide.is_clean_mode && buf) {
+            if (should_hide_mount_entry(buf->f_mntonname, buf->f_mntfromname)) {
+                fprintf(stderr, "[RootHide] statfs: hiding result for %s (mount %s from %s)\n",
+                        path, buf->f_mntonname, buf->f_mntfromname);
+                errno = ENOENT;
+                return -1;
+            }
+        }
+        return r;
+    }
+    return statfs(path, buf);
+}
+
+// ROOTHIDE FIX LỖI 2: Hooked statfs64() - 64-bit version
+static int hooked_statfs64(const char *path, struct statfs64 *buf)
+{
+    if (g_roothide_hide.is_clean_mode) {
+        if (path) {
+            for (int i = 0; g_hidden_mount_locations[i] != NULL; i++) {
+                if (strcmp(path, g_hidden_mount_locations[i]) == 0) {
+                    fprintf(stderr, "[RootHide] statfs64: hiding %s\n", path);
+                    errno = ENOENT;
+                    return -1;
+                }
+            }
+        }
+    }
+    
+    if (g_roothide_hide.orig_statfs64) {
+        int r = g_roothide_hide.orig_statfs64(path, buf);
+        if (r == 0 && g_roothide_hide.is_clean_mode && buf) {
+            if (should_hide_mount_entry(buf->f_mntonname, buf->f_mntfromname)) {
+                fprintf(stderr, "[RootHide] statfs64: hiding result for %s (mount %s from %s)\n",
+                        path, buf->f_mntonname, buf->f_mntfromname);
+                errno = ENOENT;
+                return -1;
+            }
+        }
+        return r;
+    }
+    return statfs64(path, buf);
+}
+
+// ROOTHIDE FIX LỖI 2: Hooked getfsstat() - filter mount entries
+// getfsstat trả về array của statfs structs. Filter in-place như getmntinfo.
+static int hooked_getfsstat(struct statfs *buf, int bufsize, int mode)
+{
+    if (!g_roothide_hide.orig_getfsstat) {
+        return getfsstat(buf, bufsize, mode);
+    }
+    
+    int count = g_roothide_hide.orig_getfsstat(buf, bufsize, mode);
+    if (count <= 0 || !g_roothide_hide.is_clean_mode || !buf) {
+        return count;
+    }
+    
+    int write_idx = 0;
+    for (int read_idx = 0; read_idx < count; read_idx++) {
+        const char *mntonname = buf[read_idx].f_mntonname;
+        const char *mntfromname = buf[read_idx].f_mntfromname;
+        
+        if (!should_hide_mount_entry(mntonname, mntfromname)) {
+            if (write_idx != read_idx) {
+                buf[write_idx] = buf[read_idx];
+            }
+            write_idx++;
+        }
+    }
+    
+    return write_idx;
+}
+
+// ROOTHIDE FIX LỖI 2: Hooked getfsstat64() - 64-bit version
+static int hooked_getfsstat64(struct statfs64 *buf, int bufsize, int mode)
+{
+    if (!g_roothide_hide.orig_getfsstat64) {
+        return getfsstat64(buf, bufsize, mode);
+    }
+    
+    int count = g_roothide_hide.orig_getfsstat64(buf, bufsize, mode);
+    if (count <= 0 || !g_roothide_hide.is_clean_mode || !buf) {
+        return count;
+    }
+    
+    int write_idx = 0;
+    for (int read_idx = 0; read_idx < count; read_idx++) {
+        const char *mntonname = buf[read_idx].f_mntonname;
+        const char *mntfromname = buf[read_idx].f_mntfromname;
+        
+        if (!should_hide_mount_entry(mntonname, mntfromname)) {
+            if (write_idx != read_idx) {
+                buf[write_idx] = buf[read_idx];
+            }
+            write_idx++;
+        }
+    }
+    
+    return write_idx;
+}
+
+// ROOTHIDE FIX LỖI 2: Hooked getfsent() - trả về NULL để ẩn tất cả fstab entries
+// getfsent đọc /etc/fstab line-by-line. Trên iOS không có fstab thật, nhưng
+// RootHide IPA gốc có thể dùng getfsent để enumerate mount entries khác.
+// Trả về NULL để app nghĩ không có fstab entries.
+static struct fstab *hooked_getfsent(void)
+{
+    if (g_roothide_hide.is_clean_mode) {
+        fprintf(stderr, "[RootHide] getfsent: hiding all fstab entries\n");
+        return NULL;
+    }
+    
+    if (g_roothide_hide.orig_getfsent) {
+        return g_roothide_hide.orig_getfsent();
+    }
+    return getfsent();
+}
+
 // ============ Environment Cleaning ============
 
 // Clean environment variables for blacklisted apps
@@ -311,6 +607,20 @@ void roothide_clean_environment(void)
  * gọi access()/stat()/... control flow sẽ đi qua hàm hooked_*. Hàm hooked
  * kiểm tra should_hide_path() và return ENOENT nếu path match.
  *
+ * FIX LỖI 2 (RootHide IPA cảnh báo "Unknown Binds Mount(s)"):
+ * RootHide IPA gốc phát hiện bind mounts qua getfsent()/getmntinfo()/statfs().
+ * Trước đây roothide_hide KHÔNG hook các hàm này → RootHide IPA vẫn thấy các
+ * mount points lạ (/System, /usr, /usr/lib bind mount từ jbroot) → cảnh báo
+ * "Unknown Binds Mount(s)".
+ *
+ * Fix: thêm hooks cho:
+ *   - getmntinfo / getmntinfo64 (list mounts)
+ *   - statfs / statfs64 (get filesystem stats)
+ *   - getfsstat / getfsstat64 (get mount stats)
+ *   - getfsent (read fstab entries)
+ * Các hooks này filter out mount entries có f_mntonname hoặc f_mntfromname
+ * match với jailbreak paths.
+ *
  * Lưu ý: `litehook_rebind_symbol(NULL, ...)` rebind toàn cục (mọi image trong
  * process). Có thể ảnh hưởng performance nhẹ (~10ms trên launch), nhưng chỉ
  * chạy khi clean_mode=true (chỉ blacklisted app mới bị hook).
@@ -340,11 +650,21 @@ int roothide_hide_init(bool clean_mode)
     g_roothide_hide.orig_stat = dlsym(RTLD_NEXT, "stat");
     g_roothide_hide.orig_lstat = dlsym(RTLD_NEXT, "lstat");
     g_roothide_hide.orig_open = dlsym(RTLD_NEXT, "open");
+    
+    // FIX LỖI 2: filesystem mount API originals
+    g_roothide_hide.orig_getmntinfo = dlsym(RTLD_NEXT, "getmntinfo");
+    g_roothide_hide.orig_getmntinfo64 = dlsym(RTLD_NEXT, "getmntinfo64");
+    g_roothide_hide.orig_statfs = dlsym(RTLD_NEXT, "statfs");
+    g_roothide_hide.orig_statfs64 = dlsym(RTLD_NEXT, "statfs64");
+    g_roothide_hide.orig_getfsstat = dlsym(RTLD_NEXT, "getfsstat");
+    g_roothide_hide.orig_getfsstat64 = dlsym(RTLD_NEXT, "getfsstat64");
+    g_roothide_hide.orig_getfsent = dlsym(RTLD_NEXT, "getfsent");
 
     // FIX BUG #24: rebind GOT để hooks thật sự chạy.
     // litehook_rebind_symbol(NULL, replacee, replacement, NULL) rebind globally.
     if (clean_mode) {
         // Chỉ hook khi clean_mode=true (đừng hook mọi process — performance)
+        // File path hiding hooks
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
                                (void *)access,  (void *)hooked_access,  NULL);
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
@@ -357,6 +677,23 @@ int roothide_hide_init(bool clean_mode)
                                (void *)lstat,   (void *)hooked_lstat,   NULL);
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
                                (void *)open,    (void *)hooked_open,    NULL);
+        
+        // FIX LỖI 2: filesystem mount API hooks
+        // Ẩn bind mounts khỏi RootHide IPA detection
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)getmntinfo,    (void *)hooked_getmntinfo,    NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)getmntinfo64,  (void *)hooked_getmntinfo64,  NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)statfs,        (void *)hooked_statfs,        NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)statfs64,      (void *)hooked_statfs64,      NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)getfsstat,     (void *)hooked_getfsstat,     NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)getfsstat64,   (void *)hooked_getfsstat64,   NULL);
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+                               (void *)getfsent,      (void *)hooked_getfsent,      NULL);
 
         // Clean environment sau khi hook (để env check không bị phát hiện)
         roothide_clean_environment();
