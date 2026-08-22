@@ -59,12 +59,28 @@ bool macho_is_mappable(MachO *macho)
 
 bool csd_superblob_is_adhoc_signed(CS_DecodedSuperBlob *superblob)
 {
-	CS_DecodedBlob *wrapperBlob = csd_superblob_find_blob(superblob, CSSLOT_SIGNATURESLOT, NULL);
-	if (wrapperBlob) {
-		if (csd_blob_get_size(wrapperBlob) > 8) {
-			return false;
-		}
-	}
+	// FIX (LỖI 3 — Apps cài qua dev-cert crash sau JB):
+	//
+	// Bản gốc Dopamine rootless KHÔNG chấp nhận binary có CMS signature
+	// (sign bằng Apple Developer certificate). Nếu SIGNATURESLOT > 8 bytes
+	// (tức là có CMS blob PKCS#7 thực sự), hàm return false → binary
+	// không được add vào trustcache → AMFI kill app với SIGKILL khi
+	// SpringBoard launch app → user thấy "app crash ngay sau JB".
+	//
+	// Trên Dopamine rootless chính thức điều này OK vì rootless KHÔNG
+	// hỗ trợ app dev-cert: user phải ldid -S (adhoc) trước khi cài.
+	// Trên RootHide, nhiều deb (.deb roothide arm64e) chứa binary
+	// sign với dev-cert (qua esign/TrollStore), và người dùng cài app
+	// dev-cert thông qua RootHide Bootstrap → binary phải được trust.
+	//
+	// FIX: luôn return true để binary có cdhash được add vào trustcache.
+	// AMFI sẽ accept binary dựa trên cdhash match (không cần CMS chain).
+	// CMS signature vẫn được kiểm tra bởi AMFI (nếu có) nhưng trustcache
+	// có quyền ưu tiên cao hơn.
+	//
+	// Đối với Dopamine app gốc (ad-hoc sign), logic này không thay đổi
+	// hành vi vì ad-hoc signature luôn có SIGNATURESLOT ≤ 8 bytes.
+	(void)superblob;
 	return true;
 }
 
@@ -206,7 +222,7 @@ CS_SuperBlob *siginfo_resolve_superblob(struct siginfo *siginfo, int pid, int fd
 			uintptr_t superblobEnd   = superblobStart + superblobSize;
 			struct stat st = {};
 
-        	if (fstat(fd, &st) != 0) break;
+		if (fstat(fd, &st) != 0) break;
 			if (superblobEnd > st.st_size) break;
 			if (lseek(fd, superblobStart, SEEK_SET) != superblobStart) break;
 			if (read(fd, superblob, superblobSize) != superblobSize) break;

@@ -94,4 +94,14 @@ char *jbclient_roothide_get_jbroot_path(void);
  */
 int jbclient_roothide_apply_settings(bool shouldReboot);
 
+/**
+ * FIX LỖI 1: Query blacklist động từ launchdjbserver.
+ * Systemhook gọi hàm này để quyết định có inject tweak vào app hay không.
+ * Tránh việc chỉ check env var (env var có thể không được set đúng).
+ *
+ * @param bundleID Bundle identifier của app sắp spawn
+ * @return true nếu app nằm trong blacklist (skip injection), false nếu OK
+ */
+bool jbclient_roothide_is_blacklisted(const char *bundleID);
+
 #endif

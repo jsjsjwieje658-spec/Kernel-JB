@@ -635,14 +635,40 @@ int jbclient_roothide_apply_settings(bool shouldReboot)
 {
         xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
         xpc_dictionary_set_bool(xargs, "shouldReboot", shouldReboot);
-        
+
         xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_APPLY_SETTINGS, xargs);
         xpc_release(xargs);
-        
+
         if (xreply) {
                 int64_t result = xpc_dictionary_get_int64(xreply, "result");
                 xpc_release(xreply);
                 return (int)result;
         }
         return -1;
+}
+
+// FIX LỖI 1: Query blacklist động từ launchd.
+// Hàm này được systemhook gọi trước khi spawn process để quyết định có
+// inject tweak hay không. Trước đây should_enable_tweaks chỉ check env var
+// ROOTHIDE_CLEAN_MODE_ENV, nhưng env var có thể bị thiếu/không được truyền
+// đúng trong 1 số path (early boot, xpcproxy,...). Query động đảm bảo
+// blacklist luôn được tôn trọng.
+bool jbclient_roothide_is_blacklisted(const char *bundleID)
+{
+	if (!bundleID || !bundleID[0]) return false;
+
+        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
+        xpc_dictionary_set_string(xargs, "bundleID", bundleID);
+
+	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_IS_BLACKLISTED, xargs);
+        xpc_release(xargs);
+
+        if (xreply) {
+		bool blacklisted = xpc_dictionary_get_bool(xreply, "blacklisted");
+                xpc_release(xreply);
+		return blacklisted;
+        }
+	// Nếu không kết nối được tới launchd (early boot, etc), fail-safe = false
+	// (cho phép tweaks) thay vì block mọi thứ (block hết = bootloop).
+        return false;
 }

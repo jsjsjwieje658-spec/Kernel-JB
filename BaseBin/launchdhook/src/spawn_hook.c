@@ -13,6 +13,8 @@
 #include "hookd_provider.h"
 // RootHide integration for selective injection
 #include <libjailbreak/roothide.h>
+// FIX LỖI 1: query blacklist động
+#include <libjailbreak/jbclient_xpc.h>
 
 extern char **environ;
 
@@ -181,7 +183,10 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
                 if (!strcmp(path, "/usr/libexec/xpcproxy")) {
                         if (argv[0]) {
                                 if (argv[1]) {
-                                        if (!strcmp(argv[1], "com.apple.backboardd\n")) {
+					// FIX BUG #4: typo "com.apple.backboardd\n" → "com.apple.backboardd"
+					// Trước đây: strcmp luôn fail → free_boot_logo() không bao giờ gọi
+					// → boot logo memory leak, có thể gây hiện tượng glow/stuck màn hình.
+					if (!strcmp(argv[1], "com.apple.backboardd")) {
                                                 free_boot_logo();
                                                 gFreeBootLogoBeforeBackboardd = false;
                                         }
@@ -194,21 +199,57 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
         // Check if the spawned process should run in clean mode
         // This is the key mechanism for RootHide's selective injection
         bool shouldHideForChild = false;
-        
-        // Initialize RootHide if not already done
-        if (!g_roothide_initialized) {
-                roothide_init();
-                g_roothide_initialized = true;
-        }
-        
-        // Check if current process is already in clean mode (propagate to children)
-        if (getenv(ROOTHIDE_CLEAN_MODE_ENV)) {
-                const char *parentCleanMode = getenv(ROOTHIDE_CLEAN_MODE_ENV);
-                if (parentCleanMode && strcmp(parentCleanMode, "1") == 0) {
-                        shouldHideForChild = true;
+
+	// FIX BUG #28: defer roothide_init() đến khi launchd XPC server đã up.
+	// Trước đây roothide_init() được gọi ở đây ngay khi launchd spawn bất kỳ
+	// process nào, kể cả khi jbserver chưa ready. Khi đó get_jbroot() trả về
+	// NULL → fallback "/private/preboot" → g_roothide.base_jbroot bị set
+	// sai → mọi check should_hide_path() sau đó fail.
+	//
+	// Fix: chỉ init sau early_boot_done (sau khi thấy xpcproxy spawn).
+	// Trước đó, không check blacklist (trả về shouldHideForChild=false).
+	if (!gInEarlyBoot) {
+		if (!g_roothide_initialized) {
+			roothide_init();
+			g_roothide_initialized = true;
+                }
+
+		// Check if current process is already in clean mode (propagate to children)
+		if (getenv(ROOTHIDE_CLEAN_MODE_ENV)) {
+			const char *parentCleanMode = getenv(ROOTHIDE_CLEAN_MODE_ENV);
+			if (parentCleanMode && strcmp(parentCleanMode, "1") == 0) {
+				shouldHideForChild = true;
+                        }
+                }
+
+		// FIX LỖI 1 (bonus): nếu path có chứa app name (vd /var/containers/Bundle/Application/.../Foo.app/Foo)
+		// thì cũng check blacklist động để đảm bảo app banking/detection được skip injection
+		// kể cả khi parent chưa set env var (vd SpringBoard launch trực tiếp).
+		if (!shouldHideForChild && path && strstr(path, ".app/")) {
+			// Extract bundle ID từ path: lấy substring giữa "/" cuối cùng trước ".app/" và "/<binary>" sau .app/
+			char bundleBuf[256];
+			const char *appMarker = strstr(path, ".app/");
+			if (appMarker) {
+				// Tìm "/" trước ".app/"
+				const char *p = appMarker - 1;
+				while (p >= path && *p != '/') p--;
+				if (p >= path && *p == '/') {
+					p++; // skip '/'
+					size_t len = appMarker - p;
+					if (len > 0 && len < sizeof(bundleBuf)) {
+						memcpy(bundleBuf, p, len);
+						bundleBuf[len] = '\0';
+						// Query động blacklist
+						// Chỉ dùng nếu launchd đã up (đã check ở trên)
+						if (jbclient_roothide_is_blacklisted(bundleBuf)) {
+							shouldHideForChild = true;
+						}
+                                        }
+                                }
+                        }
                 }
         }
-        
+
         // If we need to hide this child, modify envp to include clean mode flag
         // We do this by using environ instead of envp and setting the env var
         if (shouldHideForChild) {
@@ -219,9 +260,35 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 #endif
                 setenv(ROOTHIDE_CLEAN_MODE_ENV, "1", 1); // Propagate to child
         }
-        // ========== END ROOTHIDE PROPAGATION ==========
 
-        return posix_spawn_hook_shared(pid, path, desc, argv, envp, __posix_spawn_orig_wrapper, systemwide_trust_file_by_path, platform_set_process_debugged, jbsetting(jetsamMultiplier));
+	// FIX BUG #23 + #propagation: trước đây setenv(ROOTHIDE_CLEAN_MODE_ENV)
+	// được gọi trên `environ` của launchd, nhưng posix_spawn_hook_shared vẫn
+	// truyền `envp` gốc → child KHÔNG thấy env var → app banking vẫn được
+	// inject tweak → crash.
+	//
+	// Fix:
+	// 1) Nếu shouldHideForChild=true → truyền envp=NULL để spawn dùng environ
+	//    (đã có ROOTHIDE_CLEAN_MODE_ENV=1 set ở trên).
+	// 2) Tạm thời unset DOPAMINE_IS_HIDDEN trên environ để child không thấy
+	//    env var này (anti-detection). Sau spawn, set lại để launchd giữ state.
+	bool isHidden = (getenv("DOPAMINE_IS_HIDDEN") != NULL);
+	const char *hiddenVal = isHidden ? strdup(getenv("DOPAMINE_IS_HIDDEN")) : NULL;
+	if (isHidden) {
+		unsetenv("DOPAMINE_IS_HIDDEN");
+        }
+	char *const *childEnvp = shouldHideForChild ? NULL : envp;
+	int r = posix_spawn_hook_shared(pid, path, desc, argv, childEnvp,
+				       __posix_spawn_orig_wrapper,
+				       systemwide_trust_file_by_path,
+				       platform_set_process_debugged,
+				       jbsetting(jetsamMultiplier));
+	// Restore launchd env (cho launchd tiếp tục biết trạng thái hide)
+	if (isHidden && hiddenVal) {
+		setenv("DOPAMINE_IS_HIDDEN", hiddenVal, 1);
+		free((void *)hiddenVal);
+        }
+        return r;
+        // ========== END ROOTHIDE PROPAGATION ==========
 }
 
 void initSpawnHooks(void)

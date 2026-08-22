@@ -733,14 +733,22 @@ static BOOL checkRootHideJBRAND(NSString *str)
             NSLog(@"[RootHide] changeMobilePassword: running pw usermod -u 501 -h 0");
             int r = exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", dashCommand.UTF8String, NULL);
             if (r != 0) {
-                NSLog(@"[RootHide] changeMobilePassword: pw returned %d", r);
-                // Fallback: try `passwd mobile` via chpasswd-like mechanism
-                NSString *fallbackCmd = [NSString stringWithFormat:@"printf '%@\\n%@\\n' | %@ chpasswd mobile 2>/dev/null || echo '%@' | %@ -q passwd root 2>/dev/null || true",
-                    escapedPassword, escapedPassword,
-                    JBROOT_PATH(@"/usr/sbin/chpasswd"),
+		NSLog(@"[RootHide] changeMobilePassword: pw returned %d, trying chpasswd fallback", r);
+		// FIX: bỏ `su -q passwd root` (su không có option -q trong Procursus,
+		// và `echo '...' | su` truyền password vào stdin của su chứ không phải
+		// passwd → không work). `|| true` cuối cũng nuốt hết error → user
+		// tưởng đổi pass OK nhưng thực ra không.
+		// Fallback chỉ dùng `chpasswd` (đúng syntax cho Procursus).
+		// Lưu ý: chpasswd nhận input dạng "user:password" trên stdin.
+		NSString *fallbackCmd = [NSString stringWithFormat:@"printf 'mobile:%@\\n' | %@ chpasswd 2>&1",
                     escapedPassword,
-                    JBROOT_PATH(@"/usr/bin/su")];
-                exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", fallbackCmd.UTF8String, NULL);
+		    JBROOT_PATH(@"/usr/sbin/chpasswd")];
+		int r2 = exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", fallbackCmd.UTF8String, NULL);
+		if (r2 != 0) {
+		    NSLog(@"[RootHide] changeMobilePassword: chpasswd also failed (%d), password NOT changed", r2);
+		} else {
+		    NSLog(@"[RootHide] changeMobilePassword: chpasswd fallback OK");
+                }
             }
         }];
     }];

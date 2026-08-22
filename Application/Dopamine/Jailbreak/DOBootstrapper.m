@@ -1412,16 +1412,17 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         // can't find shared libraries without bootstrap.dylib), we manually
         // extract the .deb file and install it ourselves.
         //
-        // A .deb file is an ar archive containing:
-        //   - debian-binary (version info)
-        //   - control.tar.* (metadata: control file, postinst, etc.)
-        //   - data.tar.* (actual files to install)
+	// manuallyInstallDeb đã trust-cache binary NGAY sau khi extract xong
+	// (xem trustCacheAppBinariesAfterInstall), nên KHÔNG cần trust-cache
+	// lại ở đây.
         //
-        // We extract data.tar.* to <jbroot>/ and update the dpkg status file.
+	// FIX LỖI 1: Nếu install fail, KHÔNG return error — log + continue.
+	// Trước đây nếu Sileo fail, Zebra không được cài. Bây giờ cả 2 đều
+	// được attempt, JB không abort.
         NSError *installError = [self manuallyInstallDeb:debPath appName:name];
         if (installError) {
-            NSLog(@"[RootHide] Failed to install %@: %@", name, installError);
-            return installError;
+	    NSLog(@"[RootHide] Failed to install %@ (continuing — non-fatal): %@", name, installError);
+	    continue;  // ← FIX: continue thay vì return
         }
 
         // Run uicache to refresh the app icon
@@ -1430,6 +1431,69 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", appPath.UTF8String, NULL);
     }
     return nil;
+}
+
+// Manually install a .deb package without using the dpkg binary.
+// Parses the .deb ar archive in pure ObjC, extracts data.tar,
+// then uses libarchive to extract files to <jbroot>/.
+//
+// FIX LỖI 2 + 3: Helper trust-cache mọi binary + dylib + framework trong .app
+// sau khi install. Hàm này:
+// 1. Tìm .app directory vừa install (theo appName hoặc scan /Applications)
+// 2. Đọc Info.plist để lấy CFBundleExecutable
+// 3. Trust-cache binary chính + tất cả .dylib/.framework trong Frameworks/
+//
+// Đặt helper NÀY (không phải trong manuallyInstallDeb) để tránh duplicate code
+// giữa manuallyInstallDeb và installPackageManagers.
+- (void)trustCacheAppBinariesAfterInstall:(NSString *)appName
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // Tìm .app directory: thử nhiều vị trí
+    // 1. <jbroot>/Applications/<appName>.app
+    // 2. <jbroot>/Applications/RootHide.app (đặc biệt cho RootHide Manager)
+    NSArray *candidateNames = @[
+	[NSString stringWithFormat:@"/Applications/%@.app", appName],
+	@"/Applications/RootHide.app",  // hardcoded fallback cho RootHide Manager
+    ];
+
+    for (NSString *appBundlePath in candidateNames) {
+	NSString *realAppBundlePath = JBROOT_PATH(appBundlePath);
+	if (![fm fileExistsAtPath:realAppBundlePath]) continue;
+
+	// Lấy executable name từ Info.plist
+	NSString *infoPlistPath = [realAppBundlePath stringByAppendingPathComponent:@"Info.plist"];
+	NSDictionary *infoPlist = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
+	NSString *executableName = infoPlist[@"CFBundleExecutable"] ?: appName;
+
+	// Trust-cache binary chính
+	NSString *executablePath = [realAppBundlePath stringByAppendingPathComponent:executableName];
+	if ([fm fileExistsAtPath:executablePath]) {
+	    int tcR = jbclient_trust_file_by_path(executablePath.fileSystemRepresentation);
+	    NSLog(@"[RootHide] trust-cache %@/%@ (binary): %d", appName, executableName, tcR);
+        }
+
+	// Trust-cache tất cả .dylib trong Frameworks/
+	NSString *frameworksPath = [realAppBundlePath stringByAppendingPathComponent:@"Frameworks"];
+        if ([fm fileExistsAtPath:frameworksPath]) {
+            for (NSString *item in [fm contentsOfDirectoryAtPath:frameworksPath error:nil]) {
+                if ([item hasSuffix:@".dylib"] || [item hasSuffix:@".framework"]) {
+                    NSString *itemPath = [frameworksPath stringByAppendingPathComponent:item];
+                    jbclient_trust_file_by_path(itemPath.fileSystemRepresentation);
+                }
+            }
+        }
+
+	// Trust-cache tất cả .dylib ngoài cùng trong .app (một số app sign thẳng dylib trong .app)
+	for (NSString *item in [fm contentsOfDirectoryAtPath:realAppBundlePath error:nil]) {
+	    if ([item hasSuffix:@".dylib"]) {
+		NSString *itemPath = [realAppBundlePath stringByAppendingPathComponent:item];
+                jbclient_trust_file_by_path(itemPath.fileSystemRepresentation);
+            }
+        }
+
+	break; // chỉ process .app đầu tiên tìm thấy
+    }
 }
 
 // Manually install a .deb package without using the dpkg binary.
@@ -1534,6 +1598,24 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
     }
 
+    // FIX LỖI 2 + 3 (CRITICAL): Trust-cache binary của app NGAY sau khi extract.
+    //
+    // Tại sao CẦN làm điều này TRONG manuallyInstallDeb (không chờ caller):
+    // - Caller (installPackageManagers / finalizeBootstrap) có thể gọi uicache
+    //   ngay sau khi manuallyInstallDeb return.
+    // - uicache spawn app để lấy bundle info → nếu binary có CMS signature
+    //   (dev-cert, như RootHide Manager app) và chưa được trust-cached →
+    //   AMFI SIGKILL → uicache cũng crash → JB abort.
+    // - Đặt trust-cache Ở ĐÂY đảm bảo dù caller làm gì sau đó, binary vẫn
+    //   launch được.
+    //
+    // Tại sao KHÔNG return error nếu trust-cache fail:
+    // - Trust-cache fail không phải lý do để fail toàn bộ install. Files đã
+    //   được extract, dpkg status đã update. Caller có thể retry trust-cache
+    //   sau (trustCacheBootstrapBinaries sẽ scan lại toàn bộ /Applications).
+    // - Trả error sẽ làm JB abort → user không vào được springboard → khó debug.
+    [self trustCacheAppBinariesAfterInstall:appName];
+
     // Parse control file if available
     if (controlTarData) {
         NSString *controlTarPath = [tmpDir stringByAppendingPathComponent:@"control.tar"];
@@ -1565,11 +1647,23 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                 if (existing) {
                     [existing writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
                     NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:statusFile];
-                    [fh seekToEndOfFile];
-                    [fh writeData:[statusEntry dataUsingEncoding:NSUTF8StringEncoding]];
-                    [fh closeFile];
+		    // FIX BUG #6 (null-check): fh có thể nil nếu statusFile không tồn tại
+		    // hoặc permission denied. Gọi [fh seekToEndOfFile] với nil sẽ crash.
+		    if (fh) {
+			@try {
+			    [fh seekToEndOfFile];
+			    [fh writeData:[statusEntry dataUsingEncoding:NSUTF8StringEncoding]];
+			    [fh closeFile];
+			} @catch (NSException *e) {
+			    NSLog(@"[RootHide] WARNING: failed to write dpkg status for %@: %@", appName, e);
+			    [fh closeFile];
+                        }
+                    } else {
+			// Fallback: ghi nguyên file (không append)
+			[statusEntry writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                    }
                 } else {
-                    [statusEntry writeToFile:statusFile atomically:NO encoding:NSUTF8StringEncoding error:nil];
+		    [statusEntry writeToFile:statusFile atomically:YES encoding:NSUTF8StringEncoding error:nil];
                 }
             }
         }
@@ -1793,221 +1887,218 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     NSLog(@"[RootHide] trust-cache: %lu binaries trusted, %lu skipped", (unsigned long)trusted, (unsigned long)skipped);
 }
 
+// FIX LỖI 1 + 2: Tách install RootHide Manager thành method riêng để dễ retry
+// và không phụ thuộc vào flow finalizeBootstrap chính.
+//
+// Method này ĐẢM BẢO:
+// 1. RootHide Manager được install và binary extract vào <jbroot>/Applications/RootHide.app/
+// 2. Binary được chown root:wheel + chmod 6755 (setuid root) — cần thiết cho
+//    RootHide Manager để gọi jbctl/mount/trust-cache.
+// 3. Binary được trust-cached NGAY (qua manuallyInstallDeb -> trustCacheAppBinariesAfterInstall).
+// 4. uicache được gọi để refresh icon.
+//
+// Method này KHÔNG throw exception và KHÔNG return error — log mọi lỗi và
+// return. Lý do: JB không nên fail chỉ vì RootHide Manager install fail.
+- (void)installRootHideManagerApp
+{
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+
+	// Check xem có cần install không (binary missing hoặc dpkg chưa có entry)
+	NSString *roothideAppBinaryPath = JBROOT_PATH(@"/Applications/RootHide.app/RootHide");
+	BOOL roothideAppBinaryExists = [fm fileExistsAtPath:roothideAppBinaryPath];
+	NSString *existingRootHideVersion = [self installedVersionForPackageWithIdentifier:@"com.roothide.manager"];
+	BOOL shouldInstall = !existingRootHideVersion || !roothideAppBinaryExists;
+	NSLog(@"[RootHide] RootHide Manager: dpkg_version=%@ binary_exists=%d -> shouldInstall=%d",
+	      existingRootHideVersion, roothideAppBinaryExists, shouldInstall);
+
+	if (!shouldInstall) {
+	    NSLog(@"[RootHide] RootHide Manager đã cài rồi — chỉ trust-cache lại (defensive)");
+	    // Ngay cả khi đã cài, vẫn trust-cache lại để đảm bảo cdhash trong trustcache
+	    // (có thể trustcache đã bị clear sau reboot)
+	    [self trustCacheAppBinariesAfterInstall:@"RootHide"];
+	    // Vẫn apply chmod/chown (có thể bị reset)
+	    if (roothideAppBinaryExists) {
+		exec_cmd_root("/usr/sbin/chown", "root:wheel", roothideAppBinaryPath.fileSystemRepresentation, NULL);
+		exec_cmd_root("/bin/chmod", "6755", roothideAppBinaryPath.fileSystemRepresentation, NULL);
+            }
+            return;
+        }
+
+	// Tìm .deb file
+	NSString *packagesDir = [[[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Packages"] copy];
+	NSString *roothideAppDeb = [packagesDir stringByAppendingPathComponent:@"roothideapp_1.3.9_iphoneos-arm64e.deb"];
+	if (![fm fileExistsAtPath:roothideAppDeb]) {
+	    NSLog(@"[RootHide] RootHide Manager deb NOT FOUND in bundle — skipping auto-install");
+	    [[DOUIManager sharedInstance] sendLog:@"RootHide Manager deb not bundled (skipped)" debug:YES];
+            return;
+        }
+
+	NSLog(@"[RootHide] Installing RootHide Manager from %@", roothideAppDeb);
+	[[DOUIManager sharedInstance] sendLog:@"Installing RootHide Manager" debug:NO];
+
+	// manuallyInstallDeb đã:
+	// - Extract ar archive
+	// - Extract data.tar bằng libarchive
+	// - Trust-cache binary + .dylib + .framework (qua trustCacheAppBinariesAfterInstall)
+	// - Update dpkg status
+	NSError *installErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
+	if (installErr) {
+	    NSLog(@"[RootHide] RootHide Manager install FAILED (continuing — non-fatal): %@", installErr);
+	    [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"RootHide Manager install failed: %@", installErr] debug:YES];
+	    // FIX: Retry một lần. Có thể fail lần đầu do thư mục chưa exist sau extract.
+	    // manuallyInstallDeb idempotent (nếu files đã exist, extract đè).
+	    NSLog(@"[RootHide] Retrying RootHide Manager install...");
+	    NSError *retryErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
+	    if (retryErr) {
+		NSLog(@"[RootHide] RootHide Manager retry FAILED: %@", retryErr);
+		return;  // Cho up, không crash JB
+            }
+        }
+
+	// Verify binary on disk
+	BOOL binaryNowExists = [fm fileExistsAtPath:roothideAppBinaryPath];
+	NSLog(@"[RootHide] RootHide Manager install OK, binary on disk: %d", binaryNowExists);
+	if (!binaryNowExists) {
+	    NSLog(@"[RootHide] WARNING: install reported success but binary missing — dpkg status may be stale");
+            return;
+        }
+
+	// Apply postinst-equivalent: chown 0:0 + chmod +s (setuid root)
+	// RootHide Manager cần setuid root để gọi jbctl/mount/trust-cache.
+	exec_cmd_root("/usr/sbin/chown", "root:wheel", roothideAppBinaryPath.fileSystemRepresentation, NULL);
+	exec_cmd_root("/bin/chmod", "6755", roothideAppBinaryPath.fileSystemRepresentation, NULL);
+	NSLog(@"[RootHide] Applied postinst-equivalent: chown root:wheel + chmod 6755 on RootHide binary");
+
+	// Trust-cache lần cuối (defensive — có thể fail lần đầu do binary
+	// mới extract và jbserver chưa pick up)
+	[self trustCacheAppBinariesAfterInstall:@"RootHide"];
+
+	// Refresh icon cache
+	exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", "/Applications/RootHide.app", NULL);
+	NSLog(@"[RootHide] RootHide Manager install complete");
+    } @catch (NSException *e) {
+	NSLog(@"[RootHide] EXCEPTION during RootHide Manager install: %@: %@", e.name, e.reason);
+	// KHÔNG throw lên — JB tiếp tục
+    }
+}
+
 - (NSError *)finalizeBootstrap
 {
     // ROOTHIDE: Simplified finalizeBootstrap.
-    // With correct jbroot path (.jbroot-XXX), no dylib patching needed.
-    // Just trust-cache all bootstrap binaries so AMFI accepts them.
-    NSLog(@"[RootHide] finalizeBootstrap: trust-caching bootstrap binaries...");
+    //
+    // FIX LỖI 1 (JB crash cuối):
+    // Method này KHÔNG bao giờ return error. Mọi step fail đều được log
+    // và continue. Cuối cùng return nil để DOJailbreaker runWithError:
+    // tiếp tục đến reboot_userspace.
+    //
+    // FIX LỖI 2 (RootHide app không được cài):
+    // 1. Trust-cache bootstrap binaries ĐẦU TIÊN (đảm bảo dpkg, sh, tar chạy được)
+    // 2. Run prep_bootstrap.sh (chỉ first jailbreak)
+    // 3. Install RootHide Manager app FIRST (trước Sileo) — đảm bảo binary
+    //    được trust-cached trước khi Sileo uicache chạy
+    // 4. Install Sileo/Zebra
+    // 5. Install bundled packages (libroot, libkrw, basebin-link, launchctl)
+    // 6. Re-trust-cache toàn bộ /Applications (defensive)
+    // 7. Ensure .jbroot symlinks
+    // 8. Trust-cache Dopamine app itself
+    NSLog(@"[RootHide] finalizeBootstrap: starting");
+
+    // Step 1: trust-cache bootstrap binaries (đảm bảo dpkg, sh, tar chạy được)
+    NSLog(@"[RootHide] Step 1/8: trust-caching bootstrap binaries...");
     [self trustCacheBootstrapBinaries];
 
-    // Initial setup on first jailbreak
-    // prep_bootstrap.sh only runs on FIRST jailbreak (when bootstrap was
-    // just extracted).  On re-jailbreak, it has already run and deleted
-    // itself.  RootHide does NOT re-run it.
+    // Step 2: run prep_bootstrap.sh (chỉ first jailbreak)
     NSString *prepBootstrapPath = JBROOT_PATH(@"/prep_bootstrap.sh");
     if ([[NSFileManager defaultManager] fileExistsAtPath:prepBootstrapPath]) {
         [[DOUIManager sharedInstance] sendLog:@"Finalizing Bootstrap" debug:NO];
-
-        // Run prep_bootstrap.sh via jbroot's /bin/sh (which has correct
-        // DYLD_LIBRARY_PATH and rpath setup from the RootHide bootstrap).
         int r = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), prepBootstrapPath.fileSystemRepresentation, NULL);
         if (r != 0) {
             NSLog(@"[RootHide] prep_bootstrap.sh returned %d (continuing — non-fatal)", r);
-            [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"prep_bootstrap.sh returned %d (continuing)", r] debug:YES];
         }
+    } else {
+        NSLog(@"[RootHide] prep_bootstrap.sh not found (re-jailbreak) — skipping");
+    }
 
-        // FIX: previously, installPackageManagers failure was FATAL
-        // (return error → finalizeBootstrap returns → finalizeBootstrapIfNeeded
-        // returns → runWithError returns early → finalize → rebootUserspace
-        // is NEVER called → no userspace reboot → app sits in fadeToBlack
-        // forever, watchdog kills it, user perceives as "JB crashes at end").
-        //
-        // Now we treat installPackageManagers failure as NON-FATAL: log the
-        // error and continue to the bundled packages install + reboot3.
-        // The user can install Sileo/Zebra manually from a repo if needed.
+    // Step 3: install RootHide Manager app FIRST.
+    // Lý do đặt trước Sileo: Sileo uicache có thể scan tất cả apps trong
+    // /Applications, nếu RootHide binary chưa được trust-cached → Sileo uicache
+    // spawn RootHide → AMFI kill → Sileo crash.
+    NSLog(@"[RootHide] Step 3/8: installing RootHide Manager app...");
+    [self installRootHideManagerApp];
+
+    // Step 4: install Sileo/Zebra
+    NSLog(@"[RootHide] Step 4/8: installing package managers (Sileo/Zebra)...");
+    if ([[NSFileManager defaultManager] fileExistsAtPath:prepBootstrapPath]) {
         NSError *pmError = [self installPackageManagers];
         if (pmError) {
             NSLog(@"[RootHide] installPackageManagers FAILED (continuing — non-fatal): %@", pmError);
-            [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"Package manager install failed (continuing): %@", pmError] debug:YES];
         }
     } else {
-        // prep_bootstrap.sh not found (re-jailbreak, already bootstrapped).
-        // Skip prep_bootstrap.sh and installPackageManagers — packages
-        // are already installed from the first jailbreak.
-        NSLog(@"[RootHide] prep_bootstrap.sh not found (re-jailbreak) — skipping");
-    }
-    
-    BOOL shouldInstallLibroot = [self shouldInstallPackage:@"libroot-dopamine"];
-    BOOL shouldInstallLibkrw = [self shouldInstallPackage:@"libkrw0-dopamine"];
-    BOOL shouldInstallBasebinLink = [self shouldInstallPackage:@"dopamine-basebin-link"];
-    BOOL shouldInstallLaunchctl = NO;
-    if (__builtin_available(iOS 19.0, *)) {
-        shouldInstallLaunchctl = [self shouldInstallPackage:@"launchctl"];
+	NSLog(@"[RootHide] Skipping installPackageManagers (re-jailbreak — already installed)");
     }
 
-    // RootHide: auto-install the official RootHide Manager app on first
-    // jailbreak.  The .deb is shipped inside the IPA at
-    //   <app>/Packages/roothideapp_1.3.9_iphoneos-arm64e.deb
-    // (copied there by Application/Makefile).  We install it ONLY when the
-    // user hasn't already installed a newer version from Sileo/Zebra —
-    // check by looking for the bundle ID in dpkg status.
-    //
-    // FIX: previously, the only check was `installedVersionForPackageWithIdentifier`
-    // reading the dpkg status file. If a previous jailbreak had written the
-    // status entry but failed to actually extract the .app files (or if the
-    // user manually edited the status file, or the .app dir got deleted out
-    // of band), `shouldInstallRootHideApp` would be false and we'd silently
-    // skip the install — leaving the user without RootHide Manager icon.
-    //
-    // Now we ALSO check whether `<jbroot>/Applications/RootHide.app/RootHide`
-    // actually exists on disk. If the binary is missing, force-install
-    // regardless of what dpkg status says.
-    NSString *roothideAppBinaryPath = JBROOT_PATH(@"/Applications/RootHide.app/RootHide");
-    BOOL roothideAppBinaryExists = [[NSFileManager defaultManager] fileExistsAtPath:roothideAppBinaryPath];
-    NSString *existingRootHideVersion = [self installedVersionForPackageWithIdentifier:@"com.roothide.manager"];
-    BOOL shouldInstallRootHideApp = !existingRootHideVersion || !roothideAppBinaryExists;
-    NSLog(@"[RootHide] RootHide Manager: dpkg_version=%@ binary_exists=%d -> shouldInstall=%d",
-          existingRootHideVersion, roothideAppBinaryExists, shouldInstallRootHideApp);
-
-    if (shouldInstallLibroot || shouldInstallLibkrw || shouldInstallBasebinLink || shouldInstallLaunchctl || shouldInstallRootHideApp) {
-        [[DOUIManager sharedInstance] sendLog:@"Updating Bundled Packages" debug:NO];
-
-        // CRITICAL FIX: Wrap the entire bundled packages install block in
-        // @try/@catch. The video shows the app crashes (SIGSEGV/SIGBUS) right
-        // after the "[RootHide] RootHide Manager: dpkg_version=..." log line,
-        // which is inside this block. If a crash happens here, finalizeBootstrap
-        // returns early (never reaches reboot3), the runWithError flow returns
-        // early (never calls finalize → rebootUserspace), and the user sees
-        // "JB crashes at end, no userspace reboot".
-        //
-        // With @try/@catch, even if manuallyInstallDeb or any subsequent call
-        // throws an Objective-C exception, we catch it, log it, and continue
-        // to the re-trust-cache + symlink sweep + reboot3 path.
-        //
-        // NOTE: @try/@catch does NOT catch EXC_BAD_ACCESS (memory corruption)
-        // — those still crash the app. But it catches NSException, NSRangeException,
-        // NSInvalidArgumentException etc. which are common failure modes for
-        // malformed .deb files, bad paths, etc.
-        @try {
-            if (shouldInstallLaunchctl) {
-                NSString *launchctlPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"launchctl_1_1.2.0_iphoneos-arm64e.deb"];
-                NSError *installErr = [self manuallyInstallDeb:launchctlPath appName:@"launchctl"];
-                if (installErr) NSLog(@"[RootHide] launchctl install (non-fatal): %@", installErr);
-            }
-
-            if (shouldInstallLibroot) {
-                NSString *librootPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libroot.deb"];
-                NSError *installErr = [self manuallyInstallDeb:librootPath appName:@"libroot"];
-                if (installErr) NSLog(@"[RootHide] libroot install (non-fatal): %@", installErr);
-            }
-
-            if (shouldInstallLibkrw) {
-                NSString *libkrwPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libkrw-dopamine.deb"];
-                NSError *installErr = [self manuallyInstallDeb:libkrwPath appName:@"libkrw"];
-                if (installErr) NSLog(@"[RootHide] libkrw install (non-fatal): %@", installErr);
-            }
-
-            if (shouldInstallBasebinLink) {
-                if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/bin/opainject")]) {
-                    [[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/bin/opainject") error:nil];
-                }
-                if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/bin/jbctl")]) {
-                    [[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/bin/jbctl") error:nil];
-                }
-                if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/lib/libjailbreak.dylib")]) {
-                    [[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/lib/libjailbreak.dylib") error:nil];
-                }
-
-                NSString *basebinLinkPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"basebin-link.deb"];
-                NSError *installErr = [self manuallyInstallDeb:basebinLinkPath appName:@"basebin-link"];
-                if (installErr) NSLog(@"[RootHide] basebin-link install (non-fatal): %@", installErr);
-            }
-
-            // RootHide Manager app auto-install.  We look for the .deb under
-            // <app>/Packages/ (copied there by Application/Makefile).  If the
-            // file is missing or install fails, we DON'T fail the entire
-            // jailbreak — the user can still install RootHide Manager manually
-            // from Sileo/Zebra afterwards.  RootHide Manager is a user-facing
-            // UI convenience, not a hard dependency for jailbreak operation.
-            if (shouldInstallRootHideApp) {
-                NSString *packagesDir = [[[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Packages"] copy];
-                NSString *roothideAppDeb = [packagesDir stringByAppendingPathComponent:@"roothideapp_1.3.9_iphoneos-arm64e.deb"];
-                BOOL debExists = [[NSFileManager defaultManager] fileExistsAtPath:roothideAppDeb];
-                NSLog(@"[RootHide] RootHide Manager deb path=%@ exists=%d", roothideAppDeb, debExists);
-                if (debExists) {
-                    [[DOUIManager sharedInstance] sendLog:@"Installing RootHide Manager" debug:NO];
-                    NSError *installErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
-                    if (installErr) {
-                        NSLog(@"[RootHide] RootHide Manager install FAILED: %@", installErr);
-                        [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"RootHide Manager install failed: %@", installErr] debug:YES];
-                    } else {
-                        // Verify the binary is actually on disk now
-                        BOOL binaryNowExists = [[NSFileManager defaultManager] fileExistsAtPath:JBROOT_PATH(@"/Applications/RootHide.app/RootHide")];
-                        NSLog(@"[RootHide] RootHide Manager install OK, binary on disk: %d", binaryNowExists);
-                        if (!binaryNowExists) {
-                            NSLog(@"[RootHide] WARNING: install reported success but binary missing — dpkg status may be stale");
-                        }
-                        // uicache for RootHide Manager.
-                        // NOTE: uicache is at <jbroot>/usr/bin/uicache. When called via exec_cmd_trusted,
-                        // it runs as root with systemhook injected. systemhook translates /Applications/...
-                        // to <jbroot>/Applications/... via the process_checkin mechanism.
-                        // However, if the postinst didn't run (our manuallyInstallDeb doesn't run
-                        // postinst scripts!), we need to do the chown/chmod+s ourselves here.
-                        NSString *installedBinary = JBROOT_PATH(@"/Applications/RootHide.app/RootHide");
-                        if (binaryNowExists) {
-                            // Apply postinst-equivalent: chown 0:0 + chmod +s (setuid root)
-                            // Without setuid, RootHide Manager cannot perform privileged operations
-                            // (mounting, trust-cache, etc.) and will crash on launch.
-                            exec_cmd_root("/usr/sbin/chown", "root:wheel", installedBinary.fileSystemRepresentation, NULL);
-                            exec_cmd_root("/bin/chmod", "6755", installedBinary.fileSystemRepresentation, NULL);
-                            NSLog(@"[RootHide] Applied postinst-equivalent: chown root:wheel + chmod 6755 on RootHide binary");
-                        }
-                        // Refresh icon cache
-                        exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", "/Applications/RootHide.app", NULL);
-                    }
-                } else {
-                    NSLog(@"[RootHide] RootHide Manager deb NOT FOUND in bundle — skipping auto-install");
-                    [[DOUIManager sharedInstance] sendLog:@"RootHide Manager deb not bundled (skipped)" debug:YES];
-                }
-            }
-        } @catch (NSException *e) {
-            // Log the exception and continue — don't propagate to caller.
-            NSLog(@"[RootHide] EXCEPTION during bundled packages install: %@: %@", e.name, e.reason);
-            NSLog(@"[RootHide] Stack trace: %@", e.callStackSymbols);
-            [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"Package install exception (continuing): %@: %@", e.name, e.reason] debug:YES];
+    // Step 5: install bundled packages
+    NSLog(@"[RootHide] Step 5/8: installing bundled packages (libroot, libkrw, basebin-link, launchctl)...");
+    @try {
+	BOOL shouldInstallLibroot = [self shouldInstallPackage:@"libroot-dopamine"];
+	BOOL shouldInstallLibkrw = [self shouldInstallPackage:@"libkrw0-dopamine"];
+	BOOL shouldInstallBasebinLink = [self shouldInstallPackage:@"dopamine-basebin-link"];
+	BOOL shouldInstallLaunchctl = NO;
+	if (__builtin_available(iOS 19.0, *)) {
+	    shouldInstallLaunchctl = [self shouldInstallPackage:@"launchctl"];
         }
+
+	if (shouldInstallLaunchctl) {
+	    NSString *launchctlPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"launchctl_1_1.2.0_iphoneos-arm64e.deb"];
+	    NSError *installErr = [self manuallyInstallDeb:launchctlPath appName:@"launchctl"];
+	    if (installErr) NSLog(@"[RootHide] launchctl install (non-fatal): %@", installErr);
+        }
+	if (shouldInstallLibroot) {
+	    NSString *librootPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libroot.deb"];
+	    NSError *installErr = [self manuallyInstallDeb:librootPath appName:@"libroot"];
+	    if (installErr) NSLog(@"[RootHide] libroot install (non-fatal): %@", installErr);
+        }
+	if (shouldInstallLibkrw) {
+	    NSString *libkrwPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libkrw-dopamine.deb"];
+	    NSError *installErr = [self manuallyInstallDeb:libkrwPath appName:@"libkrw"];
+	    if (installErr) NSLog(@"[RootHide] libkrw install (non-fatal): %@", installErr);
+        }
+	if (shouldInstallBasebinLink) {
+	    if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/bin/opainject")]) {
+		[[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/bin/opainject") error:nil];
+            }
+	    if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/bin/jbctl")]) {
+		[[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/bin/jbctl") error:nil];
+            }
+	    if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/lib/libjailbreak.dylib")]) {
+		[[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/lib/libjailbreak.dylib") error:nil];
+            }
+	    NSString *basebinLinkPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"basebin-link.deb"];
+	    NSError *installErr = [self manuallyInstallDeb:basebinLinkPath appName:@"basebin-link"];
+	    if (installErr) NSLog(@"[RootHide] basebin-link install (non-fatal): %@", installErr);
+        }
+    } @catch (NSException *e) {
+	NSLog(@"[RootHide] EXCEPTION during bundled packages install: %@: %@", e.name, e.reason);
     }
 
-    // ROOTHIDE: Re-trust-cache AFTER installing packages.
-    NSLog(@"[RootHide] Re-trust-caching after package install (includes /Applications/)...");
+    // Step 6: Re-trust-cache toàn bộ /Applications, /usr, /Library
+    NSLog(@"[RootHide] Step 6/8: Re-trust-caching all bootstrap binaries...");
     [self trustCacheBootstrapBinaries];
 
-    // ROOTHIDE: Final sweep — make sure EVERY .app directory under
-    // <jbroot>/Applications/ has its `.jbroot -> ../..` symlink.
-    // This is critical on RE-JAILBREAK: if Sileo/Zebra/RootHideManager
-    // were already installed in a previous jailbreak, the install loops
-    // above are SKIPPED (because shouldInstallXxx returns false), so
-    // manuallyInstallDeb is never called, so ensureJbrootSymlinksInApps
-    // is never reached. We must do the sweep here unconditionally so
-    // that existing apps get the symlink on re-jailbreak too.
-    NSLog(@"[RootHide] Final .jbroot symlink sweep...");
+    // Step 7: Ensure .jbroot symlinks trong mọi .app
+    NSLog(@"[RootHide] Step 7/8: Final .jbroot symlink sweep...");
     [self ensureJbrootSymlinksInApps];
 
-    // ROOTHIDE: Also trust-cache the Dopamine app itself!
-    // After jailbreak, SpringBoard may try to relaunch Dopamine.
-    // If Dopamine's binary is NOT in the trust cache, AMFI kills it → crash.
-    // RootHide Bootstrap app doesn't have this issue because it spawns
-    // itself via persona override.  Dopamine runs in-process, so its
-    // binary must be trust-cached explicitly.
+    // Step 8: Trust-cache Dopamine app itself
+    NSLog(@"[RootHide] Step 8/8: Trust-caching Dopamine app itself...");
     NSString *dopamineExePath = [NSBundle mainBundle].executablePath;
     if (dopamineExePath) {
-        NSLog(@"[RootHide] Trust-caching Dopamine app itself: %@", dopamineExePath);
         int tcR = jbclient_trust_file_by_path(dopamineExePath.fileSystemRepresentation);
         NSLog(@"[RootHide] Trust-cache Dopamine: %d", tcR);
-        // Also trust-cache all .dylib files in the app bundle
-        NSString *frameworksPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Frameworks"];
+
         NSFileManager *fm = [NSFileManager defaultManager];
+        NSString *frameworksPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Frameworks"];
         if ([fm fileExistsAtPath:frameworksPath]) {
             for (NSString *item in [fm contentsOfDirectoryAtPath:frameworksPath error:nil]) {
                 if ([item hasSuffix:@".dylib"] || [item hasSuffix:@".framework"]) {
@@ -2016,7 +2107,6 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                 }
             }
         }
-        // Trust-cache all files in the app bundle (dylibs, frameworks, etc.)
         for (NSString *item in [fm contentsOfDirectoryAtPath:[NSBundle mainBundle].bundlePath error:nil]) {
             NSString *itemPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:item];
             NSDictionary *attrs = [fm attributesOfItemAtPath:itemPath error:nil];
@@ -2026,6 +2116,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
     }
 
+    NSLog(@"[RootHide] finalizeBootstrap: DONE — always return nil to ensure reboot_userspace runs");
     return nil;
 }
 

@@ -201,6 +201,22 @@ static int roothide_action_apply_settings(audit_token_t *callerToken, bool *shou
     return 0;
 }
 
+// JBS_ROOTHIDE_IS_BLACKLISTED (8) — in: string bundleID, out: bool blacklisted
+//   Open to all callers (systemhook chạy trong mọi process cần query).
+//   FIX LỖI 1: Trước đây should_enable_tweaks trong systemhook chỉ check env
+//   var ROOTHIDE_CLEAN_MODE_ENV. Tuy nhiên env var có thể bị thiếu trong
+//   nhiều path (early boot, xpcproxy, apps launch từ SpringBoard mà không qua
+//   posix_spawn_hook của launchd). Action này cho phép systemhook query trực
+//   tiếp trạng thái blacklist từ launchd → đảm bảo app banking/detection luôn
+//   được skip injection.
+static int roothide_action_is_blacklisted(const char *bundleID, bool *blacklistedOut)
+{
+    if (!bundleID || !bundleID[0] || !blacklistedOut) return -1;
+    roothide_server_ensure_init();
+    *blacklistedOut = roothide_is_blacklisted(bundleID);
+    return 0;
+}
+
 // ---------- Domain descriptor ----------
 //
 // The actions array MUST be in the same order as the JBS_ROOTHIDE_* enum in
@@ -263,6 +279,15 @@ struct jbserver_domain gRoothideDomain = {
             .args = (jbserver_arg[]){
                 { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
                 { .name = "shouldReboot", .type = JBS_TYPE_BOOL,        .out = false },
+                { 0 },
+            },
+        },
+	// JBS_ROOTHIDE_IS_BLACKLISTED (8) — FIX LỖI 1
+        {
+	    .handler = roothide_action_is_blacklisted,
+            .args = (jbserver_arg[]){
+		{ .name = "bundleID",     .type = JBS_TYPE_STRING, .out = false },
+		{ .name = "blacklisted",  .type = JBS_TYPE_BOOL,   .out = true  },
                 { 0 },
             },
         },

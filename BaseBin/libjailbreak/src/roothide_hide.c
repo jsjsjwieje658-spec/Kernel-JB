@@ -19,6 +19,12 @@
 #include <unistd.h>
 #include <errno.h>
 #include <dlfcn.h>
+// FIX BUG #24: include litehook để gọi rebind_symbol (fishhook-style GOT rebind).
+// Trước đây roothide_hide chỉ dlsym(RTLD_NEXT, ...) để save function pointer,
+// nhưng KHÔNG hook function nào → access/fopen/opendir/stat/lstat/open vẫn là
+// syscall gốc → file hiding KHÔNG hoạt động → app detection vẫn thấy /var/lib/dpkg,
+// /Library/MobileSubstrate, etc. → crash hoặc refuse to run.
+#include <litehook.h>
 
 // ============ Hidden Path Patterns ============
 // These paths should be hidden from blacklisted apps
@@ -277,34 +283,72 @@ void roothide_clean_environment(void)
 /**
  * Initialize RootHide hiding subsystem
  * Call this early in process startup
+ *
+ * FIX BUG #24: Trước đây hàm này chỉ `dlsym(RTLD_NEXT, ...)` để save function
+ * pointer, nhưng KHÔNG hook gì cả → access/fopen/opendir/stat/lstat/open
+ * vẫn là syscall gốc → file hiding KHÔNG hoạt động. App detection đọc file
+ * /var/lib/dpkg, /Library/MobileSubstrate, etc. vẫn thấy → crash hoặc refuse
+ * to run.
+ *
+ * Fix: dùng `litehook_rebind_symbol` (fishhook-style GOT rebind) để thực sự
+ * thay thế function pointer trong GOT của tất cả images đã load → khi app
+ * gọi access()/stat()/... control flow sẽ đi qua hàm hooked_*. Hàm hooked
+ * kiểm tra should_hide_path() và return ENOENT nếu path match.
+ *
+ * Lưu ý: `litehook_rebind_symbol(NULL, ...)` rebind toàn cục (mọi image trong
+ * process). Có thể ảnh hưởng performance nhẹ (~10ms trên launch), nhưng chỉ
+ * chạy khi clean_mode=true (chỉ blacklisted app mới bị hook).
  */
 int roothide_hide_init(bool clean_mode)
 {
     pthread_mutex_lock(&g_roothide_hide.mutex);
-    
+
     if (g_roothide_hide.initialized) {
+	// Đã init rồi, chỉ update clean_mode
+	g_roothide_hide.is_clean_mode = clean_mode;
+	if (clean_mode) {
+	    roothide_clean_environment();
+        }
         pthread_mutex_unlock(&g_roothide_hide.mutex);
         return 0;
     }
-    
+
     g_roothide_hide.is_clean_mode = clean_mode;
-    
-    // Save original function pointers using dlsym with RTLD_NEXT
+
+    // Save original function pointers using dlsym with RTLD_NEXT.
+    // Đây là "fallback" nếu litehook_rebind_symbol fail hoặc nếu cần gọi
+    // function gốc từ trong hook (vì litehook_rebind_symbol không trả về orig).
     g_roothide_hide.orig_access = dlsym(RTLD_NEXT, "access");
     g_roothide_hide.orig_fopen = dlsym(RTLD_NEXT, "fopen");
     g_roothide_hide.orig_opendir = dlsym(RTLD_NEXT, "opendir");
     g_roothide_hide.orig_stat = dlsym(RTLD_NEXT, "stat");
     g_roothide_hide.orig_lstat = dlsym(RTLD_NEXT, "lstat");
     g_roothide_hide.orig_open = dlsym(RTLD_NEXT, "open");
-    
-    // If in clean mode, clean the environment
+
+    // FIX BUG #24: rebind GOT để hooks thật sự chạy.
+    // litehook_rebind_symbol(NULL, replacee, replacement, NULL) rebind globally.
     if (clean_mode) {
+	// Chỉ hook khi clean_mode=true (đừng hook mọi process — performance)
+	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+			       (void *)access,  (void *)hooked_access,  NULL);
+	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+			       (void *)fopen,   (void *)hooked_fopen,   NULL);
+	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+			       (void *)opendir, (void *)hooked_opendir, NULL);
+	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+			       (void *)stat,    (void *)hooked_stat,    NULL);
+	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+			       (void *)lstat,   (void *)hooked_lstat,   NULL);
+	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL,
+			       (void *)open,    (void *)hooked_open,    NULL);
+
+	// Clean environment sau khi hook (để env check không bị phát hiện)
         roothide_clean_environment();
     }
-    
+
     g_roothide_hide.initialized = true;
     pthread_mutex_unlock(&g_roothide_hide.mutex);
-    
+
     return 0;
 }
 

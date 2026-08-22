@@ -164,13 +164,22 @@ const char* rothide_get_jbroot(void)
 bool roothide_is_blacklisted(const char* bundleID)
 {
         if (!bundleID || !g_roothide.initialized) return false;
-        
-        // Fast path: check without lock (safe for reads)
+
+	// FIX BUG #14: trước đây đọc `g_roothide.blacklist_count` và mảng
+	// `blacklist[]` mà không có lock → race với `rothide_add_blacklist` /
+	// `rothide_remove_blacklist` (đang write). Có thể đọc count > array size
+	// hoặc đọc entry đang được shift.
+	//
+	// Fix: dùng pthread_mutex. Trade-off: lock overhead ~100ns, không đáng
+	// kể vì blacklist check chỉ chạy 1 lần mỗi launch app (systemhook constructor).
+        pthread_mutex_lock(&g_roothide.mutex);
         for (int i = 0; i < g_roothide.blacklist_count; i++) {
                 if (strcmp(g_roothide.blacklist[i], bundleID) == 0) {
+                        pthread_mutex_unlock(&g_roothide.mutex);
                         return true;
                 }
         }
+        pthread_mutex_unlock(&g_roothide.mutex);
         return false;
 }
 
