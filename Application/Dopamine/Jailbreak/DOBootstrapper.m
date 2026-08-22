@@ -1579,7 +1579,88 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     [fm removeItemAtPath:tmpDir error:nil];
 
     NSLog(@"[RootHide] Successfully installed %@ (manual extraction)", appName);
+
+    // ROOTHIDE: After installing the .deb, ensure every .app directory inside
+    // <jbroot>/Applications/ has a `.jbroot` symlink pointing back to <jbroot>.
+    //
+    // WHY: Sileo, Zebra, RootHide Manager, and any other RootHide-aware app
+    // have an LC_LOAD_DYLIB entry like:
+    //   @loader_path/.jbroot/usr/lib/libroothide.dylib
+    // When dyld loads the binary, @loader_path is the .app directory itself,
+    // so dyld looks for:  <app_dir>/.jbroot/usr/lib/libroothide.dylib
+    //
+    // The RootHide Bootstrap tarball ships with a `.jbroot -> .` symlink at
+    // the ROOT of the bootstrap (= <jbroot>/.jbroot), which only helps
+    // binaries located directly in <jbroot>/ (e.g. <jbroot>/bin/dpkg).
+    // It does NOT help binaries in subdirectories like
+    // <jbroot>/Applications/Sileo.app/Sileo.
+    //
+    // For those, we MUST create a separate .jbroot symlink inside each .app
+    // directory. The correct relative path from <jbroot>/Applications/Foo.app/
+    // back to <jbroot>/ is "../.." (one .. to <jbroot>/Applications/, another
+    // .. to <jbroot>/).
+    //
+    // Without this symlink, the moment Sileo/Zebra/RootHideManager is
+    // launched, dyld fails to load libroothide.dylib and the app crashes
+    // before main() even runs (the user perceives this as "app crashes on
+    // open" right after jailbreak).
+    //
+    // We re-sweep ALL .app dirs (not just the one we just installed) so
+    // that apps the user installed separately via dpkg -i also get the
+    // symlink on the next jailbreak cycle.
+    [self ensureJbrootSymlinksInApps];
+
     return nil;
+}
+
+// Create `.jbroot -> ../..` symlink inside every .app directory under
+// <jbroot>/Applications/. Idempotent — if the symlink already exists and
+// points to the right place, leave it alone; otherwise delete and recreate.
+- (void)ensureJbrootSymlinksInApps
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *appsRoot = JBROOT_PATH(@"/Applications");
+    NSArray *apps = [fm contentsOfDirectoryAtPath:appsRoot error:nil];
+    if (!apps) {
+        NSLog(@"[RootHide] ensureJbrootSymlinksInApps: /Applications not listable (yet) — skipping");
+        return;
+    }
+    NSUInteger created = 0;
+    NSUInteger verified = 0;
+    for (NSString *appDir in apps) {
+        if (![appDir hasSuffix:@".app"]) continue;
+        NSString *appPath = [appsRoot stringByAppendingPathComponent:appDir];
+        NSString *jbrootLink = [appPath stringByAppendingPathComponent:@".jbroot"];
+
+        // Check existing symlink
+        NSDictionary *attrs = [fm attributesOfItemAtPath:jbrootLink error:nil];
+        if (attrs && attrs[NSFileType] == NSFileTypeSymbolicLink) {
+            // Already a symlink — verify destination
+            NSError *readErr = nil;
+            NSString *dest = [fm destinationOfSymbolicLinkAtPath:jbrootLink error:&readErr];
+            if (!readErr && ([dest isEqualToString:@"../.."] || [dest isEqualToString:@".."])) {
+                verified++;
+                continue;
+            }
+            // Wrong destination — remove and recreate
+            [fm removeItemAtPath:jbrootLink error:nil];
+        } else if (attrs) {
+            // Something else exists at this path (file or dir) — remove it
+            [fm removeItemAtPath:jbrootLink error:nil];
+        }
+
+        // Create the symlink: <app>/.jbroot -> ../..
+        // (../.. resolves from <jbroot>/Applications/<App>.app/ back to <jbroot>/)
+        NSError *createErr = nil;
+        if ([fm createSymbolicLinkAtPath:jbrootLink withDestinationPath:@"../.." error:&createErr]) {
+            created++;
+            NSLog(@"[RootHide] ensureJbrootSymlinksInApps: created %@/.jbroot -> ../..", appPath);
+        } else {
+            NSLog(@"[RootHide] ensureJbrootSymlinksInApps: FAILED to create %@/.jbroot: %@", jbrootLink, createErr);
+        }
+    }
+    NSLog(@"[RootHide] ensureJbrootSymlinksInApps: scanned %lu .app dirs, created %lu symlinks, verified %lu existing",
+          (unsigned long)apps.count, (unsigned long)created, (unsigned long)verified);
 }
 
 - (BOOL)shouldInstallPackage:(NSString *)identifier
@@ -1823,6 +1904,17 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // ROOTHIDE: Re-trust-cache AFTER installing packages.
     NSLog(@"[RootHide] Re-trust-caching after package install (includes /Applications/)...");
     [self trustCacheBootstrapBinaries];
+
+    // ROOTHIDE: Final sweep — make sure EVERY .app directory under
+    // <jbroot>/Applications/ has its `.jbroot -> ../..` symlink.
+    // This is critical on RE-JAILBREAK: if Sileo/Zebra/RootHideManager
+    // were already installed in a previous jailbreak, the install loops
+    // above are SKIPPED (because shouldInstallXxx returns false), so
+    // manuallyInstallDeb is never called, so ensureJbrootSymlinksInApps
+    // is never reached. We must do the sweep here unconditionally so
+    // that existing apps get the symlink on re-jailbreak too.
+    NSLog(@"[RootHide] Final .jbroot symlink sweep...");
+    [self ensureJbrootSymlinksInApps];
 
     // ROOTHIDE: Also trust-cache the Dopamine app itself!
     // After jailbreak, SpringBoard may try to relaunch Dopamine.
