@@ -645,15 +645,28 @@ static BOOL checkRootHideJBRAND(NSString *str)
     //
     // Now we surface the error to the UI so the user knows exactly what
     // went wrong, instead of looking like a hang/crash.
+
+    // Pre-check: jbctl binary phải tồn tại trước khi spawn
+    NSString *jbctlPath = [NSString stringWithUTF8String:JBROOT_PATH("/basebin/jbctl")];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:jbctlPath]) {
+	NSLog(@"[RootHide] rebootUserspace: jbctl NOT FOUND at %@", jbctlPath);
+	NSString *errMsg = [NSString stringWithFormat:
+	    @"Cannot reboot userspace: jbctl binary not found at %@.\n"
+	    @"This means basebin.tar was not extracted correctly into the jbroot.\n"
+	    @"Try removing jailbreak and re-jailbreaking.", jbctlPath];
+        [[DOUIManager sharedInstance] sendLog:errMsg debug:NO];
+	// Fallback: thử respring nếu không reboot_userspace được
+	NSLog(@"[RootHide] rebootUserspace: falling back to respring");
+	[self respring];
+        return;
+    }
+
+    NSLog(@"[RootHide] rebootUserspace: spawning jbctl reboot_userspace (binary: %@)", jbctlPath);
     int r = [self spawnJbctlAsRootWithArgs:@[@"reboot_userspace"]];
     if (r != 0) {
         NSLog(@"[RootHide] rebootUserspace: spawnJbctlAsRootWithArgs returned %d", r);
-        // jbctl exit codes:
-        //   >0 = jbctl ran but reboot3 failed (exit code = -reboot3 errno)
-        //   <0 = posix_spawn itself failed (errno = -r)
         NSString *errMsg;
         if (r > 0) {
-            // jbctl returned non-zero — likely reboot3(RB2_USERREBOOT) failed
             errMsg = [NSString stringWithFormat:
                 @"Userspace reboot failed (jbctl exit code %d).\n"
                 @"This usually means jbctl's reboot3 syscall was rejected by the kernel.\n"
@@ -662,21 +675,23 @@ static BOOL checkRootHideJBRAND(NSString *str)
                 @"  • jbctl entitlements not honored (re-sign with ldid)\n"
                 @"  • iOS version mismatch (reboot3 RB2_USERREBOOT not supported on this iOS)\n"
                 @"\n"
-                @"The jailbreak itself completed successfully — you can use Sileo/Zebra normally.\n"
-                @"Only the userspace reboot step failed, so tweaks/systemhook may not be active\n"
-                @"until you manually respring via the Dopamine Settings menu.", r];
+		@"Falling back to respring instead.", r];
         }
         else {
-            // posix_spawn failed
             int errnoVal = -r;
             errMsg = [NSString stringWithFormat:
                 @"Failed to spawn jbctl for userspace reboot (errno %d: %s).\n"
-                @"This usually means <jbroot>/basebin/jbctl doesn't exist or isn't executable.\n"
-                @"Check that basebin.tar was extracted correctly into the jbroot.", errnoVal, strerror(errnoVal)];
+		@"Falling back to respring instead.", errnoVal, strerror(errnoVal)];
         }
         [[DOUIManager sharedInstance] sendLog:errMsg debug:NO];
-        // Also send to stderr so it shows up in console logs
         fprintf(stderr, "[RootHide] rebootUserspace FAILED: %s\n", errMsg.UTF8String);
+	// FIX LỖI 1: Fallback to respring if reboot_userspace fails.
+	// Trước đây nếu reboot_userspace fail → app sit ở fadeToBlack mãi mãi
+	// → watchdog kill → user thấy "JB crash ở cuối".
+	// Bây giờ fallback sang respring (kill backboardd) → ít nhất SpringBoard
+	// reload và user có thể vào home screen + dùng tweaks (nếu đã inject).
+	NSLog(@"[RootHide] rebootUserspace: falling back to respring");
+	[self respring];
     } else {
         NSLog(@"[RootHide] rebootUserspace: jbctl exited cleanly — if you see this, reboot3 likely succeeded (app should be killed by the reboot)");
     }

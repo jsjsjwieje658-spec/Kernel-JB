@@ -1405,28 +1405,44 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     for (NSDictionary *packageManagerDict in enabledPackageManagers) {
         NSString *debPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:packageManagerDict[@"Package"]];
         NSString *name = packageManagerDict[@"Display Name"];
+	NSString *bundleID = packageManagerDict[@"Key"];
+
+	// FIX: check binary đã tồn tại chưa. Nếu rồi → skip để tránh reinstall
+	// không cần thiết + tránh uicache chạy lại (lâu).
+        NSString *appPath = [NSString stringWithFormat:@"/Applications/%@.app", name];
+	NSString *realAppPath = JBROOT_PATH(appPath);
+	NSString *infoPlistPath = [realAppPath stringByAppendingPathComponent:@"Info.plist"];
+	NSDictionary *infoPlist = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
+	NSString *executableName = infoPlist[@"CFBundleExecutable"] ?: name;
+	NSString *executablePath = [realAppPath stringByAppendingPathComponent:executableName];
+
+	BOOL binaryExists = [[NSFileManager defaultManager] fileExistsAtPath:executablePath];
+	NSString *installedVersion = [self installedVersionForPackageWithIdentifier:bundleID];
+	BOOL shouldInstall = !installedVersion || !binaryExists;
+
+	NSLog(@"[RootHide] installPackageManagers: %@ (bundleID=%@ version=%@ binary=%d -> shouldInstall=%d)",
+	      name, bundleID, installedVersion, binaryExists, shouldInstall);
+
+	if (!shouldInstall) {
+	    NSLog(@"[RootHide] %@ already installed — re-trust-cache binary only (defensive)", name);
+	    // Defensive: trust-cache lại (cdhash có thể bị mất sau reboot)
+	    [self trustCacheAppBinariesAfterInstall:name];
+	    // Refresh icon (uicache idempotent)
+	    exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", appPath.UTF8String, NULL);
+            continue;
+        }
 
         NSLog(@"[RootHide] Installing %@ from %@", name, debPath);
 
-        // ROOTHIDE FIX: Instead of using dpkg (which crashes because dyld
-        // can't find shared libraries without bootstrap.dylib), we manually
-        // extract the .deb file and install it ourselves.
-        //
-	// manuallyInstallDeb đã trust-cache binary NGAY sau khi extract xong
-	// (xem trustCacheAppBinariesAfterInstall), nên KHÔNG cần trust-cache
-	// lại ở đây.
-        //
-	// FIX LỖI 1: Nếu install fail, KHÔNG return error — log + continue.
-	// Trước đây nếu Sileo fail, Zebra không được cài. Bây giờ cả 2 đều
-	// được attempt, JB không abort.
+	// manuallyInstallDeb đã trust-cache binary NGAY sau khi extract xong,
+	// nên KHÔNG cần trust-cache lại ở đây.
         NSError *installError = [self manuallyInstallDeb:debPath appName:name];
         if (installError) {
 	    NSLog(@"[RootHide] Failed to install %@ (continuing — non-fatal): %@", name, installError);
-	    continue;  // ← FIX: continue thay vì return
+            continue;
         }
 
         // Run uicache to refresh the app icon
-        NSString *appPath = [NSString stringWithFormat:@"/Applications/%@.app", name];
         NSLog(@"[RootHide] uicache -p %@", appPath);
         exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", appPath.UTF8String, NULL);
     }
@@ -2028,14 +2044,20 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     [self installRootHideManagerApp];
 
     // Step 4: install Sileo/Zebra
+    // FIX BUG (Sileo/Zebra không được cài):
+    // Trước đây tôi check `if prep_bootstrap.sh exists` để quyết định install
+    // Sileo/Zebra. Nhưng prep_bootstrap.sh bị XÓA sau khi chạy (first jailbreak).
+    // → Re-jailbreak: prep_bootstrap.sh gone → KHÔNG install Sileo/Zebra lại
+    // → nếu Sileo chưa từng được cài, hoặc bị thiếu binary, user sẽ không có
+    // icon Sileo.
+    //
+    // FIX: luôn gọi installPackageManagers. Hàm này có logic shouldInstall
+    // dựa trên dpkg status + binary existence (xem installPackageManagers),
+    // nó sẽ skip các package đã cài rồi (để tránh reinstall không cần thiết).
     NSLog(@"[RootHide] Step 4/8: installing package managers (Sileo/Zebra)...");
-    if ([[NSFileManager defaultManager] fileExistsAtPath:prepBootstrapPath]) {
-        NSError *pmError = [self installPackageManagers];
-        if (pmError) {
-            NSLog(@"[RootHide] installPackageManagers FAILED (continuing — non-fatal): %@", pmError);
-        }
-    } else {
-	NSLog(@"[RootHide] Skipping installPackageManagers (re-jailbreak — already installed)");
+    NSError *pmError = [self installPackageManagers];
+    if (pmError) {
+	NSLog(@"[RootHide] installPackageManagers FAILED (continuing — non-fatal): %@", pmError);
     }
 
     // Step 5: install bundled packages
