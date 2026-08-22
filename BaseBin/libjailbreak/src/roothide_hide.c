@@ -79,6 +79,22 @@ static const char *g_hidden_mount_devices[] = {
     NULL
 };
 
+// ROOTHIDE FIX LỖI 2: Hidden mount filesystem types (f_fstypename trong statfs).
+// RootHide IPA gốc cảnh báo "Unknown Bindfs Mount(s)" khi thấy f_fstypename = "bindfs".
+// Trên iOS, f_fstypename có thể là:
+//   "apfs"      - normal APFS volume (system, data)
+//   "hfs"       - legacy HFS+ volume
+//   "devfs"     - devfs mount (/dev)
+//   "bindfs"    - BIND MOUNT (jailbreak signature, must hide)
+//   "nullfs"    - nullfs mount (some jailbreaks use this)
+//   "unionfs"   - unionfs mount (some jailbreaks use this)
+static const char *g_hidden_fstypes[] = {
+    "bindfs",
+    "nullfs",
+    "unionfs",
+    NULL
+};
+
 // ROOTHIDE FIX LỖI 2: Hidden mount on-locations (f_mntonname trong statfs).
 // Đây là các mount points mà jailbreak tạo bind mount lên đó.
 // Khi app detection query statfs() hoặc getmntinfo() trên path này, nó sẽ thấy
@@ -243,6 +259,11 @@ static int fake_not_found(const char *path)
 //   - f_mntfromname contains jbroot path or known jailbreak device names
 //   - f_mntfromname starts with /private/preboot (jbroot gốc)
 //   - f_mntfromname contains /var/containers/Bundle/Application/.jbroot-
+//   - f_fstypename is "bindfs" / "nullfs" / "unionfs" (jailbreak filesystem types)
+//
+// QUAN TRỌNG: Hàm này có 2 overloads:
+//   should_hide_mount_entry(mntonname, mntfromname) - dùng trong getmntinfo/getfsstat
+//   should_hide_mount_entry_full(mntonname, mntfromname, fstypename) - dùng trong statfs
 static bool should_hide_mount_entry(const char *mntonname, const char *mntfromname)
 {
     // Hide entries mounted on jailbreak bind-mount locations
@@ -253,7 +274,7 @@ static bool should_hide_mount_entry(const char *mntonname, const char *mntfromna
             }
         }
     }
-    
+
     // Hide entries from jailbreak device names
     if (mntfromname) {
         for (int i = 0; g_hidden_mount_devices[i] != NULL; i++) {
@@ -261,14 +282,37 @@ static bool should_hide_mount_entry(const char *mntonname, const char *mntfromna
                 return true;
             }
         }
-        
+
         // Check against dynamic jbroot path
         const char *dynamic_jbroot = get_dynamic_jbroot();
         if (dynamic_jbroot && strstr(mntfromname, dynamic_jbroot) != NULL) {
             return true;
         }
     }
-    
+
+    return false;
+}
+
+// ROOTHIDE FIX LỖI 2: Full version with f_fstypename check
+// Đây là hàm chính để filter - kiểm tra cả f_fstypename (bindfs/nullfs/unionfs)
+// để bắt tất cả bind mount entries mà RootHide app cảnh báo.
+static bool should_hide_mount_entry_full(const char *mntonname, const char *mntfromname, const char *fstypename)
+{
+    // 1) Check theo should_hide_mount_entry (mntonname + mntfromname)
+    if (should_hide_mount_entry(mntonname, mntfromname)) {
+        return true;
+    }
+
+    // 2) Check theo f_fstypename - đây là dấu hiệu rõ nhất của bind mount
+    // RootHide IPA gốc cảnh báo "Unknown Bindfs Mount(s)" khi thấy fstypename = "bindfs"
+    if (fstypename) {
+        for (int i = 0; g_hidden_fstypes[i] != NULL; i++) {
+            if (strcmp(fstypename, g_hidden_fstypes[i]) == 0) {
+                return true;
+            }
+        }
+    }
+
     return false;
 }
 
@@ -382,8 +426,8 @@ static int hooked_open(const char *pathname, int flags, ...)
 //   - Return value: số entries, hoặc -1 nếu error.
 //
 // Fix: Hook getmntinfo(), call orig (nó cấp phát buffer), sau đó filter
-// in-place các entries có f_mntonname/f_mntfromname match với jailbreak.
-// Trả về count mới (sau khi filter).
+// in-place các entries có f_fstypename = "bindfs" hoặc f_mntonname/f_mntfromname
+// match với jailbreak. Trả về count mới (sau khi filter).
 static int hooked_getmntinfo(struct statfs **mntbufp, int flags)
 {
     if (!g_roothide_hide.orig_getmntinfo) {
@@ -403,17 +447,20 @@ static int hooked_getmntinfo(struct statfs **mntbufp, int flags)
     for (int read_idx = 0; read_idx < count; read_idx++) {
         const char *mntonname = buf[read_idx].f_mntonname;
         const char *mntfromname = buf[read_idx].f_mntfromname;
+        const char *fstypename = buf[read_idx].f_fstypename;
 
-        if (!should_hide_mount_entry(mntonname, mntfromname)) {
+        // Dùng should_hide_mount_entry_full để check cả f_fstypename
+        if (!should_hide_mount_entry_full(mntonname, mntfromname, fstypename)) {
             if (write_idx != read_idx) {
                 buf[write_idx] = buf[read_idx];
             }
             write_idx++;
         } else {
             // Log để debug (chỉ khi clean mode)
-            fprintf(stderr, "[RootHide] getmntinfo: hiding mount %s from %s\n",
+            fprintf(stderr, "[RootHide] getmntinfo: hiding mount %s from %s (type=%s)\n",
                     mntonname ? mntonname : "(null)",
-                    mntfromname ? mntfromname : "(null)");
+                    mntfromname ? mntfromname : "(null)",
+                    fstypename ? fstypename : "(null)");
         }
     }
 
@@ -423,7 +470,8 @@ static int hooked_getmntinfo(struct statfs **mntbufp, int flags)
 // ROOTHIDE FIX LỖI 2: Hooked statfs() - return ENOENT cho hidden mount points
 // Nếu app detection query statfs("/System") hoặc statfs("/usr/lib"), nó sẽ thấy
 // f_mntfromname = "/private/preboot/..." → detect jailbreak.
-// Fix: return -1 + errno=ENOENT cho các path nằm trong g_hidden_mount_locations.
+// Fix: return -1 + errno=ENOENT cho các path nằm trong g_hidden_mount_locations,
+// hoặc nếu statfs result có f_fstypename = "bindfs".
 //
 // iOS signature: int statfs(const char *path, struct statfs *buf);
 // (Không có statfs64 trên iOS — struct statfs đã là 64-bit)
@@ -445,11 +493,11 @@ static int hooked_statfs(const char *path, struct statfs *buf)
 
     if (g_roothide_hide.orig_statfs) {
         int r = g_roothide_hide.orig_statfs(path, buf);
-        // Post-filter: nếu statfs thành công, kiểm tra f_mntfromname
+        // Post-filter: nếu statfs thành công, kiểm tra f_fstypename + f_mntfromname + f_mntonname
         if (r == 0 && g_roothide_hide.is_clean_mode && buf) {
-            if (should_hide_mount_entry(buf->f_mntonname, buf->f_mntfromname)) {
-                fprintf(stderr, "[RootHide] statfs: hiding result for %s (mount %s from %s)\n",
-                        path, buf->f_mntonname, buf->f_mntfromname);
+            if (should_hide_mount_entry_full(buf->f_mntonname, buf->f_mntfromname, buf->f_fstypename)) {
+                fprintf(stderr, "[RootHide] statfs: hiding result for %s (mount %s from %s, type=%s)\n",
+                        path, buf->f_mntonname, buf->f_mntfromname, buf->f_fstypename);
                 errno = ENOENT;
                 return -1;
             }
@@ -477,8 +525,9 @@ static int hooked_getfsstat(struct statfs *buf, int bufsize, int mode)
     for (int read_idx = 0; read_idx < count; read_idx++) {
         const char *mntonname = buf[read_idx].f_mntonname;
         const char *mntfromname = buf[read_idx].f_mntfromname;
+        const char *fstypename = buf[read_idx].f_fstypename;
 
-        if (!should_hide_mount_entry(mntonname, mntfromname)) {
+        if (!should_hide_mount_entry_full(mntonname, mntfromname, fstypename)) {
             if (write_idx != read_idx) {
                 buf[write_idx] = buf[read_idx];
             }

@@ -362,6 +362,69 @@ static BOOL checkRootHideJBRAND(NSString *str)
                           randomizedJailbreakPath.fileSystemRepresentation, NULL);
             NSLog(@"[RootHide] Created jbroot at %@", randomizedJailbreakPath);
             gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
+
+            // ROOTHIDE FIX LỖI 2 (CRITICAL): Tạo .jbroot và rootfs symlinks tại jbroot root
+            //
+            // Phân tích RootHide Bootstrap gốc (bootstrap-1800.tar):
+            //   ./.jbroot  ->  .         (symlink đến chính jbroot)
+            //   ./rootfs   ->  /         (symlink đến rootfs thật)
+            //   ./dev      ->  /dev       (symlink đến /dev)
+            //
+            // Mục đích của các symlinks này:
+            //   1. `.jbroot -> .` cho phép relative paths hoạt động trong mọi subdir.
+            //      Ví dụ: /usr/bin/.jbroot -> ../../.jbroot (relative) → trỏ về jbroot root.
+            //      Khi một binary ở /usr/bin/ gọi dlopen("@loader_path/.jbroot/usr/lib/..."),
+            //      @loader_path = /usr/bin/, .jbroot = ../../.jbroot = jbroot root, OK.
+            //
+            //   2. `rootfs -> /` cho phép tweaks truy cập system rootfs thật.
+            //      Ví dụ: tweak cần đọc /System/Library/... → jbroot/rootfs/System/Library/...
+            //
+            //   3. `dev -> /dev` cho phép tạo device nodes.
+            //
+            // QUAN TRỌNG: RootHide Bootstrap GỐC KHÔNG bind mount /System, /usr!
+            // Họ dùng libvroot (virtual rootfs) để intercept system calls thay vì bind mount.
+            // Dopamine rootless port sang roothide lại vẫn bind mount /System, /usr, /usr/lib
+            // → bị lộ qua getmntinfo() → RootHide app cảnh báo "Unknown Bindfs Mount(s)".
+            //
+            // FIX tạm thời (không thể remove bind mount vì Dopamine cần chúng):
+            //   - Hook getmntinfo/statfs để filter out bind mount entries
+            //   - Tạo .jbroot + rootfs symlinks để đảm bảo tương thích RootHide app
+            NSFileManager *fm = [NSFileManager defaultManager];
+            NSString *jbrootDotLink = [randomizedJailbreakPath stringByAppendingPathComponent:@".jbroot"];
+            NSString *rootfsLink = [randomizedJailbreakPath stringByAppendingPathComponent:@"rootfs"];
+            NSString *devLink = [randomizedJailbreakPath stringByAppendingPathComponent:@"dev"];
+
+            // Remove existing symlinks if any (idempotent)
+            [fm removeItemAtPath:jbrootDotLink error:nil];
+            [fm removeItemAtPath:rootfsLink error:nil];
+            [fm removeItemAtPath:devLink error:nil];
+
+            // Create .jbroot -> . (self-reference, relative)
+            // Phải dùng relative path "." chứ không phải absolute path, vì:
+            //   - libvroot có thể remove absolute symlinks
+            //   - relative path vẫn đúng khi jbroot được rename (re-randomize)
+            NSError *linkErr = nil;
+            if ([fm createSymbolicLinkAtPath:jbrootDotLink withDestinationPath:@"." error:&linkErr]) {
+                NSLog(@"[RootHide] Created .jbroot -> . (self) at %@", jbrootDotLink);
+            } else {
+                NSLog(@"[RootHide] FAILED to create .jbroot symlink: %@", linkErr);
+            }
+
+            // Create rootfs -> / (system rootfs)
+            linkErr = nil;
+            if ([fm createSymbolicLinkAtPath:rootfsLink withDestinationPath:@"/" error:&linkErr]) {
+                NSLog(@"[RootHide] Created rootfs -> / at %@", rootfsLink);
+            } else {
+                NSLog(@"[RootHide] FAILED to create rootfs symlink: %@", linkErr);
+            }
+
+            // Create dev -> /dev
+            linkErr = nil;
+            if ([fm createSymbolicLinkAtPath:devLink withDestinationPath:@"/dev" error:&linkErr]) {
+                NSLog(@"[RootHide] Created dev -> /dev at %@", devLink);
+            } else {
+                NSLog(@"[RootHide] FAILED to create dev symlink: %@", linkErr);
+            }
         }
     }
 
