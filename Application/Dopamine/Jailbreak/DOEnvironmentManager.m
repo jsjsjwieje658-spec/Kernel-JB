@@ -728,7 +728,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
             // Also escape single quotes in the password to prevent shell injection
             // (the password is passed via printf, so we only need to escape ' for the
             // outer single-quoted dash -c argument).
-            NSString *escapedPassword = [newPassword stringByReplacingOccurrences:@"'" withString:@"'\\''"];
+            NSString *escapedPassword = [newPassword stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
             NSString *dashCommand = [NSString stringWithFormat:@"printf \"%%s\\n\" '%@' | %@ usermod -u 501 -h 0", escapedPassword, JBROOT_PATH(@"/usr/sbin/pw")];
             NSLog(@"[RootHide] changeMobilePassword: running pw usermod -u 501 -h 0");
             int r = exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", dashCommand.UTF8String, NULL);
