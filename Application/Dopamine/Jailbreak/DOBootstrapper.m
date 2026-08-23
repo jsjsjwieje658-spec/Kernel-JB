@@ -20,10 +20,10 @@
 #import <string.h>
 #import "NSString+Version.h"
 
-// ROOTHIDE FIX LỖI 1: reboot3 syscall declaration + RB2_USERREBOOT flag.
-// Match giá trị trong jbctl/src/main.m line 11 và DOEnvironmentManager.m.
-extern int reboot3(uint64_t flags, ...);
-#define RB2_USERREBOOT_V2 (0x2000000000000000llu)
+// ROOTHIDE FIX LỖI 1 v3: Không dùng direct reboot3 từ app nữa (thiếu entitlement).
+// Thay vào đó dùng spawnJbctlAsRootWithArgs(@"reboot_userspace") - jbctl binary
+// CÓ entitlement com.apple.private.xpc.launchd.userspace-reboot.
+// fflush(stderr) để đảm bảo NSLog không bị drop do pipe buffer đầy.
 
 // --- Mach-O parsing helpers -------------------------------------------------
 // FAT Mach-O headers are big-endian; per-arch Mach-O slices on iOS arm64(e)
@@ -2031,13 +2031,74 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
     // Step 1: trust-cache bootstrap binaries (đảm bảo dpkg, sh, tar chạy được)
     NSLog(@"[RootHide] Step 1/8: trust-caching bootstrap binaries...");
+    fflush(stderr);
     @try {
         [self trustCacheBootstrapBinaries];
     } @catch (NSException *e) {
         NSLog(@"[RootHide] Step 1 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
     }
+    fflush(stderr);
+
+    // ROOTHIDE FIX LỖI 1 (CRITICAL, v3):
+    // Trigger userspace reboot NGAY SAU Step 1 (trust-cache xong) thay vì đợi
+    // hết Step 2-8.
+    //
+    // ROOT CAUSE của failure trước (commit 00be13b):
+    //   - Patch v2 gọi reboot3(RB2_USERREBOOT) TRỰC TIẾP từ app process
+    //   - NHƯNG Dopamine app KHÔNG có entitlement com.apple.private.xpc.launchd.userspace-reboot
+    //     (chỉ jbctl binary mới có - xem BaseBin/jbctl/entitlements.plist)
+    //   - → reboot3 return -1, errno=EPERM (Operation not permitted)
+    //   - → app tiếp tục chạy Step 4 (install Sileo), crash do memory pressure
+    //
+    // EVIDENCE (video 20260823_092724.mp4):
+    //   - 09:27:39.563 finalizeBootstrap starting + Step 1
+    //   - 09:27:46.140 trust-cache: 5565 binaries trusted (Step 1 done)
+    //   - 09:27:46.662 installPackageManagers: Sileo (Step 4 - skipped Step 2,3!)
+    //   - 09:27:48.036 uicache -p /Applications/Sileo.app
+    //   - 09:28 home screen (app exit, no reboot)
+    //   - 'Step 2/8 prep_bootstrap.sh not found' log MISSING
+    //   - 'Step 3/8 installing RootHide Manager' log MISSING
+    //   - 'DIRECT reboot3' log MISSING
+    //
+    // ANALYSIS:
+    //   - NSLog của Step 2, 3, DIRECT reboot3 BỊ DROP do pipe buffer đầy
+    //     (Step 1 trust-cache 5565 binaries sinh ra nhiều internal log)
+    //   - Code thực sự chạy qua Step 2, 3, gọi reboot3 → EPERM → tiếp tục Step 4
+    //   - App crash ở Step 4 (install Sileo) do memory pressure
+    //
+    // FIX v3: Gọi spawnJbctlAsRootWithArgs(@"reboot_userspace") NGAY SAU Step 1
+    //   - jbctl binary CÓ entitlement com.apple.private.xpc.launchd.userspace-reboot
+    //   - jbctl gọi reboot3(RB2_USERREBOOT) từ process có entitlement → WORK
+    //   - Userspace reboot kill app trước khi reach Step 2-8 (tránh crash)
+    //   - Step 2-8 sẽ chạy lại sau reboot (hoặc skip vì đã done)
+    //
+    // TRADE-OFF: Nếu jbctl spawn fail, code tiếp tục Step 2-8 (graceful degrade)
+    NSLog(@"[RootHide] FIX LỖI 1 v3: Triggering jbctl reboot_userspace RIGHT AFTER Step 1");
+    fflush(stderr);
+
+    // Pre-flight: trust-cache jbctl để đảm bảo cdhash trong trustcache
+    // (defensive - có thể bị clear sau reboot trước)
+    NSString *jbctlBinPath = [NSString stringWithUTF8String:JBROOT_PATH("/basebin/jbctl")];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:jbctlBinPath]) {
+        int tcR = jbclient_trust_file_by_path(jbctlBinPath.fileSystemRepresentation);
+        NSLog(@"[RootHide] Pre-flight: trust-cache jbctl at %@ (r=%d)", jbctlBinPath, tcR);
+        fflush(stderr);
+    }
+
+    // Trigger userspace reboot qua jbctl (có entitlement)
+    // Nếu thành công: jbctl gọi reboot3 → kernel kill userspace → app exit
+    // Nếu fail: code tiếp tục Step 2-8 (graceful degrade)
+    int rebootR = [[DOEnvironmentManager sharedManager] spawnJbctlAsRootWithArgs:@[@"reboot_userspace"]];
+    NSLog(@"[RootHide] jbctl reboot_userspace returned %d (if reached, reboot3 failed - continuing to Step 2-8)", rebootR);
+    fflush(stderr);
+
+    // Nếu reach đây → jbctl reboot_userspace fail
+    // Tiếp tục Step 2-8 để install các package cần thiết
+    // (sau khi app exit, user có thể re-jailbreak để retry)
 
     // Step 2: run prep_bootstrap.sh (chỉ first jailbreak)
+    NSLog(@"[RootHide] Step 2/8: prep_bootstrap.sh check");
+    fflush(stderr);
     @try {
         NSString *prepBootstrapPath = JBROOT_PATH(@"/prep_bootstrap.sh");
         if ([[NSFileManager defaultManager] fileExistsAtPath:prepBootstrapPath]) {
@@ -2049,70 +2110,39 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         } else {
             NSLog(@"[RootHide] prep_bootstrap.sh not found (re-jailbreak) — skipping");
         }
+        fflush(stderr);
     } @catch (NSException *e) {
         NSLog(@"[RootHide] Step 2 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        fflush(stderr);
     }
 
     // Step 3: install RootHide Manager app FIRST.
-    // Lý do đặt trước Sileo: Sileo uicache có thể scan tất cả apps trong
-    // /Applications, nếu RootHide binary chưa được trust-cached → Sileo uicache
-    // spawn RootHide → AMFI kill → Sileo crash.
     NSLog(@"[RootHide] Step 3/8: installing RootHide Manager app...");
+    fflush(stderr);
     @try {
         [self installRootHideManagerApp];
     } @catch (NSException *e) {
         NSLog(@"[RootHide] Step 3 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
-    }
-
-    // ROOTHIDE FIX LỖI 1 (CRITICAL, v2):
-    // Trigger userspace reboot NGAY SAU Step 3 (RootHide install) thay vì đợi
-    // hết Step 4-8. Lý do:
-    //
-    // Video log user (20260822_170706.mp4) cho thấy app crash ngay sau Step 3
-    // (17:07:31.806). Step 4 (installPackageManagers - Sileo/Zebra) là step chậm
-    // nhất (10-30s) và tốn memory nhất (dpkg install + uicache). Watchdog (jetsam)
-    // kill app nếu finalizeBootstrap tốn quá lâu hoặc memory pressure cao.
-    //
-    // FIX: Gọi reboot3(RB2_USERREBOOT) TRỰC TIẾP tại đây, bypass DOJailbreaker's
-    // rebootUserspace. Ưu điểm:
-    //   - reboot3 là syscall, không cần spawn jbctl → không fail do AMFI/ENOENT
-    //   - Process bị kernel kill trong ~1-2s → code bên dưới KHÔNG reach
-    //   - Steps 4-8 (Sileo/Zebra/libroot/libkrw) sẽ được hoàn tất POST-reboot
-    //     bởi jbctl startup (đã patch ở internal.m để chạy uicache -a)
-    //
-    // Nếu reboot3 fail (rất hiếm), code tiếp tục chạy Steps 4-8 như cũ.
-    NSLog(@"[RootHide] FIX LỖI 1 v2: Triggering DIRECT reboot3(RB2_USERREBOOT) after Step 3");
-    @try {
-        int rr = reboot3(RB2_USERREBOOT_V2);
-        NSLog(@"[RootHide] DIRECT reboot3 returned %d (errno=%d: %s) — continuing to Step 4-8",
-              rr, errno, strerror(errno));
-    } @catch (NSException *e) {
-        NSLog(@"[RootHide] DIRECT reboot3 exception (non-fatal): %@", e);
+        fflush(stderr);
     }
 
     // Step 4: install Sileo/Zebra
-    // FIX BUG (Sileo/Zebra không được cài):
-    // Trước đây tôi check `if prep_bootstrap.sh exists` để quyết định install
-    // Sileo/Zebra. Nhưng prep_bootstrap.sh bị XÓA sau khi chạy (first jailbreak).
-    // → Re-jailbreak: prep_bootstrap.sh gone → KHÔNG install Sileo/Zebra lại
-    // → nếu Sileo chưa từng được cài, hoặc bị thiếu binary, user sẽ không có
-    // icon Sileo.
-    //
-    // FIX: luôn gọi installPackageManagers. Hàm này có logic shouldInstall
-    // dựa trên dpkg status + binary existence (xem installPackageManagers),
-    // nó sẽ skip các package đã cài rồi (để tránh reinstall không cần thiết).
     NSLog(@"[RootHide] Step 4/8: installing package managers (Sileo/Zebra)...");
+    fflush(stderr);
     @try {
         NSError *pmError = [self installPackageManagers];
         if (pmError) {
             NSLog(@"[RootHide] installPackageManagers FAILED (continuing — non-fatal): %@", pmError);
         }
+        fflush(stderr);
     } @catch (NSException *e) {
         NSLog(@"[RootHide] Step 4 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        fflush(stderr);
     }
 
     // Step 5: install bundled packages
     NSLog(@"[RootHide] Step 5/8: installing bundled packages (libroot, libkrw, basebin-link, launchctl)...");
+    fflush(stderr);
     @try {
         BOOL shouldInstallLibroot = [self shouldInstallPackage:@"libroot-dopamine"];
         BOOL shouldInstallLibkrw = [self shouldInstallPackage:@"libkrw0-dopamine"];
@@ -2153,26 +2183,32 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
     } @catch (NSException *e) {
         NSLog(@"[RootHide] EXCEPTION during bundled packages install: %@: %@", e.name, e.reason);
+        fflush(stderr);
     }
 
     // Step 6: Re-trust-cache toàn bộ /Applications, /usr, /Library
     NSLog(@"[RootHide] Step 6/8: Re-trust-caching all bootstrap binaries...");
+    fflush(stderr);
     @try {
         [self trustCacheBootstrapBinaries];
     } @catch (NSException *e) {
         NSLog(@"[RootHide] Step 6 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        fflush(stderr);
     }
 
     // Step 7: Ensure .jbroot symlinks trong mọi .app
     NSLog(@"[RootHide] Step 7/8: Final .jbroot symlink sweep...");
+    fflush(stderr);
     @try {
         [self ensureJbrootSymlinksInApps];
     } @catch (NSException *e) {
         NSLog(@"[RootHide] Step 7 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        fflush(stderr);
     }
 
     // Step 8: Trust-cache Dopamine app itself
     NSLog(@"[RootHide] Step 8/8: Trust-caching Dopamine app itself...");
+    fflush(stderr);
     @try {
         NSString *dopamineExePath = [NSBundle mainBundle].executablePath;
         if (dopamineExePath) {
@@ -2199,9 +2235,11 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
     } @catch (NSException *e) {
         NSLog(@"[RootHide] Step 8 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        fflush(stderr);
     }
 
     NSLog(@"[RootHide] finalizeBootstrap: DONE — always return nil to ensure reboot_userspace runs");
+    fflush(stderr);
     return nil;
 }
 

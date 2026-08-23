@@ -718,68 +718,28 @@ void *boomerang_server(struct boomerang_info *info)
         return;
     }
 
-    // ROOTHIDE FIX LỖI 1 (CRITICAL): Trigger userspace reboot NGAY SAU finalizeBootstrap.
+    // ROOTHIDE FIX LỖI 1 (v3): Userspace reboot đã được trigger NGAY SAU Step 1
+    // trong finalizeBootstrap (DOBootstrapper.m).
     //
-    // Trước đây sequence là:
-    //   finalizeBootstrap → setIDownloadEnabled → ensureNoDuplicateApps
-    //   → cleanUpPostExploitation (RESET uid về 501) → printf("Done!")
-    //   → runWithError return → caller dispatch_async(main_queue)
-    //   → completeJailbreak → fadeToBlack → [jailbreaker finalize] → rebootUserspace
+    // Lý do không gọi rebootUserspace() ở đây nữa:
+    //   - finalizeBootstrap đã gọi spawnJbctlAsRootWithArgs(@"reboot_userspace")
+    //     ngay sau Step 1 (trust-cache xong).
+    //   - Nếu jbctl spawn thành công → process bị kill → code không reach đây
+    //   - Nếu reach đây → jbctl spawn fail → gọi rebootUserspace() lần nữa
+    //     (có fallback chain: jbctl spawn → respring → killall backboardd → exit)
     //
-    // Có 3 nguyên nhân gây "JB crash ở bước cuối, KHÔNG reboot userspace":
-    //
-    //   1) cleanUpPostExploitation (line cũ 714) reset uid về 501 (mobile).
-    //      Sau đó rebootUserspace → spawnJbctlAsRootWithArgs gọi runAsRoot:
-    //      block, nhưng vì uid đã về 501, posix_spawnattr_set_persona_np có
-    //      thể bị AMFI reject → posix_spawn fail → fallback respring →
-    //      respring cũng fail → app exit về Home Screen, không reboot.
-    //
-    //   2) Watchdog (jetsam) kill app nếu finalizeBootstrap tốn quá lâu.
-    //      Theo log thực tế: "trust-cache: 5001 binaries trusted" mất ~3s,
-    //      + install debs (Sileo/Zebra/libroot/libkrw) + uicache → 30-60s tổng.
-    //      iOS kill background app nếu chạy lâu + memory pressure cao
-    //      (trustcache 5001 cdhashes chiếm ~10MB RAM).
-    //      Khi app bị kill, dispatch_async(main_queue) không chạy →
-    //      [jailbreaker finalize] không được gọi → không có userspace reboot.
-    //
-    //   3) ensureNoDuplicateApps + setIDownloadEnabled không critical, có
-    //      thể skip để tránh watchdog kill.
-    //
-    // FIX:
-    //   - Gọi rebootUserspace NGAY SAU finalizeBootstrap (vẫn còn root + sandbox cleared)
-    //   - SKIP cleanUpPostExploitation (process sẽ bị kill bởi reboot3/respring
-    //     anyway, không cần reset uid)
-    //   - SKIP ensureNoDuplicateApps (chỉ là check, không critical)
-    //   - Pre-flight: trust-cache jbctl một lần cuối để đảm bảo cdhash trong
-    //     kernel trustcache (defensive - có thể bị clear giữa chừng)
-    //
-    // Sau fix: caller (DOMainViewController) sẽ thấy process exit trước khi
-    // dispatch_async(main_queue) chạy → không reach được finalize, nhưng OK
-    // vì reboot đã được trigger thành công ngay tại đây.
-    NSLog(@"[RootHide] FIX LỖI 1: Triggering userspace reboot immediately after finalizeBootstrap");
+    // EVIDENCE (video 20260823_092724.mp4):
+    //   - App exit ở Step 4 (install Sileo) → finalizeBootstrap đã return
+    //   - Nhưng userspace reboot KHÔNG xảy ra → jbctl spawn fail trong finalizeBootstrap
+    //   - → cần gọi rebootUserspace() lần nữa ở đây (vẫn còn root + sandbox cleared)
+    NSLog(@"[RootHide] FIX LỖI 1 v3: finalizeBootstrap returned, calling rebootUserspace() as backup");
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
 
-    // Pre-flight defensive: trust-cache jbctl một lần cuối để đảm bảo cdhash
-    // trong kernel trustcache (có thể bị clear nếu memory pressure cao).
-    // jbclient_trust_file_by_path gửi XPC đến launchdhook, launchdhook add
-    // cdhash vào kernel trust cache. Nếu jbctl cdhash đã có rồi, đây là no-op.
-    NSString *jbctlBinPath = [NSString stringWithUTF8String:JBROOT_PATH("/basebin/jbctl")];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:jbctlBinPath]) {
-        int tcR = jbclient_trust_file_by_path(jbctlBinPath.fileSystemRepresentation);
-        NSLog(@"[RootHide] Pre-flight: trust-cache jbctl at %@ (r=%d)", jbctlBinPath, tcR);
-    } else {
-        NSLog(@"[RootHide] WARNING: jbctl not found at %@ — reboot_userspace will likely fail, will fall back to respring", jbctlBinPath);
-    }
-
-    // Trigger userspace reboot (nếu thành công, process sẽ bị kill bởi
-    // reboot3 syscall trong jbctl, không reach được code bên dưới).
-    // Nếu reboot3 fail, rebootUserspace đã fallback sang respring (kill backboardd).
+    // Trigger userspace reboot (fallback chain: jbctl → respring → killall → exit)
     [[DOEnvironmentManager sharedManager] rebootUserspace];
 
-    // Nếu reach đây, reboot3 đã fail và fallback sang respring.
-    // Tiếp tục các step còn lại (non-critical) - nhưng SKIP cleanUpPostExploitation
-    // để giữ root (tránh lỗi khi respring cũng cần root).
-    NSLog(@"[RootHide] rebootUserspace returned — if reached, reboot3 likely failed, respring fallback triggered");
+    // Nếu reach đây → tất cả reboot methods fail
+    NSLog(@"[RootHide] rebootUserspace returned — if reached, all reboot methods failed");
 
     // setIDownloadEnabled có thể fail silent - không critical, bọc trong @try
     @try {

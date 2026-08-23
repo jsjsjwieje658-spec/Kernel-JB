@@ -279,6 +279,16 @@ int roothide_init(void)
         // Load default blacklist (banking apps, detection apps, etc.)
         // These apps should NEVER receive jailbreak injection
         const char *default_blacklist[] = {
+                // ROOTHIDE FIX LỖI 2 (v2): RootHide Manager app
+                // RootHide app v1.3.9 check getmntinfo() và warn "Unknown Bindfs Mount(s)"
+                // nếu thấy bindfs mount không trong whitelist của nó.
+                // Fakelib mount tại /usr/lib (cần thiết cho jailbreak) KHÔNG trong whitelist
+                // → RootHide app warn mỗi lần mở.
+                // Fix: Add com.roothide.manager vào blacklist → spawn_hook set
+                // ROOTHIDE_CLEAN_MODE_ENV=1 → systemhook install roothide_hide hooks
+                // → hooked_getmntinfo filter /usr/lib mount khỏi RootHide app.
+                "com.roothide.manager",
+
                 // Banking apps (Vietnam + International)
                 "com.vietinbank.iBank",
                 "com.vcb.IB",
