@@ -713,54 +713,26 @@ void *boomerang_server(struct boomerang_info *info)
     exec_cmd_trusted(JBROOT_PATH("/usr/bin/killall"), "-9", "iconservicesagent", NULL);
     
     *errOut = [self finalizeBootstrapIfNeeded];
-    if (*errOut) {
-        [self cleanUpPostExploitation];
-        return;
-    }
+    if (*errOut) return;
 
-    // ROOTHIDE FIX LỖI 1 (v3): Userspace reboot đã được trigger NGAY SAU Step 1
-    // trong finalizeBootstrap (DOBootstrapper.m).
-    //
-    // Lý do không gọi rebootUserspace() ở đây nữa:
-    //   - finalizeBootstrap đã gọi spawnJbctlAsRootWithArgs(@"reboot_userspace")
-    //     ngay sau Step 1 (trust-cache xong).
-    //   - Nếu jbctl spawn thành công → process bị kill → code không reach đây
-    //   - Nếu reach đây → jbctl spawn fail → gọi rebootUserspace() lần nữa
-    //     (có fallback chain: jbctl spawn → respring → killall backboardd → exit)
-    //
-    // EVIDENCE (video 20260823_092724.mp4):
-    //   - App exit ở Step 4 (install Sileo) → finalizeBootstrap đã return
-    //   - Nhưng userspace reboot KHÔNG xảy ra → jbctl spawn fail trong finalizeBootstrap
-    //   - → cần gọi rebootUserspace() lần nữa ở đây (vẫn còn root + sandbox cleared)
-    NSLog(@"[RootHide] FIX LỖI 1 v3: finalizeBootstrap returned, calling rebootUserspace() as backup");
-    [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
-
-    // Trigger userspace reboot (fallback chain: jbctl → respring → killall → exit)
-    [[DOEnvironmentManager sharedManager] rebootUserspace];
-
-    // Nếu reach đây → tất cả reboot methods fail
-    NSLog(@"[RootHide] rebootUserspace returned — if reached, all reboot methods failed");
-
-    // setIDownloadEnabled có thể fail silent - không critical, bọc trong @try
-    @try {
-        [[DOEnvironmentManager sharedManager] setIDownloadEnabled:idownloadEnabled needsUnsandbox:NO];
-    } @catch (NSException *e) {
-        NSLog(@"[RootHide] setIDownloadEnabled exception (non-fatal): %@", e);
-    }
-
-    // SKIP ensureNoDuplicateApps - chỉ là check, không critical, và có thể
-    // gây crash nếu memory pressure cao (scan /var/containers/Bundle/Application)
-    // *errOut = [self ensureNoDuplicateApps];
-
-    // SKIP cleanUpPostExploitation - không reset uid (process sẽ bị kill bởi
-    // respring/reboot anyway, và reset uid 501 sẽ làm rebootUserspace fail)
-    // *errOut = [self cleanUpPostExploitation];
+    // ROOTHIDE FIX LỖI 1 (v5): Revert về EXACT fork gốc flow
+    // KHÔNG gọi rebootUserspace() backup trong runWithError
+    // KHÔNG gọi cleanUpPostExploitation (reset uid 501 - fork gốc không có)
+    // Caller (DOMainViewController.startJailbreak) sẽ:
+    //   dispatch_async(main_queue, ^{
+    //     [uiManager completeJailbreak];
+    //     [self fadeToBlack:^{ [jailbreaker finalize]; }]; // ← rebootUserspace ở đây
+    //   });
+    [[DOEnvironmentManager sharedManager] setIDownloadEnabled:idownloadEnabled needsUnsandbox:NO];
 
     printf("Done!\n");
 }
 
 - (void)finalize
 {
+    // ROOTHIDE FIX LỖI 1 (v5): Match EXACT fork gốc
+    // rebootUserspace được gọi SAU khi runWithError return thành công
+    // (caller DOMainViewController fadeToBlack → finalize → rebootUserspace)
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
     [[DOEnvironmentManager sharedManager] rebootUserspace];
 }

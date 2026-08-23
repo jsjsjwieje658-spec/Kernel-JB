@@ -2029,8 +2029,25 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // 8. Trust-cache Dopamine app itself
     NSLog(@"[RootHide] finalizeBootstrap: starting");
 
+    // ROOTHIDE FIX LỖI 1 (CRITICAL, v5):
+    // Revert về flow ĐƠN GIẢN theo fork gốc (github.com/roothide/Dopamine)
+    //
+    // EVIDENCE các patch trước FAIL:
+    //   - v1: spawnJbctlAsRootWithArgs với --waitfor pipe → race condition, app crash
+    //   - v2: direct reboot3 từ app → EPERM (thiếu entitlement)
+    //   - v3: jbctl spawn ngay sau Step 1 → apps không cài
+    //   - v4: jbctl spawn sau Step 5 (skip 6,7,8) → vẫn fail (user báo 'như cũ')
+    //
+    // ROOT CAUSE: User code tự chế phức tạp. Fork gốc CHÍNH THỨC:
+    //   - finalizeBootstrap chỉ install apps, KHÔNG gọi reboot
+    //   - rebootUserspace được gọi bởi caller (DOMainViewController → finalize)
+    //   - rebootUserspace dùng exec_cmd_suspended + SIGCONT (KHÔNG --waitfor pipe)
+    //
+    // FIX v5: finalizeBootstrap chỉ install apps, return nil
+    // Reboot sẽ do caller (DOJailbreaker.finalize → rebootUserspace) handle
+
     // Step 1: trust-cache bootstrap binaries (đảm bảo dpkg, sh, tar chạy được)
-    NSLog(@"[RootHide] Step 1/8: trust-caching bootstrap binaries...");
+    NSLog(@"[RootHide] Step 1/5: trust-caching bootstrap binaries...");
     fflush(stderr);
     @try {
         [self trustCacheBootstrapBinaries];
@@ -2039,31 +2056,8 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     }
     fflush(stderr);
 
-    // ROOTHIDE FIX LỖI 1 (CRITICAL, v4):
-    // REVERT patch v3 (gọi reboot ngay sau Step 1) - gây bug apps không cài.
-    //
-    // EVIDENCE (user test patch v3 commit 1d97f2b):
-    //   - Reboot userspace ĐÃ XẢY RA (thành công)
-    //   - NHƯNG reboot xảy ra NGAY SAU Step 1 (trust-cache)
-    //   - → Step 3 (RootHide install), Step 4 (Sileo/Zebra install) KHÔNG chạy
-    //   - → Sau reboot, apps chưa được cài
-    //
-    // FIX v4: Install hết Step 2,3,4,5 (prep_bootstrap, RootHide, Sileo/Zebra,
-    // libroot/libkrw/basebin-link) TRƯỚC, rồi mới gọi reboot_userspace.
-    // SKIP Step 6,7,8 (defensive, đã làm ở Step 1 và trong manuallyInstallDeb)
-    // để giảm thời gian finalizeBootstrap, tránh watchdog kill.
-    //
-    // Flow mới:
-    //   Step 1: trust-cache bootstrap binaries
-    //   Step 2: prep_bootstrap.sh (first jailbreak only)
-    //   Step 3: install RootHide Manager
-    //   Step 4: install Sileo/Zebra
-    //   Step 5: install bundled packages (libroot, libkrw, basebin-link)
-    //   ← REBOOT NGAY SAU Step 5 (skip Step 6,7,8)
-    //   Trust-cache jbctl → spawnJbctlAsRootWithArgs(@"reboot_userspace")
-
     // Step 2: run prep_bootstrap.sh (chỉ first jailbreak)
-    NSLog(@"[RootHide] Step 2/8: prep_bootstrap.sh check");
+    NSLog(@"[RootHide] Step 2/5: prep_bootstrap.sh check");
     fflush(stderr);
     @try {
         NSString *prepBootstrapPath = JBROOT_PATH(@"/prep_bootstrap.sh");
@@ -2083,7 +2077,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     }
 
     // Step 3: install RootHide Manager app FIRST.
-    NSLog(@"[RootHide] Step 3/8: installing RootHide Manager app...");
+    NSLog(@"[RootHide] Step 3/5: installing RootHide Manager app...");
     fflush(stderr);
     @try {
         [self installRootHideManagerApp];
@@ -2093,7 +2087,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     }
 
     // Step 4: install Sileo/Zebra
-    NSLog(@"[RootHide] Step 4/8: installing package managers (Sileo/Zebra)...");
+    NSLog(@"[RootHide] Step 4/5: installing package managers (Sileo/Zebra)...");
     fflush(stderr);
     @try {
         NSError *pmError = [self installPackageManagers];
@@ -2107,7 +2101,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     }
 
     // Step 5: install bundled packages
-    NSLog(@"[RootHide] Step 5/8: installing bundled packages (libroot, libkrw, basebin-link, launchctl)...");
+    NSLog(@"[RootHide] Step 5/5: installing bundled packages (libroot, libkrw, basebin-link, launchctl)...");
     fflush(stderr);
     @try {
         BOOL shouldInstallLibroot = [self shouldInstallPackage:@"libroot-dopamine"];
@@ -2153,39 +2147,10 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         fflush(stderr);
     }
 
-    // ROOTHIDE FIX LỖI 1 (CRITICAL, v4): REBOOT NGAY SAU STEP 5
-    // Đã install xong RootHide (Step 3), Sileo/Zebra (Step 4), libroot/libkrw (Step 5)
-    // → Trust-cache jbctl → gọi reboot_userspace
-    // → Userspace reboot sẽ kill app, nhưng apps đã được install xong
-    // → Sau reboot, apps sẽ có icon trên home screen
-    //
-    // SKIP Step 6,7,8 (defensive, không critical):
-    //   - Step 6 (re-trust-cache): đã làm ở Step 1 và trong manuallyInstallDeb
-    //   - Step 7 (ensureJbrootSymlinksInApps): đã làm ở installRootHideManagerApp
-    //     và installPackageManagers
-    //   - Step 8 (trust-cache Dopamine): đã làm ở Step 1 (scan /Applications)
-    NSLog(@"[RootHide] FIX LỖI 1 v4: All installs done, triggering reboot NOW (skip Step 6,7,8)");
-    fflush(stderr);
-
-    // Pre-flight: trust-cache jbctl để đảm bảo cdhash trong trustcache
-    NSString *jbctlBinPath = [NSString stringWithUTF8String:JBROOT_PATH("/basebin/jbctl")];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:jbctlBinPath]) {
-        int tcR = jbclient_trust_file_by_path(jbctlBinPath.fileSystemRepresentation);
-        NSLog(@"[RootHide] Pre-flight: trust-cache jbctl at %@ (r=%d)", jbctlBinPath, tcR);
-        fflush(stderr);
-    }
-
-    // Trigger userspace reboot qua jbctl (có entitlement)
-    // Nếu thành công: jbctl gọi reboot3 → kernel kill userspace → app exit
-    // Nếu fail: code tiếp tục (graceful degrade, DOJailbreaker sẽ gọi rebootUserspace backup)
-    int rebootR = [[DOEnvironmentManager sharedManager] spawnJbctlAsRootWithArgs:@[@"reboot_userspace"]];
-    NSLog(@"[RootHide] jbctl reboot_userspace returned %d (if reached, reboot3 failed - DOJailbreaker will retry)", rebootR);
-    fflush(stderr);
-
-    // Nếu reach đây → jbctl reboot_userspace fail
-    // DOJailbreaker.runWithError sẽ gọi rebootUserspace() backup (fallback chain)
-
-    NSLog(@"[RootHide] finalizeBootstrap: DONE — return nil, DOJailbreaker will handle reboot");
+    // ROOTHIDE FIX LỖI 1 v5: KHÔNG gọi reboot trong finalizeBootstrap
+    // Caller (DOMainViewController → fadeToBlack → jailbreaker.finalize → rebootUserspace)
+    // sẽ handle reboot SAU khi finalizeBootstrap return thành công
+    NSLog(@"[RootHide] finalizeBootstrap: DONE — caller will handle reboot");
     fflush(stderr);
     return nil;
 }
