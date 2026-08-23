@@ -1441,12 +1441,60 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
         NSLog(@"[RootHide] Installing %@ from %@", name, debPath);
 
-        // manuallyInstallDeb đã trust-cache binary NGAY sau khi extract xong,
-        // nên KHÔNG cần trust-cache lại ở đây.
-        NSError *installError = [self manuallyInstallDeb:debPath appName:name];
-        if (installError) {
-            NSLog(@"[RootHide] Failed to install %@ (continuing — non-fatal): %@", name, installError);
-            continue;
+        // ============================================================
+        // FIX CRASH (per video RPReplay_Final1787506627.mp4):
+        // Trước đây dùng manuallyInstallDeb (parse .deb in-process, extract
+        // data.tar.xz 3.9MB qua libarchive_unarchive) → app bị SIGKILL ngay
+        // sau khi install xong, trước khi reach được rebootUserspace.
+        //
+        // Root cause analysis (5 Whys):
+        // 1. Tại sao crash? → App SIGKILL sau log "kernel primitives still valid"
+        // 2. Tại sao SIGKILL? → Jetsam hoặc AMFI kill do RAM spike từ NSData
+        //    buffers của manuallyInstallDeb (debData 4MB + dataTarData 4MB +
+        //    libarchive buffers 20MB+).
+        // 3. Tại sao upstream opa334/Dopamine không bị? → Upstream dùng
+        //    `dpkg -i` (exec_cmd_trusted spawn binary ngoài, RAM tốn trong
+        //    child process, không tốn RAM của Dopamine app).
+        // 4. Tại sao fork dùng manuallyInstallDeb? → Để handle case dpkg
+        //    chưa được trust-cached khi finalizeBootstrap chạy. Nhưng
+        //    prep_bootstrap.sh (Step 2) đã install dpkg + trust-cache nó,
+        //    nên dpkg đã available ở Step 4.
+        // 5. Tại sao vẫn giữ ensureJbrootSymlinksInApps + trustCache? → Vì
+        //    dpkg postinst script của Sileo/RootHide không tự tạo .jbroot
+        //    symlink cho .app dirs (roothide-specific). Phải làm thủ công.
+        //
+        // FIX: Dùng `dpkg -i` (exec_cmd_trusted spawn binary ngoài, match
+        // upstream opa334). Sau khi dpkg install xong, gọi:
+        //   1. trustCacheAppBinariesAfterInstall (roothide-specific, trust-cache
+        //      binary + .dylib trong .app/Frameworks/)
+        //   2. ensureJbrootSymlinksInApps (roothide-specific, tạo .jbroot
+        //      symlink trong mỗi .app dir để dyld load libroothide.dylib)
+        // ============================================================
+
+        // Path 1 (preferred): dpkg -i (match upstream opa334)
+        // exec_cmd_trusted sẽ:
+        //   1. jbclient_trust_file_by_path(dpkg_path) — trust-cache dpkg binary
+        //   2. posix_spawn dpkg với uid=0 (runAsRoot context đã có)
+        //   3. waitpid đợi dpkg exit
+        int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
+                                  "-i", "--force-all",
+                                  debPath.fileSystemRepresentation, NULL);
+        NSLog(@"[RootHide] dpkg -i %@ exit code: %d", name, r);
+        fflush(stderr);
+
+        if (r != 0) {
+            // Fallback: manuallyInstallDeb (cho case dpkg chưa available)
+            NSLog(@"[RootHide] dpkg -i failed (%d), falling back to manuallyInstallDeb", r);
+            fflush(stderr);
+            NSError *installError = [self manuallyInstallDeb:debPath appName:name];
+            if (installError) {
+                NSLog(@"[RootHide] Failed to install %@ (continuing — non-fatal): %@", name, installError);
+                continue;
+            }
+        } else {
+            // dpkg -i thành công → vẫn cần trust-cache + symlinks (roothide-specific)
+            [self trustCacheAppBinariesAfterInstall:name];
+            [self ensureJbrootSymlinksInApps];
         }
 
         // Run uicache to refresh the app icon
@@ -1960,23 +2008,41 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         NSLog(@"[RootHide] Installing RootHide Manager from %@", roothideAppDeb);
         [[DOUIManager sharedInstance] sendLog:@"Installing RootHide Manager" debug:NO];
 
-        // manuallyInstallDeb đã:
-        // - Extract ar archive
-        // - Extract data.tar bằng libarchive
-        // - Trust-cache binary + .dylib + .framework (qua trustCacheAppBinariesAfterInstall)
-        // - Update dpkg status
-        NSError *installErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
-        if (installErr) {
-            NSLog(@"[RootHide] RootHide Manager install FAILED (continuing — non-fatal): %@", installErr);
-            [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"RootHide Manager install failed: %@", installErr] debug:YES];
-            // FIX: Retry một lần. Có thể fail lần đầu do thư mục chưa exist sau extract.
-            // manuallyInstallDeb idempotent (nếu files đã exist, extract đè).
-            NSLog(@"[RootHide] Retrying RootHide Manager install...");
-            NSError *retryErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
-            if (retryErr) {
-                NSLog(@"[RootHide] RootHide Manager retry FAILED: %@", retryErr);
-                return;  // Cho up, không crash JB
+        // ============================================================
+        // FIX CRASH: Dùng dpkg -i thay vì manuallyInstallDeb (match upstream
+        // opa334). manuallyInstallDeb giữ 4MB+ NSData buffers trong process
+        // RAM → jetsam kill. dpkg -i spawn binary ngoài, RAM tốn trong
+        // child process. Sau khi dpkg install xong, vẫn cần:
+        //   1. trustCacheAppBinariesAfterInstall (roothide-specific)
+        //   2. ensureJbrootSymlinksInApps (roothide-specific .jbroot symlink)
+        // ============================================================
+        int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
+                                  "-i", "--force-all",
+                                  roothideAppDeb.fileSystemRepresentation, NULL);
+        NSLog(@"[RootHide] dpkg -i RootHide Manager exit code: %d", r);
+        fflush(stderr);
+
+        if (r != 0) {
+            // Fallback: manuallyInstallDeb
+            NSLog(@"[RootHide] dpkg -i failed (%d), falling back to manuallyInstallDeb", r);
+            fflush(stderr);
+            NSError *installErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
+            if (installErr) {
+                NSLog(@"[RootHide] RootHide Manager install FAILED (continuing — non-fatal): %@", installErr);
+                [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"RootHide Manager install failed: %@", installErr] debug:YES];
+                // FIX: Retry một lần. Có thể fail lần đầu do thư mục chưa exist sau extract.
+                // manuallyInstallDeb idempotent (nếu files đã exist, extract đè).
+                NSLog(@"[RootHide] Retrying RootHide Manager install...");
+                NSError *retryErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
+                if (retryErr) {
+                    NSLog(@"[RootHide] RootHide Manager retry FAILED: %@", retryErr);
+                    return;  // Cho up, không crash JB
+                }
             }
+        } else {
+            // dpkg -i thành công → vẫn cần trust-cache + symlinks (roothide-specific)
+            [self trustCacheAppBinariesAfterInstall:@"RootHide"];
+            [self ensureJbrootSymlinksInApps];
         }
 
         // Verify binary on disk
@@ -2112,20 +2178,52 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             shouldInstallLaunchctl = [self shouldInstallPackage:@"launchctl"];
         }
 
+        // ============================================================
+        // FIX CRASH: Dùng dpkg -i (match upstream opa334) thay vì
+        // manuallyInstallDeb cho bundled packages. Lý do giống Step 3/4:
+        // manuallyInstallDeb giữ NSData buffers trong process RAM → jetsam.
+        // dpkg -i spawn binary ngoài, RAM tốn trong child process.
+        //
+        // Bundled packages (libroot/libkrw/basebin-link/launchctl) KHÔNG
+        // phải .app dirs, nên KHÔNG cần trustCacheAppBinariesAfterInstall
+        // hay ensureJbrootSymlinksInApps (chỉ cần cho .app dirs).
+        // ============================================================
         if (shouldInstallLaunchctl) {
             NSString *launchctlPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"launchctl_1_1.2.0_iphoneos-arm64e.deb"];
-            NSError *installErr = [self manuallyInstallDeb:launchctlPath appName:@"launchctl"];
-            if (installErr) NSLog(@"[RootHide] launchctl install (non-fatal): %@", installErr);
+            int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
+                                      "-i", "--force-all",
+                                      launchctlPath.fileSystemRepresentation, NULL);
+            NSLog(@"[RootHide] dpkg -i launchctl exit: %d", r);
+            fflush(stderr);
+            if (r != 0) {
+                // Fallback manuallyInstallDeb
+                NSError *installErr = [self manuallyInstallDeb:launchctlPath appName:@"launchctl"];
+                if (installErr) NSLog(@"[RootHide] launchctl install (non-fatal): %@", installErr);
+            }
         }
         if (shouldInstallLibroot) {
             NSString *librootPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libroot.deb"];
-            NSError *installErr = [self manuallyInstallDeb:librootPath appName:@"libroot"];
-            if (installErr) NSLog(@"[RootHide] libroot install (non-fatal): %@", installErr);
+            int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
+                                      "-i", "--force-all",
+                                      librootPath.fileSystemRepresentation, NULL);
+            NSLog(@"[RootHide] dpkg -i libroot exit: %d", r);
+            fflush(stderr);
+            if (r != 0) {
+                NSError *installErr = [self manuallyInstallDeb:librootPath appName:@"libroot"];
+                if (installErr) NSLog(@"[RootHide] libroot install (non-fatal): %@", installErr);
+            }
         }
         if (shouldInstallLibkrw) {
             NSString *libkrwPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"libkrw-dopamine.deb"];
-            NSError *installErr = [self manuallyInstallDeb:libkrwPath appName:@"libkrw"];
-            if (installErr) NSLog(@"[RootHide] libkrw install (non-fatal): %@", installErr);
+            int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
+                                      "-i", "--force-all",
+                                      libkrwPath.fileSystemRepresentation, NULL);
+            NSLog(@"[RootHide] dpkg -i libkrw exit: %d", r);
+            fflush(stderr);
+            if (r != 0) {
+                NSError *installErr = [self manuallyInstallDeb:libkrwPath appName:@"libkrw"];
+                if (installErr) NSLog(@"[RootHide] libkrw install (non-fatal): %@", installErr);
+            }
         }
         if (shouldInstallBasebinLink) {
             if ([self fileOrSymlinkExistsAtPath:JBROOT_PATH(@"/usr/bin/opainject")]) {
@@ -2138,8 +2236,15 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                 [[NSFileManager defaultManager] removeItemAtPath:JBROOT_PATH(@"/usr/lib/libjailbreak.dylib") error:nil];
             }
             NSString *basebinLinkPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"basebin-link.deb"];
-            NSError *installErr = [self manuallyInstallDeb:basebinLinkPath appName:@"basebin-link"];
-            if (installErr) NSLog(@"[RootHide] basebin-link install (non-fatal): %@", installErr);
+            int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
+                                      "-i", "--force-all",
+                                      basebinLinkPath.fileSystemRepresentation, NULL);
+            NSLog(@"[RootHide] dpkg -i basebin-link exit: %d", r);
+            fflush(stderr);
+            if (r != 0) {
+                NSError *installErr = [self manuallyInstallDeb:basebinLinkPath appName:@"basebin-link"];
+                if (installErr) NSLog(@"[RootHide] basebin-link install (non-fatal): %@", installErr);
+            }
         }
         fflush(stderr);
     } @catch (NSException *e) {
