@@ -52,6 +52,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)respring;
 - (void)rebootUserspace;
+- (int)spawnJbctlAsRootWithArgs:(NSArray *)args;
 - (void)refreshJailbreakApps;
 - (void)reboot;
 - (void)changeMobilePassword:(NSString *)newPassword;
