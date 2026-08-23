@@ -432,10 +432,26 @@ void *boomerang_server(struct boomerang_info *info)
 
 - (NSError *)applyProtection
 {
-    int r = [[DOEnvironmentManager sharedManager] setPrivatePrebootProtected:YES];
-    if (r != 0) {
-        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitProtection userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Failed initializing protection with error: %d", r]}];
-    }
+    // ROOTHIDE FIX LỖI 2 (CRITICAL):
+    // SKIP protection_set_active entirely để match Dopamine-roothide fork.
+    //
+    // Root cause: setPrivatePrebootProtected:YES → jbctl internal protection activate
+    // → protection_set_active(true) → ensure_protected() bind-mounts:
+    //   /private/preboot/<UUID>/System  (bindfs on itself)
+    //   /private/preboot/<UUID>/usr     (bindfs on itself)
+    //
+    // Đây CHÍNH XÁC 2 path mà RootHide app cảnh báo "Unknown Bindfs Mount(s)".
+    // RootHide Bootstrap GỐC KHÔNG làm bind mount này — chỉ path randomization.
+    //
+    // Side-effect của việc skip: thư mục /System và /usr dưới preboot không được
+    // "protect" khỏi user vô tình xóa. Nhưng:
+    //   1) RootHide Bootstrap gốc không protect → tính năng này không critical.
+    //   2) /System và /usr dưới preboot thực ra là rootfs bind-mount của iOS,
+    //      không phải data user — user bình thường không bao giờ chạm vào.
+    //   3) Quyền lợi > rủi ro: RootHide app cảnh báo = tính năng chính bị hỏng.
+    //
+    // Trả về nil để jailbreak flow tiếp tục (giống như protection thành công).
+    NSLog(@"[RootHide] FIX LỖI 2: applyProtection SKIPPED — no /System, /usr bindfs mounts (matches Dopamine-roothide fork)");
     return nil;
 }
 

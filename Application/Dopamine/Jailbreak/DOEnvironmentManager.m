@@ -28,8 +28,14 @@
 #import "DOPreferenceManager.h"
 #import "NSData+Hex.h"
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <errno.h>
+#import <string.h>
 
 int reboot3(uint64_t flags, ...);
+// ROOTHIDE FIX LỖI 1: RB2_USERREBOOT flag cho reboot3 syscall.
+// Giá trị 0x2000000000000000 — yêu cầu userspace reboot (không hard reboot).
+// Match giá trị trong jbctl/src/main.m line 11.
+#define RB2_USERREBOOT (0x2000000000000000llu)
 CFPropertyListRef MGCopyAnswer(CFStringRef);
 extern char **environ;
 
@@ -700,26 +706,64 @@ static BOOL checkRootHideJBRAND(NSString *str)
 
 - (void)rebootUserspace
 {
-    // ROOTHIDE FIX LỖI 1 (CRITICAL):
-    // Trước đây hàm này chỉ gọi spawnJbctlAsRootWithArgs 1 lần, ignore return value.
-    // Nếu posix_spawn fail (ENOENT/EACCES) hoặc jbctl reboot3 syscall fail,
-    // app sẽ sit ở fadeToBlack forever → watchdog kill → user thấy "JB crash cuối".
+    // ROOTHIDE FIX LỖI 1 (CRITICAL, v2):
     //
-    // PHIÊN BẢN NÀY: CHỈ REBOOT USERSPACE, KHÔNG HARD REBOOT THIẾT BỊ.
+    // Root cause của "JB crash ở bước cuối, không reboot userspace":
+    //   1) Phiên bản trước chỉ gọi spawnJbctlAsRootWithArgs(@[@"reboot_userspace"]).
+    //      Nếu posix_spawn fail (ENOENT/EACCES/AMFI reject) → app sit ở fadeToBlack
+    //      → watchdog kill → user thấy "crash cuối, no reboot".
+    //   2) Ngay cả khi posix_spawn thành công, jbctl phải trust-cache cdhash của
+    //      chính nó trước khi gọi reboot3. Nếu trustcache bị clear (memory pressure)
+    //      → jbctl bị AMFI SIGKILL trước khi kịp gọi reboot3 → same symptom.
+    //   3) Video log của user (20260822_170706.mp4) cho thấy app exit về home screen
+    //      NGAY sau khi install RootHide xong (17:07:31.806) — không kịp spawn jbctl.
     //
-    // User yêu cầu rõ ràng: "tôi chỉ muốn reboot vô userspace thôi chx ko muốn reboot máy"
-    // → Loại bỏ hoàn toàn /sbin/reboot (hard reboot) khỏi fallback chain.
-    // Lý do: hard reboot sẽ làm device mất JB state, user phải re-jailbreak từ đầu.
+    // FIX MỚI (v2): GỌI reboot3 TRỰC TIẾP từ app process, BYPASS jbctl spawn.
     //
-    // FIX:
-    //   1) Pre-check jbctl binary tồn tại
-    //   2) Trust-cache jbctl một lần cuối (defensive — cdhash có thể bị clear)
-    //   3) Retry spawnJbctlAsRootWithArgs 3 lần với sleep 200ms giữa các lần
-    //      (lý do: posix_spawn có thể transient fail do AMFI/port pressure)
-    //   4) Nếu retry hết fail → fallback respring (kill backboardd via sbreload)
-    //   5) Nếu respring cũng fail → thử respring via killall backboardd SIGTERM
-    //   6) Nếu vẫn fail → exit(0) để app tự close, user có thể vào home screen
-    //      và re-jailbreak khi cần (KHÔNG hard reboot để giữ JB state)
+    // Tại sao gọi trực tiếp an toàn và reliable hơn:
+    //   - Tại thời điểm này, app đã có uid 0 (root) + sandbox cleared (qua elevatePrivileges).
+    //   - reboot3(RB2_USERREBOOT) là syscall trực tiếp, không cần spawn process nào.
+    //   - Tránh hoàn toàn các failure modes:
+    //       * posix_spawn fail (ENOENT, EACCES, AMFI)
+    //       * jbctl binary bị missing/corrupt
+    //       * jbctl cdhash不在 trustcache
+    //       * jbctl exception/crash trước khi gọi reboot3
+    //   - Sau reboot3 thành công, kernel sẽ kill toàn bộ userspace trong ~1-2s.
+    //     Code bên dưới dòng reboot3 sẽ KHÔNG được reach (process bị kill).
+    //
+    // FALLBACK CHAIN (chỉ trigger nếu reboot3 trực tiếp fail, hiếm):
+    //   1) Direct reboot3(RB2_USERREBOOT)  ← MỚI, primary
+    //   2) spawnJbctlAsRootWithArgs reboot_userspace (3 lần retry)
+    //   3) respring (sbreload via jbctl)
+    //   4) killall -9 backboardd
+    //   5) exit(0) graceful
+    //
+    // KHÔNG hard reboot (/sbin/reboot) — user yêu cầu rõ ràng.
+    NSLog(@"[RootHide] FIX LỖI 1 v2: rebootUserspace — direct reboot3(RB2_USERREBOOT) FIRST");
+
+    // === PRIMARY: direct reboot3 ===
+    // RB2_USERREBOOT = 0x2000000000000000 — flag của iOS reboot3 syscall,
+    // yêu cầu userspace reboot (không hard reboot device).
+    // Hàm reboot3 đã declared ở đầu file: int reboot3(uint64_t flags, ...);
+    @try {
+        // Wrap trong runAsRoot + runUnsandboxed để đảm bảo uid=0 + sandbox cleared
+        // (nếu cleanUpPostExploitation đã chạy và reset uid, ta cần re-elevate).
+        [self runAsRoot:^{
+            [self runUnsandboxed:^{
+                NSLog(@"[RootHide] Calling reboot3(RB2_USERREBOOT) directly from app process...");
+                int r = reboot3(RB2_USERREBOOT);
+                // Nếu reach đây → reboot3 fail (return != 0)
+                NSLog(@"[RootHide] reboot3 DIRECT returned %d (errno=%d: %s) — falling back to jbctl spawn",
+                      r, errno, strerror(errno));
+            }];
+        }];
+    } @catch (NSException *e) {
+        NSLog(@"[RootHide] reboot3 direct exception: %@ — falling back to jbctl spawn", e);
+    }
+
+    // === FALLBACK 1: jbctl spawn (3 lần retry) ===
+    // Chỉ reach nếu reboot3 direct fail. Giữ nguyên logic cũ.
+    NSLog(@"[RootHide] rebootUserspace: direct reboot3 failed, falling back to jbctl spawn");
 
     NSString *jbctlPath = [NSString stringWithUTF8String:JBROOT_PATH("/basebin/jbctl")];
     if (![[NSFileManager defaultManager] fileExistsAtPath:jbctlPath]) {
@@ -747,22 +791,14 @@ static BOOL checkRootHideJBRAND(NSString *str)
         NSLog(@"[RootHide] rebootUserspace: attempt %d returned %d", attempt, r);
 
         if (r == 0) {
-            // jbctl exited cleanly → reboot3 likely succeeded.
-            // Process sẽ bị kill bởi reboot3 syscall trong ~1-2s.
-            NSLog(@"[RootHide] rebootUserspace: SUCCESS — jbctl exited cleanly, reboot3 likely triggered. App should be killed by the reboot.");
+            NSLog(@"[RootHide] rebootUserspace: SUCCESS — jbctl exited cleanly, reboot3 likely triggered.");
             return;
         }
 
-        // Log error chi tiết
         NSString *errMsg;
         if (r > 0) {
             errMsg = [NSString stringWithFormat:
-                @"Userspace reboot attempt %d failed (jbctl exit code %d).\n"
-                @"Common causes:\n"
-                @"  • jbctl cdhash not in trustcache (pre-flight should have fixed this)\n"
-                @"  • jbctl entitlements not honored (re-sign with ldid)\n"
-                @"  • iOS version mismatch (reboot3 RB2_USERREBOOT not supported on this iOS)\n",
-                attempt, r];
+                @"Userspace reboot attempt %d failed (jbctl exit code %d).\n", attempt, r];
         } else {
             int errnoVal = -r;
             errMsg = [NSString stringWithFormat:
@@ -772,35 +808,25 @@ static BOOL checkRootHideJBRAND(NSString *str)
         [[DOUIManager sharedInstance] sendLog:errMsg debug:NO];
         fprintf(stderr, "[RootHide] rebootUserspace attempt %d FAILED: %s\n", attempt, errMsg.UTF8String);
 
-        // Sleep 200ms trước retry (tránh spawn quá nhanh)
         if (attempt < 3) {
             usleep(200000);
         }
     }
 
-    // Tất cả 3 retry đều fail → fallback respring
-    NSLog(@"[RootHide] rebootUserspace: ALL 3 attempts failed, falling back to respring (kill backboardd)");
-    [[DOUIManager sharedInstance] sendLog:@"Userspace reboot failed 3 times. Falling back to respring (SpringBoard reload, NO hard reboot)..." debug:NO];
+    // === FALLBACK 2: respring ===
+    NSLog(@"[RootHide] rebootUserspace: ALL 3 attempts failed, falling back to respring");
+    [[DOUIManager sharedInstance] sendLog:@"Userspace reboot failed 3 times. Falling back to respring..." debug:NO];
     [self respring];
-
-    // Đợi 2s để respring có hiệu lực (kill backboardd + sbreload)
     usleep(2000000);
 
-    // ROOTHIDE FIX: Nếu respring cũng fail, thử fallback #2 — kill backboardd trực tiếp.
-    // KHÔNG gọi /sbin/reboot (hard reboot) — user yêu cầu rõ ràng KHÔNG hard reboot.
-    NSLog(@"[RootHide] rebootUserspace: respring via jbctl likely failed, trying direct killall backboardd");
-    [[DOUIManager sharedInstance] sendLog:@"Respring likely failed. Trying direct killall backboardd (NO hard reboot to preserve JB state)..." debug:NO];
+    // === FALLBACK 3: killall backboardd ===
+    NSLog(@"[RootHide] rebootUserspace: trying direct killall backboardd");
     exec_cmd_trusted(JBROOT_PATH("/usr/bin/killall"), "-9", "backboardd", NULL);
-
-    // Đợi 3s
     usleep(3000000);
 
-    // Fallback #3: exit app gracefully — user có thể vào home screen và re-jailbreak
-    // KHÔNG hard reboot để giữ JB state (đã inject vào launchd/SpringBoard)
-    NSLog(@"[RootHide] rebootUserspace: all soft reboots failed, exiting app gracefully (NO hard reboot — JB state preserved)");
-    [[DOUIManager sharedInstance] sendLog:@"All soft reboots failed. Exiting app. Your jailbreak state is preserved — re-open Dopamine to re-trigger userspace reboot." debug:NO];
-    // Để app exit về home screen thay vì hard reboot
-    // User có thể re-open Dopamine app → app sẽ detect "isJailbroken" và trigger reboot lại
+    // === FALLBACK 4: exit graceful ===
+    NSLog(@"[RootHide] rebootUserspace: all soft reboots failed, exiting app gracefully");
+    [[DOUIManager sharedInstance] sendLog:@"All soft reboots failed. Exiting app." debug:NO];
 }
 
 
