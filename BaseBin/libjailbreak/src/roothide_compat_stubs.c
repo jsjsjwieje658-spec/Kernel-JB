@@ -89,22 +89,24 @@ int trustcache_query_cdhash(const uint8_t hash[JBS_TRUSTCACHE_HASH_SIZE], bool *
 }
 
 // Stub: Relaxin's csd_superblob_is_adhoc_signed (from roothider/signatures.m).
-// Returns true to allow ad-hoc signed bundles through (Kernel-JB's existing
-// behavior). Real impl will inspect the superblob's CodeDirectory flags.
-bool csd_superblob_is_adhoc_signed(const void *superblob, size_t superblobSize) {
-    (void)superblob; (void)superblobSize;
+// Called with 1 arg (CS_DecodedSuperBlob *). Returns true to allow ad-hoc
+// signed bundles through (Kernel-JB's existing behavior). Real impl will
+// inspect the superblob's CodeDirectory flags.
+bool csd_superblob_is_adhoc_signed(void *superblob) {
+    (void)superblob;
     return true;
 }
 
 // Stub: Relaxin's macho_calculate_adhoc_cdhash (from roothider/signatures.m).
-// Returns -1 (failure) until the real impl is ported. Callers should fall
-// back to Kernel-JB's existing cdhash calculation helpers.
-int macho_calculate_adhoc_cdhash(const void *macho, size_t machoSize, uint8_t cdhashOut[20]) {
-    (void)macho; (void)machoSize;
+// Called with 2 args (MachO *, cdhash_t which is uint8_t[20]). Returns false
+// (failure) until the real impl is ported. Callers should fall back to
+// Kernel-JB's existing cdhash calculation helpers.
+bool macho_calculate_adhoc_cdhash(void *macho, uint8_t *cdhashOut) {
+    (void)macho;
     if (cdhashOut) {
         for (int i = 0; i < 20; i++) cdhashOut[i] = 0;
     }
-    return -1;
+    return false;
 }
 
 // Stub: Relaxin's rlx_ksymbol (used by trustcache_nokcall_kernel.c).
@@ -112,6 +114,22 @@ int macho_calculate_adhoc_cdhash(const void *macho, size_t machoSize, uint8_t cd
 uint64_t rlx_ksymbol(const char *name) {
     (void)name;
     return 0;
+}
+
+// Stub: Relaxin's trustcache_nokcall_is_required (from trustcache_nokcall.c,
+// which was removed because its implementation depends on Relaxin's
+// evolved primitives.h struct layout). Returns false so callers take the
+// existing kcall-based trustcache path.
+bool trustcache_nokcall_is_required(void) {
+    return false;
+}
+
+// Stub: Relaxin's trustcache_nokcall_bootstrap_append_entries.
+// Returns -1 (failure). PID 1 should fall back to the kcall-based
+// jb_trustcache_append_entries helper.
+int trustcache_nokcall_bootstrap_append_entries(const void *entries, uint32_t entryCount) {
+    (void)entries; (void)entryCount;
+    return -1;
 }
 
 // Stub: protected kwrite32 — uses regular kwrite32 if available.
