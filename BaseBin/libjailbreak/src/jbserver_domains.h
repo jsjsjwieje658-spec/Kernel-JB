@@ -87,4 +87,12 @@ enum {
 
 #define JBS_BOOMERANG_DONE 42
 
+// RootHide port (Relaxin upstream): trustcache entry size constants.
+// Used by jbclient_root_trustcache_append_entries and the trustcache_nokcall
+// subsystem. Defined here (matching Relaxin's jbserver_domains.h) so they're
+// visible to all consumers of <libjailbreak/jbserver_domains.h>.
+#define JBS_TRUSTCACHE_ENTRY_SIZE 22U
+#define JBS_TRUSTCACHE_HASH_SIZE 20U
+#define JBS_TRUSTCACHE_MAX_APPEND_ENTRIES 65536U
+
 #endif

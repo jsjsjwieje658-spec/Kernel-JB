@@ -45,9 +45,13 @@ uint64_t proc_task(uint64_t proc);
 uint64_t proc_ucred(uint64_t proc);
 int proc_rele(uint64_t proc);
 uint32_t proc_getcsflags(uint64_t proc);
-void proc_csflags_update(uint64_t proc, uint32_t flags);
-void proc_csflags_set(uint64_t proc, uint32_t flags);
-void proc_csflags_clear(uint64_t proc, uint32_t flags);
+// RootHide port (Relaxin upstream): changed return type from void to int to
+// match Relaxin's signature. Relaxin's roothider/common.m:35 captures the
+// return value (`int ret = proc_csflags_set(...)`), so the function must
+// return int. Existing callers that ignore the return value are unaffected.
+int proc_csflags_update(uint64_t proc, uint32_t flags);
+int proc_csflags_set(uint64_t proc, uint32_t flags);
+int proc_csflags_clear(uint64_t proc, uint32_t flags);
 uint64_t ipc_entry_lookup(uint64_t space, mach_port_name_t name);
 uint64_t pa_index(uint64_t pa);
 uint64_t pai_to_pvh(uint64_t pai);

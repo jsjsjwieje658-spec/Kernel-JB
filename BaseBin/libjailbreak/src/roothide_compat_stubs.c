@@ -28,6 +28,9 @@
 #include "info.h"
 #include "primitives.h"
 #include "trustcache.h"
+#include "jbserver_domains.h"   // for JBS_TRUSTCACHE_HASH_SIZE
+#include "jbclient_xpc.h"       // for jbclient_root_trustcache_add_cdhash
+#include "roothide_compat_stubs.h"  // self-declarations
 
 // Stub: Relaxin's system_info_uses_sptm() — checks SPTM presence.
 // Kernel-JB has SPTM detection via gSystemInfo.kernelConstant.sptmBase != 0;
@@ -73,8 +76,14 @@ int jb_trustcache_append_entries(const void *entries, uint32_t entryCount) {
     return jb_trustcache_add_cdhashes((cdhash_t *)entries, entryCount);
 }
 
+// Alias: Relaxin names this jb_trustcache_append_cdhashes; Kernel-JB has
+// jb_trustcache_add_cdhashes. Dispatch to the Kernel-JB variant.
+int jb_trustcache_append_cdhashes(cdhash_t *hashes, uint32_t hashCount) {
+    return jb_trustcache_add_cdhashes(hashes, hashCount);
+}
+
 // Stub: Relaxin's trustcache_query_cdhash.
-// Falls back to a simple linear scan via jbclient_platform_trustcache_query_cdhash.
+// Falls back to jbclient_platform_trustcache_query_cdhash (stubbed above).
 int trustcache_query_cdhash(const uint8_t hash[JBS_TRUSTCACHE_HASH_SIZE], bool *foundOut) {
     return jbclient_platform_trustcache_query_cdhash(hash, foundOut);
 }

@@ -6,6 +6,11 @@
 #include "trustcache.h"
 #include "jbclient_xpc.h"
 #include "stock_fixes.h"
+// RootHide port (Relaxin upstream): forward declarations for the stub
+// implementations in roothide_compat_stubs.c. The Relaxin roothide code
+// (roothider/common.m, recdhash.m, signatures.m) calls these functions;
+// the header makes them visible transitively via <libjailbreak/libjailbreak.h>.
+#include "roothide_compat_stubs.h"
 
 int jbclient_initialize_primitives_internal(bool physrwPTE);
 int jbclient_initialize_primitives(void);
