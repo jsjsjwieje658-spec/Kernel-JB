@@ -14,14 +14,21 @@
 
 typedef enum
 {
-	KALLOC_OPTION_GLOBAL, // Global Allocation, never manually freed
-	KALLOC_OPTION_LOCAL, // Allocation attached to this process, freed on process exit
+        KALLOC_OPTION_GLOBAL, // Global Allocation, never manually freed
+        KALLOC_OPTION_LOCAL, // Allocation attached to this process, freed on process exit
 } kalloc_options;
 
 void enumerate_pages(uint64_t start, size_t size, uint64_t pageSize, bool (^block)(uint64_t, size_t));
 
 int kreadbuf(uint64_t kaddr, void* output, size_t size);
 int kwritebuf(uint64_t kaddr, const void* input, size_t size);
+// RootHide port (Relaxin upstream): added protected variants for the
+// trustcache_nokcall subsystem and roothider/*.m code. Currently stubbed
+// to fall back to the unprotected kreadbuf/kwritebuf; a future commit
+// will route these through the actual protected-kwrite primitive when
+// available.
+int kreadbuf_protected(uint64_t kaddr, void* output, size_t size);
+int kwritebuf_protected(uint64_t kaddr, const void* input, size_t size);
 int physreadbuf(uint64_t physaddr, void* output, size_t size);
 int physwritebuf(uint64_t physaddr, const void* input, size_t size);
 int vreadbuf(uint64_t tte_p, const void *addr, void *outdata, size_t datalen);
