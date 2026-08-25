@@ -14,6 +14,17 @@ extern int xpc_pipe_receive(mach_port_t port, XPC_GIVES_REFERENCE xpc_object_t *
 extern void xpc_dictionary_set_mach_recv(xpc_object_t dictionary, const char* name, mach_port_t port);
 extern mach_port_t xpc_dictionary_extract_mach_recv(xpc_object_t dictionary, const char* name);
 
+// RootHide port: added xpc_dictionary_*_mach_send declarations.
+// These private XPC functions are used by jbserver.c (lines 55 and 108) to
+// marshal/unmarshal mach_port_t SEND rights in XPC messages (needed for the
+// jailbreakd handoff flow introduced by Relaxin's JBS_ROOTHIDE_JAILBREAKD_LOOKUP
+// and JBS_ROOTHIDE_JAILBREAKD_CHECKIN actions). They were previously called
+// without declarations (relying on C89 implicit declarations), but Xcode 16+
+// promotes -Wimplicit-function-declaration from warning to error, breaking
+// the build.
+extern mach_port_t xpc_dictionary_copy_mach_send(xpc_object_t dictionary, const char* name);
+extern void xpc_dictionary_set_mach_send(xpc_object_t dictionary, const char* name, mach_port_t port);
+
 extern XPC_RETURNS_RETAINED xpc_object_t xpc_copy_entitlement_for_token(const char *, audit_token_t *);
 
 extern XPC_RETURNS_RETAINED xpc_object_t xpc_create_from_plist(const void *buf, size_t len);
