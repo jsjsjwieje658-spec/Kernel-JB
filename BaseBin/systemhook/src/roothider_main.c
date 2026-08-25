@@ -12,6 +12,9 @@
 #include "envbuf.h"
 #include "sandbox.h"
 #include "roothider.h"
+// RootHide port: relaxin_executable_path.h declares is_relaxin_executable_path()
+// (used at line 524). Kernel-JB copy lives at systemhook/src/relaxin_executable_path.h.
+#include "relaxin_executable_path.h"
 
 const char *HOOK_DYLIB_PATH = NULL;
 
@@ -343,7 +346,7 @@ int roothide_systemhook___execve_prehook(const char *path,
     assert(ret != 0);
 
     /* some processes are only allowed to call execve but not posix_spawn,
-	 e.g: "configd" on ios15, we need to trace it so that we can patch the subprocess before it runs. */
+         e.g: "configd" on ios15, we need to trace it so that we can patch the subprocess before it runs. */
     if (ret == EPERM && access(path, X_OK) == 0
         && sandbox_check(getpid(), "process-fork", SANDBOX_CHECK_NO_REPORT, NULL) == 0) {
         trust_binary = __no_need_to_trust_now__;
@@ -358,7 +361,7 @@ int roothide_systemhook___execve_prehook(const char *path,
 
 int roothide_systemhook___execve_posthook(const char *path, char *const argv[], char *const envp[]) {
     /* the posix_spawn call above should already trust the executable
-	(also its libraries) and the inserted libraries, so we can skip them below */
+        (also its libraries) and the inserted libraries, so we can skip them below */
 
     bool traced = false;
 
