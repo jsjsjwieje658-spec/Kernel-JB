@@ -10,6 +10,9 @@
 
 #include "../systemhook/src/common.h"
 #include "../systemhook/src/envbuf.h"
+// RootHide port: relaxin_executable_path.h declares is_relaxin_executable_path()
+// (used at line 324). Kernel-JB copy lives at systemhook/src/relaxin_executable_path.h.
+#include "../systemhook/src/relaxin_executable_path.h"
 
 const char *HOOK_DYLIB_PATH = NULL;
 
@@ -363,10 +366,10 @@ int roothide_launchd___posix_spawn_prehook(pid_t *restrict pidp,
         envbuf_unsetenv(&envc, "_MSSafeMode");
 
         /* According to xnu, the new thread in new process will not run in userland until after copyout pid
-		https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/kern/kern_exec.c#L4321
-		https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/kern/kern_exec.c#L4882
-		https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/kern/kern_exec.c#L4933
-		*/
+                https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/kern/kern_exec.c#L4321
+                https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/kern/kern_exec.c#L4882
+                https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/kern/kern_exec.c#L4933
+                */
 
         /* and posix_spawn->kernel->amfid->launchd may cause xpc dead loop so we can't use lock-spawn-unlock here */
 
