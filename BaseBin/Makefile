@@ -9,7 +9,14 @@
 
 all: basebin.tar
 
-subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks dopamine roothidehooks
+# RootHide port: REPLACED rootlesshooks (Kernel-JB's old Logos-based hooks for
+# cfprefsd + installd) with roothidehooks (Relaxin's CaptainHook-based hooks
+# for cfprefsd + lsd + springboard + runningboardd + pathhook). The Relaxin
+# roothidehooks supersedes rootlesshooks — it covers the same daemons plus
+# several more, and uses the same RootHide infrastructure as the rest of
+# the ported code. Keeping both would cause runtime conflicts (two hooks
+# on the same cfprefsd functions).
+subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook dopamine roothidehooks
 
 ChOma: .build .include
 	@$(MAKE) -C ChOma TARGET=ios DISABLE_SIGNING=1 DISABLE_TESTS=1 DYLIB_LDFLAGS="-install_name @loader_path/libchoma.dylib"
@@ -74,8 +81,10 @@ watchdoghook: .build .include libjailbreak
 	@cp watchdoghook/watchdoghook.dylib .build
 
 rootlesshooks: .build .include libjailbreak
-	$(MAKE) -C rootlesshooks
-	@cp rootlesshooks/.theos/obj/rootlesshooks.dylib .build
+	# RootHide port: rootlesshooks subproject REMOVED — superseded by roothidehooks.
+	# The roothidehooks subproject (built below) covers the same daemons plus more.
+	# Keeping this stub target so the existing 'subprojects' dependency list (which
+	# still references rootlesshooks in older commit histories) doesn't break.
 
 dopamine: .build .include libjailbreak XPF ChOma
 	$(MAKE) -C dopamine
@@ -129,7 +138,7 @@ clean:
 	@$(MAKE) -C jbctl $@
 	@$(MAKE) -C idownloadd $@
 	@$(MAKE) -C watchdoghook $@
-	@$(MAKE) -C rootlesshooks $@
+	# RootHide port: removed rootlesshooks clean (subproject removed)
 	@$(MAKE) -C dyldhook $@
 	@$(MAKE) -C dopamine $@
 	@$(MAKE) -C hookd $@
@@ -139,4 +148,4 @@ clean:
 	@rm -rf basebin.tar
 	@rm -rf basebin.tc
 
-.PHONY: clean .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks basebin.tc dyldhook basebin.tar roothidehooks
+.PHONY: clean .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook basebin.tc dyldhook basebin.tar roothidehooks

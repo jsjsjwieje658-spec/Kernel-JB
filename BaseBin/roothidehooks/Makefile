@@ -7,11 +7,20 @@ OUTPUT_DIR ?= $(abspath $(CURDIR)/../.build)
 OBJECT_DIR := $(CURDIR)/.objects
 
 BASEBIN_DIR := $(abspath $(CURDIR)/..)
-VENDOR_DIR := $(abspath $(CURDIR)/../../..)
+# RootHide port: in Relaxin, VENDOR_DIR was $(CURDIR)/../../.. because the
+# roothidehooks subproject lived at Vendor/Dopamine/BaseBin/roothidehooks/
+# (3 levels up = Vendor/ where CaptainHook/ lives). In Kernel-JB, the
+# roothidehooks subproject lives at BaseBin/roothidehooks/ and CaptainHook/
+# lives at the repo root — so only 2 levels up.
+VENDOR_DIR := $(abspath $(CURDIR)/../..)
 OUTPUT := $(OUTPUT_DIR)/roothidehooks.dylib
-SOURCES := $(sort $(wildcard $(CURDIR)/*.m))
-OBJECTS := $(patsubst $(CURDIR)/%.m,$(OBJECT_DIR)/%.o,$(SOURCES))
-HEADERS := $(sort $(wildcard $(CURDIR)/*.h)) \
+# RootHide port: use simple 'wildcard *.m' (no $(CURDIR) prefix) so that
+# the pattern rule below can match sources by stem. Prefixing with the
+# absolute CURDIR path confused make's stem extraction on macOS GNU make,
+# causing "No rule to make target .o" errors.
+SOURCES := $(sort $(wildcard *.m))
+OBJECTS := $(patsubst %.m,$(OBJECT_DIR)/%.o,$(SOURCES))
+HEADERS := $(sort $(wildcard *.h)) \
 	$(VENDOR_DIR)/CaptainHook/CaptainHook.h
 
 # Kernel-JB adaptation: CaptainHook/ now lives at repo root (parallel to BaseBin/).
@@ -58,7 +67,10 @@ $(OUTPUT): $(OBJECTS) $(LINK_INPUTS)
 	@mkdir -p $(OUTPUT_DIR)
 	$(CC) $(LDFLAGS) $(OBJECTS) -o $@
 
-$(OBJECT_DIR)/%.o: $(CURDIR)/%.m $(HEADERS)
+# RootHide port: pattern rule uses bare '%.m' (not '$(CURDIR)/%.m') so make's
+# stem extraction works correctly. The OBJECTS list also uses bare '%.m' so
+# they stay consistent.
+$(OBJECT_DIR)/%.o: %.m $(HEADERS)
 	@mkdir -p $(OBJECT_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
