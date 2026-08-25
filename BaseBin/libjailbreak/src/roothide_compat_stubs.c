@@ -88,19 +88,15 @@ int trustcache_query_cdhash(const uint8_t hash[JBS_TRUSTCACHE_HASH_SIZE], bool *
     return jbclient_platform_trustcache_query_cdhash(hash, foundOut);
 }
 
-// Stub: Relaxin's csd_superblob_is_adhoc_signed (from roothider/signatures.m).
-// Called with 1 arg (CS_DecodedSuperBlob *). Returns true to allow ad-hoc
-// signed bundles through (Kernel-JB's existing behavior). Real impl will
-// inspect the superblob's CodeDirectory flags.
-bool csd_superblob_is_adhoc_signed(void *superblob) {
-    (void)superblob;
-    return true;
-}
-
 // Stub: Relaxin's macho_calculate_adhoc_cdhash (from roothider/signatures.m).
 // Called with 2 args (MachO *, cdhash_t which is uint8_t[20]). Returns false
 // (failure) until the real impl is ported. Callers should fall back to
 // Kernel-JB's existing cdhash calculation helpers.
+//
+// NOTE: csd_superblob_is_adhoc_signed is NOT stubbed here because Kernel-JB
+// already has a native implementation in signatures.c (line 60) with the
+// matching Relaxin signature `bool csd_superblob_is_adhoc_signed(CS_DecodedSuperBlob *)`.
+// We just need a forward declaration in signatures.h — added there separately.
 bool macho_calculate_adhoc_cdhash(void *macho, uint8_t *cdhashOut) {
     (void)macho;
     if (cdhashOut) {

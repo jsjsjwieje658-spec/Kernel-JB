@@ -5,14 +5,14 @@
 #include <choma/Fat.h>
 
 typedef enum {
-	SIGNATURE_SOURCE_ALLOCATION,
-	SIGNATURE_SOURCE_FILE,
-	SIGNATURE_SOURCE_PROC,
+        SIGNATURE_SOURCE_ALLOCATION,
+        SIGNATURE_SOURCE_FILE,
+        SIGNATURE_SOURCE_PROC,
 } signature_source_t;
 
 struct siginfo {
-	signature_source_t source;
-	fsignatures_t signature;
+        signature_source_t source;
+        fsignatures_t signature;
 };
 
 typedef uint8_t cdhash_t[CS_CDHASH_LEN];

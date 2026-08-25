@@ -48,18 +48,18 @@ int jb_trustcache_append_cdhashes(cdhash_t *hashes, uint32_t hashCount);
 // Stub: query cdhash presence via the libjailbreak-side wrapper.
 int trustcache_query_cdhash(const uint8_t hash[JBS_TRUSTCACHE_HASH_SIZE], bool *foundOut);
 
-// Stub: Relaxin's signature helper (from roothider/signatures.m).
-// Called with 1 arg (CS_DecodedSuperBlob *). Returns true (ad-hoc signed) to
-// allow bundles through; real impl will inspect the superblob's CodeDirectory
-// flags. Argument type is `void *` here to avoid pulling in ChOma headers;
-// the actual call site passes CS_DecodedSuperBlob * which is link-compatible.
-bool csd_superblob_is_adhoc_signed(void *superblob);
-
 // Stub: Relaxin's macho cdhash calculator (from roothider/signatures.m).
 // Called with 2 args (MachO *, cdhash_t which is uint8_t[20]). Returns false
 // (failure) until the real impl is ported. Argument type is `void *` here to
 // avoid pulling in ChOma headers; the actual call site passes MachO * which
 // is link-compatible.
+//
+// NOTE: csd_superblob_is_adhoc_signed is NOT stubbed here because Kernel-JB
+// already has a native implementation in signatures.c with the matching
+// Relaxin signature. The forward declaration is below (using void * to avoid
+// pulling in ChOma headers; the actual call site passes CS_DecodedSuperBlob *
+// which is link-compatible).
+bool csd_superblob_is_adhoc_signed(void *superblob);
 bool macho_calculate_adhoc_cdhash(void *macho, uint8_t *cdhashOut);
 
 // Stub: Relaxin's kernel symbol resolver.
