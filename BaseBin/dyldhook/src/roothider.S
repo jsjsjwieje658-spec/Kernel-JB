@@ -12,9 +12,18 @@
 .align 4
 
 
-//MAKE_TRAMPOLINE(strncmp)
-MAKE_TRAMPOLINE(strlcpy)
-MAKE_TRAMPOLINE(strlcat)
+// RootHide port (Kernel-JB adaptation): COMMENTED OUT the strlcpy + strlcat
+// trampolines because Kernel-JB's main.S (lines 70-71) already defines them.
+// Relaxin's main.S doesn't define these, so they need to be in roothider.S;
+// but Kernel-JB's main.S does, causing duplicate-symbol link errors:
+//   duplicate symbol '_strlcpy' in: main.o roothider.o
+//   duplicate symbol '_MACHOMERGER_TRAMPOLINE_strlcat' in: main.o roothider.o
+//   duplicate symbol '_MACHOMERGER_TRAMPOLINE_strlcpy' in: main.o roothider.o
+//   duplicate symbol '_strlcat' in: main.o roothider.o
+// We only need the _MACHOMERGER_ORIG_* trampoline for the dyld
+// expandAtLoaderPath hook (which is what roothider.c uses), kept below.
+//MAKE_TRAMPOLINE(strlcpy)
+//MAKE_TRAMPOLINE(strlcat)
 
 .global _MACHOMERGER_ORIG__ZN5dyld46Loader18expandAtLoaderPathERNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEPKS0_bPc
 .global _MACHOMERGER_HOOKTRAMPOLINE__ZN5dyld46Loader18expandAtLoaderPathERNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEPKS0_bPc
