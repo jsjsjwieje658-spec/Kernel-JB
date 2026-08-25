@@ -34,15 +34,9 @@
 // Declare HOOK_DYLIB_PATH as an extern variable (defined in roothider_main.c).
 extern const char *HOOK_DYLIB_PATH;
 
-// Relaxin's kSpawnConfig enum (referenced by roothider_main.c's spawn_config_for_executable
-// call site). Kernel-JB's common/common.h doesn't define this enum.
-typedef enum {
-    // Insert SystemHook into the target through DYLD_INSERT_LIBRARIES.
-    kSpawnConfigInject = 1 << 0,
-    // Trust the target executable and any inserted libraries before launch.
-    kSpawnConfigTrust = 1 << 1,
-    // Suspend the spawn/SETEXEC target and have jailbreakd patch it before it runs.
-    kSpawnConfigPatchProcess = 1 << 2,
-} kSpawnConfig;
+// NOTE: kSpawnConfig enum (kSpawnConfigInject, kSpawnConfigTrust,
+// kSpawnConfigPatchProcess) is already defined in Kernel-JB's common/common.h
+// (lines 11-13). The wrapper inherits it via the #include above; no need to
+// redefine here.
 
 #endif
