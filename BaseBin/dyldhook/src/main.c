@@ -9,7 +9,7 @@
 #include "dyld.h"
 #include "dyld_jbinfo.h"
 // RootHide integration for selective injection
-#include <libjailbreak/roothide.h>
+#include <libjailbreak/libjailbreak.h>
 
 bool gDyldHookLog = false;
 

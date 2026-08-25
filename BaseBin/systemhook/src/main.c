@@ -13,7 +13,7 @@
 #include <libjailbreak/jbroot.h>
 #include <libjailbreak/hookd.h>
 // RootHide integration for selective injection and path randomization
-#include <libjailbreak/roothide.h>
+#include <libjailbreak/libjailbreak.h>
 #include "../dyldhook/src/dyld_jbinfo.h"
 #include "common/hookd_external.h"
 #include <choma/CSBlob.h>

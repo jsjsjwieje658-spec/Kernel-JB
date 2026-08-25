@@ -12,7 +12,7 @@
 #include "jbserver/jbserver_local.h"
 #include "hookd_provider.h"
 // RootHide integration for selective injection
-#include <libjailbreak/roothide.h>
+#include <libjailbreak/libjailbreak.h>
 // FIX LỖI 1: query blacklist động
 #include <libjailbreak/jbclient_xpc.h>
 
