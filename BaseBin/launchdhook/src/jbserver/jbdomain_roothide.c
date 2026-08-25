@@ -1,477 +1,293 @@
-// jbdomain_roothide.c - Server-side handler for the RootHide domain (domain 6).
-//
-// This handler runs INSIDE launchd (via launchdhook.dylib). It receives XPC
-// requests from clients (Dopamine app, jbctl, systemhook) and mutates the
-// in-memory RootHide blacklist / enabled flag accordingly.
-//
-// SAFETY:
-//   - This code runs in launchd. A crash here would userspace-reboot the device.
-//   - To minimize risk, every handler is a thin wrapper around the in-process
-//     RootHide API (roothide_init, rothide_add_blacklist, etc.) which is
-//     already part of libjailbreak.dylib and has been compiled + shipped in
-//     prior builds without issues.
-//   - We never touch the spawn path, the kernel primitives, or the boot logo.
-//   - We do NOT perform any disk I/O for blacklist persistence in this first
-//     iteration (persist-to-plist is a follow-up — adding I/O here risks
-//     locking up launchd on a slow disk during early boot).
-//   - Permission: we allow any caller to QUERY the RootHide state (init /
-//     is_enabled / get_jbroot_path / is_blacklisted via the SYSTEMWIDE check
-//     that systemhook performs), but we only allow the Dopamine app to MUTATE
-//     state (set_enabled / add_blacklist / remove_blacklist / apply_settings).
-//     This prevents a malicious tweaked process from disabling RootHide to
-//     unmask itself.
-
+#include <errno.h>
+#include <signal.h>
+#include <stdatomic.h>
 #include "jbserver_global.h"
 
-#include <libjailbreak/codesign.h>
 #include <libjailbreak/libjailbreak.h>
-#include <libjailbreak/roothide.h>
-#include <libproc.h>
-#include <pthread.h>
-#include <string.h>
-#include <stdlib.h>
-#include <stdint.h>  // ROOTHIDE FIX LỖI 2: for uint64_t in new action handlers
+#include <libjailbreak/log.h>
+#include <libjailbreak/roothider.h>
+#include <libjailbreak/codesign.h>
 
-// ---------- In-process RootHide state ----------
-//
-// We keep a small mutable mirror of the RootHide settings here so that the
-// server has authoritative state even if libjailbreak's g_roothide is reset
-// (e.g. across process boundaries — systemhook has its own copy of
-// g_roothide). Both copies are written together so they stay consistent.
-//
-// Writes are guarded by a mutex; reads are lock-free after the first init.
-static struct {
-    bool initialized;
-    bool enabled;
-    pthread_mutex_t mutex;
-} gRoothideServer = {
-    .initialized = false,
-    .enabled = false,
-    .mutex = PTHREAD_MUTEX_INITIALIZER,
-};
-
-// Ensure RootHide is initialized in this process (launchd).
-// Idempotent — safe to call from any handler.
-static void roothide_server_ensure_init(void)
-{
-    if (!gRoothideServer.initialized) {
-        pthread_mutex_lock(&gRoothideServer.mutex);
-        if (!gRoothideServer.initialized) {
-            roothide_init();
-            gRoothideServer.initialized = true;
-        }
-        pthread_mutex_unlock(&gRoothideServer.mutex);
-    }
+int roothide_unsupport_request() {
+    JBLogError("**************************** Unsupported request ****************************");
+    return -1;
 }
 
-// ---------- Permission handler ----------
-//
-// The Dopamine app is allowed to mutate RootHide state. Every other caller is
-// allowed to query (init / is_enabled / get_jbroot_path), which the action
-// handlers below enforce individually. The permission handler here only
-// decides whether the caller is allowed to ENTER the domain at all; we return
-// true for everyone so that the per-action logic can decide.
-//
-// We intentionally do NOT block anyone here — if a tweaked process wants to
-// ask "is RootHide enabled?" we want to answer truthfully. The mutate actions
-// (set_enabled, add/remove_blacklist, apply_settings) re-check that the
-// caller is the Dopamine app.
-static bool roothide_domain_allowed(audit_token_t clientToken)
-{
-    // Allow everyone. Per-action handlers enforce stricter checks where needed.
+bool roothide_domain_allowed(audit_token_t clientToken) {
+    //its fast enough
+    if (isBlacklistedToken(&clientToken)) {
+        return false;
+    }
+
     return true;
 }
 
-// Helper: detect whether the calling process is the Dopamine app.
-// Reuses the same check that jbdomain_dopamine.c uses.
-extern bool dopamine_domain_allowed(audit_token_t clientToken);
+typedef struct {
+    uint32_t Count;
+    uint32_t *Types;
+    uint32_t *Subtypes;
+} preferredArchInfo;
+void recurse_collect_untrusted_cdhashes(const char *path,
+                                        const char *callerImagePath,
+                                        const char *callerExecutablePath,
+                                        const char *workingDir,
+                                        preferredArchInfo *preferredArch,
+                                        cdhash_t **cdhashesOut,
+                                        uint32_t *cdhashCountOut);
 
-#define REQUIRE_DOPAMINE_OR_ROOT(clientToken) \
-    do { \
-        if (!dopamine_domain_allowed(clientToken) && audit_token_to_pid(clientToken) != 1) { \
-            return -3; /* EPERM-style: not allowed */ \
-        } \
-    } while (0)
+static int trust_macho_recurse(const char *machoPath,
+                               const char *dlopenCallerImagePath,
+                               const char *dlopenCallerExecutablePath,
+                               const char *workingDir,
+                               xpc_object_t preferredArchsArray) {
+    if (!machoPath || !dlopenCallerExecutablePath)
+        return -1;
 
-// ---------- Action handlers ----------
-//
-// Each handler matches the jbserver_arg signature: up to 8 void* args.
-// The dispatcher (jbserver.c) fills `args[i]` from the XPC dictionary when
-// `argDesc->out == false`, and expects the handler to write into `argsOut[i]`
-// (== args[i] for out-args) when `argDesc->out == true`.
-//
-// Therefore: in-args arrive as `const char *bundleID`, out-args arrive as
-// `char **outBuf` (caller-allocated pointer slot that we fill with a malloc'd
-// string that the dispatcher will free() after copying into the XPC reply).
+    size_t preferredArchCount = 0;
+    if (preferredArchsArray)
+        preferredArchCount = xpc_array_get_count(preferredArchsArray);
+    uint32_t preferredArchTypes[preferredArchCount];
+    uint32_t preferredArchSubtypes[preferredArchCount];
+    for (size_t i = 0; i < preferredArchCount; i++) {
+        preferredArchTypes[i] = 0;
+        preferredArchSubtypes[i] = UINT32_MAX;
+        xpc_object_t arch = xpc_array_get_value(preferredArchsArray, i);
+        if (xpc_get_type(arch) == XPC_TYPE_DICTIONARY) {
+            preferredArchTypes[i] = xpc_dictionary_get_uint64(arch, "type");
+            preferredArchSubtypes[i] = xpc_dictionary_get_uint64(arch, "subtype");
+        }
+    }
 
-// JBS_ROOTHIDE_INIT (1) — no args
-static int roothide_action_init(void *a1, void *a2, void *a3, void *a4, void *a5, void *a6, void *a7, void *a8)
-{
-    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; (void)a7; (void)a8;
-    roothide_server_ensure_init();
+    preferredArchInfo preferredArch = {preferredArchCount, preferredArchTypes, preferredArchSubtypes};
+
+    cdhash_t *cdhashes = NULL;
+    uint32_t cdhashesCount = 0;
+    recurse_collect_untrusted_cdhashes(machoPath,
+                                       dlopenCallerImagePath,
+                                       dlopenCallerExecutablePath,
+                                       workingDir,
+                                       &preferredArch,
+                                       &cdhashes,
+                                       &cdhashesCount);
+    if (cdhashes && cdhashesCount > 0) {
+        int status = jb_trustcache_add_cdhashes(cdhashes, cdhashesCount);
+        if (status != 0) {
+            JBLogError("trustcache recurse publish path=%s entries=%u status=%d", machoPath, cdhashesCount, status);
+        }
+        free(cdhashes);
+        return status;
+    }
     return 0;
 }
 
-// JBS_ROOTHIDE_SET_ENABLED (2) — in: bool enabled
-//   Caller must be the Dopamine app (or launchd itself, pid 1).
-static int roothide_action_set_enabled(audit_token_t *callerToken, bool *enabled)
-{
-    if (!callerToken || !enabled) return -1;
-    REQUIRE_DOPAMINE_OR_ROOT(*callerToken);
+int roothide_trust_executable_recurse(const char *executablePath,
+                                      const char *processWorkingDir,
+                                      xpc_object_t preferredArchsArray) {
+    return trust_macho_recurse(executablePath, NULL, executablePath, processWorkingDir, preferredArchsArray);
+}
 
-    roothide_server_ensure_init();
-    pthread_mutex_lock(&gRoothideServer.mutex);
-    gRoothideServer.enabled = *enabled;
-    pthread_mutex_unlock(&gRoothideServer.mutex);
+static int roothide_trust_library_recurse(const char *libraryPath,
+                                          const char *callerLibraryPath,
+                                          const char *callerExecutablePath,
+                                          const char *currentWorkingDir) {
+    // When trusting a library that's dlopened at runtime, we need to pass the caller path
+    // This is to support dlopen("@executable_path/whatever", RTLD_NOW) and stuff like that
+    // (Yes that is a thing >.<)
+    // Also we need to pass the path of the image that called dlopen due to @loader_path, sigh...
+    return trust_macho_recurse(libraryPath, callerLibraryPath, callerExecutablePath, currentWorkingDir, NULL);
+}
 
-    // Mirror to libjailbreak state so that other processes reading
-    // roothide_*(... see same mirror in their own address space.
-    // (Note: each process has its own copy of g_roothide, so this mirror is
-    // only meaningful for launchd-local callers. Cross-process consistency is
-    // achieved via the env var propagation in spawn_hook.c.)
+static int roothide_jailbroken_check(audit_token_t *callerToken, bool *jailbroken) {
+    *jailbroken = true;
     return 0;
 }
 
-// JBS_ROOTHIDE_IS_ENABLED (3) — out: bool enabled
-static int roothide_action_is_enabled(bool *enabledOut)
-{
-    if (!enabledOut) return -1;
-    roothide_server_ensure_init();
-    pthread_mutex_lock(&gRoothideServer.mutex);
-    *enabledOut = gRoothideServer.enabled;
-    pthread_mutex_unlock(&gRoothideServer.mutex);
+static int roothide_palehide_present(audit_token_t *callerToken, bool *palehide) {
+    static bool result = false;
+
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        if (jbinfo(palera1n) == 'hide') {
+            result = true;
+        }
+    });
+
+    *palehide = result;
     return 0;
 }
 
-// JBS_ROOTHIDE_ADD_BLACKLIST (4) — in: string bundleID
-//   Caller must be the Dopamine app.
-static int roothide_action_add_blacklist(audit_token_t *callerToken, const char *bundleID)
-{
-    if (!callerToken || !bundleID || !bundleID[0]) return -1;
-    REQUIRE_DOPAMINE_OR_ROOT(*callerToken);
-
-    roothide_server_ensure_init();
-    return rothide_add_blacklist(bundleID);
-}
-
-// JBS_ROOTHIDE_REMOVE_BLACKLIST (5) — in: string bundleID
-//   Caller must be the Dopamine app.
-static int roothide_action_remove_blacklist(audit_token_t *callerToken, const char *bundleID)
-{
-    if (!callerToken || !bundleID || !bundleID[0]) return -1;
-    REQUIRE_DOPAMINE_OR_ROOT(*callerToken);
-
-    roothide_server_ensure_init();
-    return rothide_remove_blacklist(bundleID);
-}
-
-// JBS_ROOTHIDE_GET_JBROOT_PATH (6) — out: string jbrootPath
-//   Open to all callers — knowing the jbroot path doesn't grant any extra
-//   power (it is already discoverable via JBS_DOMAIN_SYSTEMWIDE /
-//   JBS_SYSTEMWIDE_GET_JBROOT).
-static int roothide_action_get_jbroot_path(char **jbrootPathOut)
-{
-    if (!jbrootPathOut) return -1;
-    roothide_server_ensure_init();
-
-    const char *jbroot = rothide_get_jbroot();
-    if (!jbroot) {
-        *jbrootPathOut = NULL;
+static int roothide_blacklist_check(audit_token_t *callerToken,
+                                    const char *checktype,
+                                    xpc_object_t checkvalue,
+                                    bool *blacklisted) {
+    if (strcmp(checktype, "pid") == 0) {
+        pid_t pid = (pid_t)xpc_uint64_get_value(checkvalue);
+        if (pid > 1) {
+            *blacklisted = isBlacklistedPid(pid);
+            return 0;
+        }
+    } else if (strcmp(checktype, "path") == 0) {
+        const char *path = xpc_string_get_string_ptr(checkvalue);
+        if (path) {
+            *blacklisted = isBlacklistedPath(path);
+            return 0;
+        }
+    } else if (strcmp(checktype, "bundle") == 0) {
+        const char *bundle = xpc_string_get_string_ptr(checkvalue);
+        if (bundle) {
+            *blacklisted = isBlacklistedApp(bundle);
+            return 0;
+        }
+    } else {
+        JBLogError("Invalid checktype: %s", checktype);
         return -1;
     }
-    // Dispatcher will free() this after copying into the XPC reply.
-    *jbrootPathOut = strdup(jbroot);
+    JBLogError("Failed to check blacklist for %s : %s", checktype, xpc_type_get_name(xpc_get_type(checkvalue)));
+    return -1;
+}
+
+static int roothide_jailbreakd_lookup(audit_token_t *callerToken, xpc_object_t *portOut) {
+    *portOut = xpc_mach_send_create(jailbreakdClientPort());
     return 0;
 }
 
-// JBS_ROOTHIDE_APPLY_SETTINGS (7) — in: bool shouldReboot
-//   Caller must be the Dopamine app.
-//
-//   In a future version this could trigger a userspace reboot to make the
-//   new blacklist take effect for already-running processes. For now we just
-//   return success — newly spawned processes will pick up the updated
-//   blacklist via spawn_hook.c (which queries the in-memory state on each
-//   posix_spawn). shouldReboot is intentionally ignored to avoid accidentally
-//   triggering a reboot during setup.
-static int roothide_action_apply_settings(audit_token_t *callerToken, bool *shouldReboot)
-{
-    if (!callerToken) return -1;
-    REQUIRE_DOPAMINE_OR_ROOT(*callerToken);
-    (void)shouldReboot; // intentionally ignored — see comment above
-    roothide_server_ensure_init();
-    return 0;
-}
+static atomic_bool jailbreakdCheckedIn = false;
 
-// JBS_ROOTHIDE_IS_BLACKLISTED (8) — in: string bundleID, out: bool blacklisted
-//   Open to all callers (systemhook chạy trong mọi process cần query).
-//   FIX LỖI 1: Trước đây should_enable_tweaks trong systemhook chỉ check env
-//   var ROOTHIDE_CLEAN_MODE_ENV. Tuy nhiên env var có thể bị thiếu trong
-//   nhiều path (early boot, xpcproxy, apps launch từ SpringBoard mà không qua
-//   posix_spawn_hook của launchd). Action này cho phép systemhook query trực
-//   tiếp trạng thái blacklist từ launchd → đảm bảo app banking/detection luôn
-//   được skip injection.
-static int roothide_action_is_blacklisted(const char *bundleID, bool *blacklistedOut)
-{
-    if (!bundleID || !bundleID[0] || !blacklistedOut) return -1;
-    roothide_server_ensure_init();
-    *blacklistedOut = roothide_is_blacklisted(bundleID);
-    return 0;
-}
+static int roothide_jailbreakd_checkin(audit_token_t *callerToken, xpc_object_t *portOut) {
+    pid_t pid = audit_token_to_pid(*callerToken);
+    uid_t uid = audit_token_to_euid(*callerToken);
 
-// ROOTHIDE FIX LỖI 2: Full APIs for RootHide app compatibility
-// These handlers expose the new roothide_* APIs via XPC to clients
-// (RootHide app, systemhook, jbctl).
-
-// JBS_ROOTHIDE_GET_BLACKLIST_COUNT (9) — out: uint64 count
-//   Open to all callers (RootHide app needs this for UI display).
-//   Note: Uses uint64 because jbserver only supports JBS_TYPE_UINT64, not INT.
-static int roothide_action_get_blacklist_count(uint64_t *countOut)
-{
-    if (!countOut) return -1;
-    roothide_server_ensure_init();
-    *countOut = (uint64_t)rothide_get_blacklist_count();
-    return 0;
-}
-
-// JBS_ROOTHIDE_GET_BLACKLIST_ENTRY (10) — in: uint64 index, out: string entry
-//   Open to all callers (RootHide app needs this to display each entry).
-static int roothide_action_get_blacklist_entry(uint64_t *index, char **entryOut)
-{
-    if (!index || !entryOut) return -1;
-    roothide_server_ensure_init();
-    const char *entry = rothide_get_blacklist_entry((int)*index);
-    if (!entry) {
-        *entryOut = NULL;
+    if (uid != 0)
         return -1;
-    }
-    *entryOut = strdup(entry);
-    return 0;
-}
 
-// JBS_ROOTHIDE_GET_BLACKLIST_STRING (11) — out: string blacklist
-//   Returns the full blacklist as a comma-separated string.
-//   Used by RootHide app to display current blacklist in an alert.
-static int roothide_action_get_blacklist_string(char **blacklistOut)
-{
-    if (!blacklistOut) return -1;
-    roothide_server_ensure_init();
-    // Allocate a large enough buffer (256 entries * 256 chars each)
-    char *buf = malloc(256 * 256);
-    if (!buf) return -1;
-    if (rothide_get_blacklist_string(buf, 256 * 256) != 0) {
-        free(buf);
+    setJailbreakdProcess(pid);
+
+    *portOut = xpc_mach_recv_create(jailbreakdServerPort());
+    if (!*portOut)
         return -1;
+
+    atomic_store_explicit(&jailbreakdCheckedIn, true, memory_order_release);
+    return 0;
+}
+
+static int roothide_jailbreakd_checkin_status(bool *checkedIn) {
+    *checkedIn = atomic_load_explicit(&jailbreakdCheckedIn, memory_order_acquire);
+    return 0;
+}
+
+static int roothide_dyld_patch_enabled(audit_token_t *callerToken, bool *enabled) {
+    (void)callerToken;
+    *enabled = false;
+    return 0;
+}
+
+static int roothide_set_dyld_patch(audit_token_t *callerToken, bool enabled) {
+    pid_t pid = audit_token_to_pid(*callerToken);
+    if (enabled) {
+        JBLogError("roothide_set_dyld_patch: caller=%d requested enabled=1; rejected policy=stock-dyld", pid);
+        return ENOTSUP;
     }
-    *blacklistOut = buf;
+
     return 0;
 }
 
-// JBS_ROOTHIDE_CLEAR_BLACKLIST (12) — no args
-//   Caller must be the Dopamine app (or launchd itself, pid 1).
-//   Clears all blacklist entries. Used by RootHide app's "Clear All" button.
-static int roothide_action_clear_blacklist(audit_token_t *callerToken)
-{
-    if (!callerToken) return -1;
-    REQUIRE_DOPAMINE_OR_ROOT(*callerToken);
-    roothide_server_ensure_init();
-    return rothide_clear_blacklist();
-}
-
-// JBS_ROOTHIDE_GET_SESSION_ID (13) — out: uint64 sessionID
-//   Open to all callers. Returns the jailbreak session ID.
-static int roothide_action_get_session_id(uint64_t *sessionIDOut)
-{
-    if (!sessionIDOut) return -1;
-    roothide_server_ensure_init();
-    *sessionIDOut = rothide_get_session_id();
-    return 0;
-}
-
-// JBS_ROOTHIDE_GET_JBROOT_UUID (14) — out: string uuid
-//   Open to all callers. Returns the jbroot preboot UUID (36 chars).
-static int roothide_action_get_jbroot_uuid(char **uuidOut)
-{
-    if (!uuidOut) return -1;
-    roothide_server_ensure_init();
-    char *buf = malloc(37);
-    if (!buf) return -1;
-    if (rothide_get_jbroot_uuid(buf, 37) != 0) {
-        free(buf);
-        return -1;
-    }
-    *uuidOut = buf;
-    return 0;
-}
-
-// JBS_ROOTHIDE_TRANSLATE_PATH (15) — in: string path, out: string translated
-//   Open to all callers. Translates /var/jb style paths to jbroot paths.
-static int roothide_action_translate_path(const char *path, char **translatedOut)
-{
-    if (!path || !path[0] || !translatedOut) return -1;
-    roothide_server_ensure_init();
-    char *buf = malloc(PATH_MAX);
-    if (!buf) return -1;
-    if (rothide_translate_path(path, buf, PATH_MAX) != 0) {
-        free(buf);
-        return -1;
-    }
-    *translatedOut = buf;
-    return 0;
-}
-
-// JBS_ROOTHIDE_IS_APP_HIDDEN (16) — in: string bundleID, out: bool hidden
-//   Open to all callers. Alias for is_blacklisted (kept separate for semantic
-//   clarity — "is_app_hidden" is what RootHide app's UI conceptually checks).
-static int roothide_action_is_app_hidden(const char *bundleID, bool *hiddenOut)
-{
-    if (!bundleID || !bundleID[0] || !hiddenOut) return -1;
-    roothide_server_ensure_init();
-    *hiddenOut = rothide_is_app_hidden(bundleID);
-    return 0;
-}
-
-// ---------- Domain descriptor ----------
-//
-// The actions array MUST be in the same order as the JBS_ROOTHIDE_* enum in
-// jbserver_domains.h. Index 0 of actions[] corresponds to action ID 1
-// (the dispatcher in jbserver.c uses 1-based indexing).
-struct jbserver_domain gRoothideDomain = {
-    .permissionHandler = roothide_domain_allowed,
-    .actions = {
-        // JBS_ROOTHIDE_INIT (1)
+struct jbserver_domain gRootHideDomain = {
+	.permissionHandler = roothide_domain_allowed,
+	.actions = {
+		//JBS_ROOTHIDE_JAILBROKEN_CHECK
         {
-            .handler = roothide_action_init,
-            .args = (jbserver_arg[]){ { 0 } },
-        },
-        // JBS_ROOTHIDE_SET_ENABLED (2)
-        {
-            .handler = roothide_action_set_enabled,
-            .args = (jbserver_arg[]){
-                { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
-                { .name = "enabled",      .type = JBS_TYPE_BOOL,         .out = false },
-                { 0 },
+            .handler = roothide_jailbroken_check,
+            .args = (jbserver_arg[]) {
+                    { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
+                    { .name = "jailbroken", .type = JBS_TYPE_BOOL, .out = true },
+                    { 0 },
             },
         },
-        // JBS_ROOTHIDE_IS_ENABLED (3)
+		//JBS_ROOTHIDE_PALEHIDE_PRESENT
         {
-            .handler = roothide_action_is_enabled,
-            .args = (jbserver_arg[]){
-                { .name = "enabled", .type = JBS_TYPE_BOOL, .out = true },
-                { 0 },
+            .handler = roothide_palehide_present,
+            .args = (jbserver_arg[]) {
+                    { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
+                    { .name = "palehide", .type = JBS_TYPE_BOOL, .out = true },
+                    { 0 },
             },
         },
-        // JBS_ROOTHIDE_ADD_BLACKLIST (4)
+		//JBS_ROOTHIDE_BLACKLIST_CHECK
         {
-            .handler = roothide_action_add_blacklist,
-            .args = (jbserver_arg[]){
-                { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
-                { .name = "bundleID",     .type = JBS_TYPE_STRING,       .out = false },
-                { 0 },
+            .handler = roothide_blacklist_check,
+            .args = (jbserver_arg[]) {
+                    { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
+					{ .name = "checktype", .type = JBS_TYPE_STRING, .out = false },
+					{ .name = "checkvalue", .type = JBS_TYPE_XPC_GENERIC, .out = false },
+                    { .name = "blacklisted", .type = JBS_TYPE_BOOL, .out = true },
+                    { 0 },
             },
         },
-        // JBS_ROOTHIDE_REMOVE_BLACKLIST (5)
+		//JBS_ROOTHIDE_JAILBREAKD_LOOKUP
         {
-            .handler = roothide_action_remove_blacklist,
-            .args = (jbserver_arg[]){
-                { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
-                { .name = "bundleID",     .type = JBS_TYPE_STRING,       .out = false },
-                { 0 },
+            .handler = roothide_jailbreakd_lookup,
+            .args = (jbserver_arg[]) {
+                    { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
+                    { .name = "port", .type = JBS_TYPE_XPC_GENERIC, .out = true },
+                    { 0 },
             },
         },
-        // JBS_ROOTHIDE_GET_JBROOT_PATH (6)
+		//JBS_ROOTHIDE_JAILBREAKD_CHECKIN
         {
-            .handler = roothide_action_get_jbroot_path,
-            .args = (jbserver_arg[]){
-                { .name = "jbrootPath", .type = JBS_TYPE_STRING, .out = true },
-                { 0 },
+            .handler = roothide_jailbreakd_checkin,
+            .args = (jbserver_arg[]) {
+                    { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
+                    { .name = "port", .type = JBS_TYPE_XPC_GENERIC, .out = true },
+                    { 0 },
             },
         },
-        // JBS_ROOTHIDE_APPLY_SETTINGS (7)
+		// JBS_ROOTHIDE_TRUST_LIBRARY_RECURSE
+		{
+			.handler = roothide_trust_library_recurse,
+			.args = (jbserver_arg[]){
+				{ .name = "library-path", .type = JBS_TYPE_STRING, .out = false },
+				{ .name = "caller-library-path", .type = JBS_TYPE_STRING, .out = false },
+				{ .name = "caller-executable-path", .type = JBS_TYPE_STRING, .out = false },
+				{ .name = "current-working-dir", .type = JBS_TYPE_STRING, .out = false },
+				{ 0 },
+			},
+		},
+		// JBS_ROOTHIDE_TRUST_EXECUTABLE_RECURSE
+		{
+			.handler = roothide_trust_executable_recurse,
+			.args = (jbserver_arg[]){
+				{ .name = "executable-path", .type = JBS_TYPE_STRING, .out = false },
+				{ .name = "process-working-dir", .type = JBS_TYPE_STRING, .out = false },
+				{ .name = "preferred-archs", .type = JBS_TYPE_ARRAY, .out = false },
+				{ 0 },
+			},
+		},
+		//JBS_ROOTHIDE_DYLD_PATCH_ENABLED_GET
         {
-            .handler = roothide_action_apply_settings,
-            .args = (jbserver_arg[]){
-                { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
-                { .name = "shouldReboot", .type = JBS_TYPE_BOOL,        .out = false },
-                { 0 },
+            .handler = roothide_dyld_patch_enabled,
+            .args = (jbserver_arg[]) {
+                    { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
+                    { .name = "enabled", .type = JBS_TYPE_BOOL, .out = true },
+                    { 0 },
             },
         },
-        // JBS_ROOTHIDE_IS_BLACKLISTED (8) — FIX LỖI 1
+		//JBS_ROOTHIDE_DYLD_PATCH_ENABLED_SET
         {
-            .handler = roothide_action_is_blacklisted,
-            .args = (jbserver_arg[]){
-                { .name = "bundleID",     .type = JBS_TYPE_STRING, .out = false },
-                { .name = "blacklisted",  .type = JBS_TYPE_BOOL,   .out = true  },
-                { 0 },
+            .handler = roothide_set_dyld_patch,
+            .args = (jbserver_arg[]) {
+                    { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
+                    { .name = "enabled", .type = JBS_TYPE_BOOL, .out = false },
+                    { 0 },
             },
         },
-        // ROOTHIDE FIX LỖI 2: Full APIs for RootHide app compatibility
-        // JBS_ROOTHIDE_GET_BLACKLIST_COUNT (9)
+		//JBS_ROOTHIDE_JAILBREAKD_CHECKIN_STATUS
         {
-            .handler = roothide_action_get_blacklist_count,
-            .args = (jbserver_arg[]){
-                { .name = "count", .type = JBS_TYPE_UINT64, .out = true },
-                { 0 },
+            .handler = roothide_jailbreakd_checkin_status,
+            .args = (jbserver_arg[]) {
+                    { .name = "checked-in", .type = JBS_TYPE_BOOL, .out = true },
+                    { 0 },
             },
         },
-        // JBS_ROOTHIDE_GET_BLACKLIST_ENTRY (10)
-        {
-            .handler = roothide_action_get_blacklist_entry,
-            .args = (jbserver_arg[]){
-                { .name = "index", .type = JBS_TYPE_UINT64, .out = false },
-                { .name = "entry", .type = JBS_TYPE_STRING, .out = true  },
-                { 0 },
-            },
-        },
-        // JBS_ROOTHIDE_GET_BLACKLIST_STRING (11)
-        {
-            .handler = roothide_action_get_blacklist_string,
-            .args = (jbserver_arg[]){
-                { .name = "blacklist", .type = JBS_TYPE_STRING, .out = true },
-                { 0 },
-            },
-        },
-        // JBS_ROOTHIDE_CLEAR_BLACKLIST (12)
-        {
-            .handler = roothide_action_clear_blacklist,
-            .args = (jbserver_arg[]){
-                { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
-                { 0 },
-            },
-        },
-        // JBS_ROOTHIDE_GET_SESSION_ID (13)
-        {
-            .handler = roothide_action_get_session_id,
-            .args = (jbserver_arg[]){
-                { .name = "sessionID", .type = JBS_TYPE_UINT64, .out = true },
-                { 0 },
-            },
-        },
-        // JBS_ROOTHIDE_GET_JBROOT_UUID (14)
-        {
-            .handler = roothide_action_get_jbroot_uuid,
-            .args = (jbserver_arg[]){
-                { .name = "uuid", .type = JBS_TYPE_STRING, .out = true },
-                { 0 },
-            },
-        },
-        // JBS_ROOTHIDE_TRANSLATE_PATH (15)
-        {
-            .handler = roothide_action_translate_path,
-            .args = (jbserver_arg[]){
-                { .name = "path",       .type = JBS_TYPE_STRING, .out = false },
-                { .name = "translated", .type = JBS_TYPE_STRING, .out = true  },
-                { 0 },
-            },
-        },
-        // JBS_ROOTHIDE_IS_APP_HIDDEN (16)
-        {
-            .handler = roothide_action_is_app_hidden,
-            .args = (jbserver_arg[]){
-                { .name = "bundleID", .type = JBS_TYPE_STRING, .out = false },
-                { .name = "hidden",  .type = JBS_TYPE_BOOL,   .out = true  },
-                { 0 },
-            },
-        },
-        { 0 },
-    },
+		{ 0 },
+	},
 };

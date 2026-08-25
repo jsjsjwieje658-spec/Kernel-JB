@@ -1,15 +1,15 @@
 #all: mktemp choma
 
 #mktemp:
-#	rm -rf .build-dir
-#	mkdir .build-dir
+#       rm -rf .build-dir
+#       mkdir .build-dir
 
 #choma:
-#	$(MAKE) -C ChOma TARGET=ios DISABLE_SIGNING=1 DYLIB_LDFLAGS="-install_name @loader_path/libchoma.dylib" $@
+#       $(MAKE) -C ChOma TARGET=ios DISABLE_SIGNING=1 DYLIB_LDFLAGS="-install_name @loader_path/libchoma.dylib" $@
 
 all: basebin.tar
 
-subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks dopamine
+subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks dopamine roothidehooks
 
 ChOma: .build .include
 	@$(MAKE) -C ChOma TARGET=ios DISABLE_SIGNING=1 DISABLE_TESTS=1 DYLIB_LDFLAGS="-install_name @loader_path/libchoma.dylib"
@@ -38,6 +38,8 @@ libjailbreak: .build .include ChOma
 	@cp libjailbreak/libjailbreak.dylib .build
 	@mkdir -p .include/libjailbreak
 	@cp libjailbreak/src/*.h .include/libjailbreak
+	@mkdir -p .include/libjailbreak/roothider
+	@cp libjailbreak/src/roothider/*.h .include/libjailbreak/roothider
 
 systemhook: .build .include libjailbreak
 	$(MAKE) -C systemhook
@@ -78,6 +80,13 @@ rootlesshooks: .build .include libjailbreak
 dopamine: .build .include libjailbreak XPF ChOma
 	$(MAKE) -C dopamine
 	@cp dopamine/dopamine .build
+
+# RootHide port: build the roothidehooks.dylib subproject (per-process hooks for cfprefsd/lsd/SpringBoard/runningboardd).
+# Depends on libjailbreak.dylib (in .build/) and libroothide.tbd (in _external/lib/).
+# The roothidehooks Makefile writes its output directly to ../.build/roothidehooks.dylib,
+# which is automatically picked up by basebin.tar and basebin.tc trustcache.
+roothidehooks: .build .include libjailbreak
+	$(MAKE) -C roothidehooks
 
 .build:
 	rm -rf .build
@@ -124,9 +133,10 @@ clean:
 	@$(MAKE) -C dyldhook $@
 	@$(MAKE) -C dopamine $@
 	@$(MAKE) -C hookd $@
+	@$(MAKE) -C roothidehooks $@
 	@rm -rf .build
 	@rm -rf .include
 	@rm -rf basebin.tar
 	@rm -rf basebin.tc
 
-.PHONY: clean .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks basebin.tc dyldhook basebin.tar
+.PHONY: clean .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks basebin.tc dyldhook basebin.tar roothidehooks

@@ -58,34 +58,31 @@ enum {
 };
 
 // Domain: RootHide
-// Reachable from the Dopamine app (for UI controls) and from any process that
-// needs to query the RootHide blacklist (e.g. systemhook deciding whether to
-// inject tweaks into a blacklisted app).
+// Reachable from the Dopamine app (for jailbreakd lookup/checkin) and from
+// any process that needs to query the RootHide blacklist (e.g. systemhook
+// deciding whether to inject tweaks into a blacklisted app).
+//
+// Ported from Relaxin upstream RootHide fork. Action codes match Relaxin's
+// `jbclient_roothide.c` and `jbdomain_roothide.c` exactly.
 //
 // NOTE: the dispatcher in jbserver.c walks `server->domains[]` by index and
 // aborts on NULL entries, so the array MUST be densely packed. Therefore
 // JBS_DOMAIN_ROOTHIDE is set to 6 (immediately after JBS_DOMAIN_DOPAMINE=5)
-// rather than 10. If upstream Dopamine later adds domain 6, this value will
-// need to move (and the array in jbserver_global.c updated accordingly).
+// rather than 5 (Relaxin's value) to preserve Kernel-JB's existing DOPAMINE
+// domain. If upstream Dopamine later adds domain 6, this value will need to
+// move (and the array in jbserver_global.c updated accordingly).
 #define JBS_DOMAIN_ROOTHIDE 6
 enum {
-    JBS_ROOTHIDE_INIT = 1,
-    JBS_ROOTHIDE_SET_ENABLED,
-    JBS_ROOTHIDE_IS_ENABLED,
-    JBS_ROOTHIDE_ADD_BLACKLIST,
-    JBS_ROOTHIDE_REMOVE_BLACKLIST,
-    JBS_ROOTHIDE_GET_JBROOT_PATH,
-    JBS_ROOTHIDE_APPLY_SETTINGS,
-    JBS_ROOTHIDE_IS_BLACKLISTED, // FIX LỖI 1: query blacklist động
-    // ROOTHIDE FIX LỖI 2: Full APIs for RootHide app compatibility
-    JBS_ROOTHIDE_GET_BLACKLIST_COUNT,   // Get number of blacklisted apps
-    JBS_ROOTHIDE_GET_BLACKLIST_ENTRY,   // Get blacklist entry by index
-    JBS_ROOTHIDE_GET_BLACKLIST_STRING,  // Get full blacklist as comma-separated string
-    JBS_ROOTHIDE_CLEAR_BLACKLIST,       // Clear all blacklist entries
-    JBS_ROOTHIDE_GET_SESSION_ID,        // Get jailbreak session ID
-    JBS_ROOTHIDE_GET_JBROOT_UUID,      // Get jbroot preboot UUID
-    JBS_ROOTHIDE_TRANSLATE_PATH,        // Translate /var/jb style path to jbroot path
-    JBS_ROOTHIDE_IS_APP_HIDDEN,         // Check if app should be hidden (alias for is_blacklisted)
+    JBS_ROOTHIDE_JAILBROKEN_CHECK = 1,
+    JBS_ROOTHIDE_PALEHIDE_PRESENT,
+    JBS_ROOTHIDE_BLACKLIST_CHECK,
+    JBS_ROOTHIDE_JAILBREAKD_LOOKUP,
+    JBS_ROOTHIDE_JAILBREAKD_CHECKIN,
+    JBS_ROOTHIDE_TRUST_LIBRARY_RECURSE,
+    JBS_ROOTHIDE_TRUST_EXECUTABLE_RECURSE,
+    JBS_ROOTHIDE_DYLD_PATCH_ENABLED_GET,
+    JBS_ROOTHIDE_DYLD_PATCH_ENABLED_SET,
+    JBS_ROOTHIDE_JAILBREAKD_CHECKIN_STATUS,
 };
 
 #define JBS_BOOMERANG_DONE 42

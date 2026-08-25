@@ -2,28 +2,23 @@ TARGET = libjailbreak.dylib
 
 CC = clang
 
-# ROOTHIDE FIX LỖI 2: Added -x objective-c++ for .mm files (Objective-C++)
-# This is needed to compile roothide_objc.mm which exports the C++ function
-# `jbroot(NSString*)` (mangled: __Z6jbrootP8NSString) that the RootHide
-# app (com.roothide.manager) imports at runtime.
-#
-# Without .mm support, the RootHide app would fail to load with:
-#   "Symbol not found: __Z6jbrootP8NSString"
-CFLAGS = -framework Foundation -framework CoreServices -framework Security -framework IOKit -framework IOSurface -framework IOMobileFramebuffer -framework CoreGraphics -framework ImageIO -lMobileGestalt -I../.include -I../_external/modules/litehook/src -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -arch arm64 -arch arm64e -miphoneos-version-min=15.0 -fobjc-arc -dynamiclib -install_name @loader_path/$(TARGET) -I$(shell brew --prefix)/opt/libarchive/include -D BUILD_STANDALONE=$(BUILD_STANDALONE)
-# ROOTHIDE FIX LỖI 2: Added -lc++ (C++ runtime) because roothide_objc.mm is
-# compiled as Objective-C++ and references ___gxx_personality_v0 (C++
-# exception handling personality routine). Without -lc++, the linker fails
-# with: Undefined symbols for architecture arm64: "___gxx_personality_v0"
+# RootHide port: build the roothider/ subdirectory (Relaxin upstream fork) into libjailbreak.dylib.
+# The old flat roothide.{c,h}, roothide_objc.mm, roothide_hide.c files have been removed.
+# The upstream canonical header at _external/include/roothide.h declares jbroot()/rootfs()/jbrand()
+# which are provided by libroothide.dylib at runtime (from RootHide bootstrap).
+CFLAGS = -framework Foundation -framework CoreServices -framework Security -framework IOKit -framework IOSurface -framework IOMobileFramebuffer -framework CoreGraphics -framework ImageIO -lMobileGestalt -I../.include -I../_external/modules/litehook/src -I../_external/include -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -arch arm64 -arch arm64e -miphoneos-version-min=15.0 -fobjc-arc -dynamiclib -install_name @loader_path/$(TARGET) -I$(shell brew --prefix)/opt/libarchive/include -D BUILD_STANDALONE=$(BUILD_STANDALONE)
+# -lc++ is required for the C++ files in src/roothider/ (blacklist.cpp uses C++ STL).
 LDFLAGS = -larchive -lbsm -lc++ -L../.build -F ../_external/frameworks -lchoma
+
+CORE_SOURCES = $(wildcard src/*.c src/*.m src/*.S)
+ROOTHIDER_SOURCES = $(wildcard src/roothider/*.c src/roothider/*.m src/roothider/*.cpp)
 
 sign: $(TARGET)
 	@ldid -Cadhoc -S $<
 
-# ROOTHIDE FIX LỖI 2: Include src/*.mm (Objective-C++ files) in source list
-# This compiles roothide_objc.mm which exports the jbroot(NSString*) symbol
-# required by the RootHide app.
-$(TARGET): $(wildcard src/*.c src/*.m src/*.mm src/*.S ../_external/modules/litehook/src/*.c)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+# Build with: core libjailbreak sources + roothider/ subdirectory + litehook external module.
+$(TARGET): Makefile $(CORE_SOURCES) $(ROOTHIDER_SOURCES) $(wildcard ../_external/modules/litehook/src/*.c)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(filter-out Makefile,$^)
 
 clean:
 	@rm -f $(TARGET)

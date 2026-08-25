@@ -218,56 +218,58 @@ bool should_enable_tweaks(void)
         }
         // ========== END ROOTHIDE CHECK ==========
 
-	// FIX LỖI 1: Dynamic blacklist query.
-	// Env var check ở trên CHỈ hiệu quả khi spawn_hook của launchd đã set
-	// env var đúng trước khi spawn child. Tuy nhiên có nhiều path mà env
-	// var không được truyền đúng:
-	//   1. App launch từ SpringBoard (SpringBoard execve trực tiếp, không qua launchd)
-	//   2. App launch từ BackBoard / FrontBoard
-	//   3. xpcproxy spawn daemon (xpcproxy nhận env từ launchd, nhưng launchd
-	//      không biết app nào sắp chạy)
-	//   4. App được mở từ Notification / Widget / Quick Action
-	//
-	// Để đảm bảo app banking/detection luôn được skip injection, query động
-	// blacklist từ launchd. Nhược điểm: +1 XPC round-trip mỗi launch, nhưng
-	// chi phí ~0.5ms, không đáng kể so với thời gian load dylib.
-	//
-	// Fail-safe: nếu không kết nối được tới launchd (early boot, trong
-	// xpcproxy đầu tiên), return true (cho phép tweaks) để tránh bootloop.
-	// Sau khi launchdhook install xong, lần query sau sẽ thành công.
-	{
-		// Lấy bundle ID của process hiện tại từ executable path.
-		// Heuristic: nếu executable path có dạng /private/var/containers/Bundle/Application/<UUID>/<Bundle>.app/<Binary>
-		// thì bundle ID chính là <Bundle> (chưa chính xác 100%, nhưng đủ tốt
-		// cho các app banking phổ biến như com.vcb.IB → "IB" hoặc com.vietinbank.iBank → "iBank").
-		// Cách chính xác hơn: đọc Info.plist trong cùng thư mục với executable.
-		// Nhưng để tránh I/O overhead, ta chỉ query khi env var không có.
-		// Nếu là system binary (trong /usr/, /bin/, /sbin/) → skip query.
-		if (gExecutablePath[0] != '\0' &&
-		    strstr(gExecutablePath, "/var/containers/Bundle/Application/") != NULL) {
-			// Đây là app user-installed → query blacklist động
-			// Lấy bundle ID từ Info.plist
-			char infoPlistPath[PATH_MAX];
-			snprintf(infoPlistPath, sizeof(infoPlistPath), "%s", gExecutablePath);
-			// Tìm "/<binary_name>" cuối cùng trong path
-			char *lastSlash = strrchr(infoPlistPath, '/');
-			if (lastSlash) {
-				// Cắt bớt để lấy thư mục .app
-				*lastSlash = '\0';
-				char *appDir = strrchr(infoPlistPath, '/');
-				if (appDir && strstr(appDir, ".app")) {
-					// Bundle ID = directory name trước .app
-					char *bundleIDStart = appDir + 1; // skip '/'
-					char *dotApp = strstr(bundleIDStart, ".app");
-					if (dotApp) {
-						*dotApp = '\0';
-						if (jbclient_roothide_is_blacklisted(bundleIDStart)) {
-							// FIX: cũng set env để các dylib khác trong cùng process
-							// (nếu được inject trước khi check này) biết clean mode đang on
-							setenv(ROOTHIDE_CLEAN_MODE_ENV, "1", 1);
-							return false;
-						}
-					}
+        // FIX LỖI 1: Dynamic blacklist query.
+        // Env var check ở trên CHỈ hiệu quả khi spawn_hook của launchd đã set
+        // env var đúng trước khi spawn child. Tuy nhiên có nhiều path mà env
+        // var không được truyền đúng:
+        //   1. App launch từ SpringBoard (SpringBoard execve trực tiếp, không qua launchd)
+        //   2. App launch từ BackBoard / FrontBoard
+        //   3. xpcproxy spawn daemon (xpcproxy nhận env từ launchd, nhưng launchd
+        //      không biết app nào sắp chạy)
+        //   4. App được mở từ Notification / Widget / Quick Action
+        //
+        // Để đảm bảo app banking/detection luôn được skip injection, query động
+        // blacklist từ launchd. Nhược điểm: +1 XPC round-trip mỗi launch, nhưng
+        // chi phí ~0.5ms, không đáng kể so với thời gian load dylib.
+        //
+        // Fail-safe: nếu không kết nối được tới launchd (early boot, trong
+        // xpcproxy đầu tiên), return true (cho phép tweaks) để tránh bootloop.
+        // Sau khi launchdhook install xong, lần query sau sẽ thành công.
+        {
+                // Lấy bundle ID của process hiện tại từ executable path.
+                // Heuristic: nếu executable path có dạng /private/var/containers/Bundle/Application/<UUID>/<Bundle>.app/<Binary>
+                // thì bundle ID chính là <Bundle> (chưa chính xác 100%, nhưng đủ tốt
+                // cho các app banking phổ biến như com.vcb.IB → "IB" hoặc com.vietinbank.iBank → "iBank").
+                // Cách chính xác hơn: đọc Info.plist trong cùng thư mục với executable.
+                // Nhưng để tránh I/O overhead, ta chỉ query khi env var không có.
+                // Nếu là system binary (trong /usr/, /bin/, /sbin/) → skip query.
+                if (gExecutablePath[0] != '\0' &&
+                    strstr(gExecutablePath, "/var/containers/Bundle/Application/") != NULL) {
+                        // Đây là app user-installed → query blacklist động
+                        // Lấy bundle ID từ Info.plist
+                        char infoPlistPath[PATH_MAX];
+                        snprintf(infoPlistPath, sizeof(infoPlistPath), "%s", gExecutablePath);
+                        // Tìm "/<binary_name>" cuối cùng trong path
+                        char *lastSlash = strrchr(infoPlistPath, '/');
+                        if (lastSlash) {
+                                // Cắt bớt để lấy thư mục .app
+                                *lastSlash = '\0';
+                                char *appDir = strrchr(infoPlistPath, '/');
+                                if (appDir && strstr(appDir, ".app")) {
+                                        // Bundle ID = directory name trước .app
+                                        char *bundleIDStart = appDir + 1; // skip '/'
+                                        char *dotApp = strstr(bundleIDStart, ".app");
+                                        if (dotApp) {
+                                                *dotApp = '\0';
+                                                // RootHide port: switched from jbclient_roothide_is_blacklisted (old patchwork API)
+                                                // to jbclient_blacklist_check_bundle (Relaxin upstream API).
+                                                if (jbclient_blacklist_check_bundle(bundleIDStart)) {
+                                                        // FIX: cũng set env để các dylib khác trong cùng process
+                                                        // (nếu được inject trước khi check này) biết clean mode đang on
+                                                        setenv(ROOTHIDE_CLEAN_MODE_ENV, "1", 1);
+                                                        return false;
+                                                }
+                                        }
                                 }
                         }
                 }
@@ -564,6 +566,17 @@ __attribute__((constructor)) static void initializer(void)
                 // ========== ROOTHIDE HIDE INITIALIZATION ==========
                 // Initialize RootHide hiding subsystem for blacklisted apps
                 // This must happen BEFORE loading tweaks to ensure clean environment
+                //
+                // RootHide port: the old `roothide_hide_init(true)` call (from
+                // the deleted patchwork file `libjailbreak/src/roothide_hide.c`)
+                // has been removed. In the Relaxin upstream fork, per-process
+                // hiding is implemented by `roothidehooks.dylib` (loaded into
+                // cfprefsd/lsd/SpringBoard/runningboardd via DYLD_INSERT_LIBRARIES
+                // from systemhook/src/roothider_main.c). The clean-mode env var
+                // check below is preserved for backward compatibility with the
+                // existing Kernel-JB Application-side bootstrap logic in
+                // DOBootstrapper.m (which still sets ROOTHIDE_CLEAN_MODE_ENV on
+                // children that should skip tweak injection).
                 bool isCleanMode = false;
                 if (getenv(ROOTHIDE_CLEAN_MODE_ENV)) {
                         const char *cleanMode = getenv(ROOTHIDE_CLEAN_MODE_ENV);
@@ -577,11 +590,10 @@ __attribute__((constructor)) static void initializer(void)
                                 isCleanMode = true;
                         }
                 }
-                
-                // Initialize RootHide hiding if in clean mode
-                if (isCleanMode) {
-                        roothide_hide_init(true);
-                }
+                // Silence unused-variable warning; the env-var reads above are kept
+                // for backward-compat inspection (a future commit will route the
+                // clean-mode flag through the Relaxin roothidehooks per-process dylib).
+                (void)isCleanMode;
                 // ========== END ROOTHIDE INIT ==========
                 
                 if (should_enable_tweaks()) {

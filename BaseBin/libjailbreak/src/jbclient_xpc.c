@@ -61,6 +61,26 @@ xpc_object_t jbserver_xpc_send_dict(xpc_object_t xdict)
         return xreply;
 }
 
+// RootHide port: added jbserver_xpc_send_dict_fresh (Relaxin upstream).
+// Creates a fresh xpc pipe from the launchd port for each call, bypassing the
+// cached bootstrap pipe. Required by jbclient_roothide.c::jbclient_jailbreakd_checkin
+// (the jailbreakd handoff needs a fresh pipe so the returned mach_port_t is not
+// bound to a stale connection).
+xpc_object_t jbserver_xpc_send_dict_fresh(xpc_object_t xdict)
+{
+        mach_port_t launchdPort = jbclient_mach_get_launchd_port();
+        if (launchdPort == MACH_PORT_NULL) return NULL;
+
+        xpc_object_t xpipe = xpc_pipe_create_from_port(launchdPort, 0);
+        xpc_object_t xreply = NULL;
+        int err = xpc_pipe_routine_with_flags(xpipe, xdict, &xreply, 0);
+        if (xpipe) xpc_release(xpipe);
+        if (err != 0) {
+                return NULL;
+        }
+        return xreply;
+}
+
 xpc_object_t jbserver_xpc_send(uint64_t domain, uint64_t action, xpc_object_t xargs)
 {
         bool ownsXargs = false;
@@ -536,252 +556,4 @@ int jbclient_dopamine_drop_root(void)
                 return (bool)result;
         }
         return -1;
-}
-
-// ========== ROOTHIDE CONTROL IMPLEMENTATIONS ==========
-//
-// The domain ID (JBS_DOMAIN_ROOTHIDE) and action IDs (JBS_ROOTHIDE_*) are
-// defined in jbserver_domains.h. They MUST match the server-side handler in
-// BaseBin/launchdhook/src/jbserver/jbdomain_roothide.c — both files include
-// jbserver_domains.h so they stay in sync.
-
-int jbclient_roothide_init(void)
-{
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_INIT, NULL);
-        if (xreply) {
-                int64_t result = xpc_dictionary_get_int64(xreply, "result");
-                xpc_release(xreply);
-                return (int)result;
-        }
-        return -1;
-}
-
-int jbclient_roothide_set_enabled(bool enabled)
-{
-        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_bool(xargs, "enabled", enabled);
-        
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_SET_ENABLED, xargs);
-        xpc_release(xargs);
-        
-        if (xreply) {
-                int64_t result = xpc_dictionary_get_int64(xreply, "result");
-                xpc_release(xreply);
-                return (int)result;
-        }
-        return -1;
-}
-
-bool jbclient_roothide_is_enabled(void)
-{
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_IS_ENABLED, NULL);
-        if (xreply) {
-                bool enabled = xpc_dictionary_get_bool(xreply, "enabled");
-                xpc_release(xreply);
-                return enabled;
-        }
-        return false;
-}
-
-int jbclient_roothide_add_blacklist(const char *bundleID)
-{
-        if (!bundleID) return -1;
-        
-        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_string(xargs, "bundleID", bundleID);
-        
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_ADD_BLACKLIST, xargs);
-        xpc_release(xargs);
-        
-        if (xreply) {
-                int64_t result = xpc_dictionary_get_int64(xreply, "result");
-                xpc_release(xreply);
-                return (int)result;
-        }
-        return -1;
-}
-
-int jbclient_roothide_remove_blacklist(const char *bundleID)
-{
-        if (!bundleID) return -1;
-        
-        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_string(xargs, "bundleID", bundleID);
-        
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_REMOVE_BLACKLIST, xargs);
-        xpc_release(xargs);
-        
-        if (xreply) {
-                int64_t result = xpc_dictionary_get_int64(xreply, "result");
-                xpc_release(xreply);
-                return (int)result;
-        }
-        return -1;
-}
-
-char *jbclient_roothide_get_jbroot_path(void)
-{
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_GET_JBROOT_PATH, NULL);
-        if (xreply) {
-                const char *path = xpc_dictionary_get_string(xreply, "jbrootPath");
-                char *result = path ? strdup(path) : NULL;
-                xpc_release(xreply);
-                return result;
-        }
-        return NULL;
-}
-
-int jbclient_roothide_apply_settings(bool shouldReboot)
-{
-        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_bool(xargs, "shouldReboot", shouldReboot);
-
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_APPLY_SETTINGS, xargs);
-        xpc_release(xargs);
-
-        if (xreply) {
-                int64_t result = xpc_dictionary_get_int64(xreply, "result");
-                xpc_release(xreply);
-                return (int)result;
-        }
-        return -1;
-}
-
-// FIX LỖI 1: Query blacklist động từ launchd.
-// Hàm này được systemhook gọi trước khi spawn process để quyết định có
-// inject tweak hay không. Trước đây should_enable_tweaks chỉ check env var
-// ROOTHIDE_CLEAN_MODE_ENV, nhưng env var có thể bị thiếu/không được truyền
-// đúng trong 1 số path (early boot, xpcproxy,...). Query động đảm bảo
-// blacklist luôn được tôn trọng.
-bool jbclient_roothide_is_blacklisted(const char *bundleID)
-{
-        if (!bundleID || !bundleID[0]) return false;
-
-        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_string(xargs, "bundleID", bundleID);
-
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_IS_BLACKLISTED, xargs);
-        xpc_release(xargs);
-
-        if (xreply) {
-                bool blacklisted = xpc_dictionary_get_bool(xreply, "blacklisted");
-                xpc_release(xreply);
-                return blacklisted;
-        }
-        // Nếu không kết nối được tới launchd (early boot, etc), fail-safe = false
-        // (cho phép tweaks) thay vì block mọi thứ (block hết = bootloop).
-        return false;
-}
-
-// ========== ROOTHIDE FIX LỖI 2: Full APIs for RootHide app compatibility ==========
-
-int jbclient_roothide_get_blacklist_count(void)
-{
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_GET_BLACKLIST_COUNT, NULL);
-        if (xreply) {
-                int64_t count = xpc_dictionary_get_int64(xreply, "count");
-                xpc_release(xreply);
-                return (int)count;
-        }
-        return -1;
-}
-
-char *jbclient_roothide_get_blacklist_entry(int index)
-{
-        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_uint64(xargs, "index", (uint64_t)index);
-
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_GET_BLACKLIST_ENTRY, xargs);
-        xpc_release(xargs);
-
-        if (xreply) {
-                const char *entry = xpc_dictionary_get_string(xreply, "entry");
-                char *result = entry ? strdup(entry) : NULL;
-                xpc_release(xreply);
-                return result;
-        }
-        return NULL;
-}
-
-char *jbclient_roothide_get_blacklist_string(void)
-{
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_GET_BLACKLIST_STRING, NULL);
-        if (xreply) {
-                const char *blacklist = xpc_dictionary_get_string(xreply, "blacklist");
-                char *result = blacklist ? strdup(blacklist) : NULL;
-                xpc_release(xreply);
-                return result;
-        }
-        return NULL;
-}
-
-int jbclient_roothide_clear_blacklist(void)
-{
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_CLEAR_BLACKLIST, NULL);
-        if (xreply) {
-                int64_t result = xpc_dictionary_get_int64(xreply, "result");
-                xpc_release(xreply);
-                return (int)result;
-        }
-        return -1;
-}
-
-uint64_t jbclient_roothide_get_session_id(void)
-{
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_GET_SESSION_ID, NULL);
-        if (xreply) {
-                uint64_t sessionID = xpc_dictionary_get_uint64(xreply, "sessionID");
-                xpc_release(xreply);
-                return sessionID;
-        }
-        return 0;
-}
-
-char *jbclient_roothide_get_jbroot_uuid(void)
-{
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_GET_JBROOT_UUID, NULL);
-        if (xreply) {
-                const char *uuid = xpc_dictionary_get_string(xreply, "uuid");
-                char *result = uuid ? strdup(uuid) : NULL;
-                xpc_release(xreply);
-                return result;
-        }
-        return NULL;
-}
-
-char *jbclient_roothide_translate_path(const char *path)
-{
-        if (!path) return NULL;
-
-        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_string(xargs, "path", path);
-
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_TRANSLATE_PATH, xargs);
-        xpc_release(xargs);
-
-        if (xreply) {
-                const char *translated = xpc_dictionary_get_string(xreply, "translated");
-                char *result = translated ? strdup(translated) : NULL;
-                xpc_release(xreply);
-                return result;
-        }
-        return NULL;
-}
-
-bool jbclient_roothide_is_app_hidden(const char *bundleID)
-{
-        if (!bundleID || !bundleID[0]) return false;
-
-        xpc_object_t xargs = xpc_dictionary_create(NULL, NULL, 0);
-        xpc_dictionary_set_string(xargs, "bundleID", bundleID);
-
-        xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_ROOTHIDE, JBS_ROOTHIDE_IS_APP_HIDDEN, xargs);
-        xpc_release(xargs);
-
-        if (xreply) {
-                bool hidden = xpc_dictionary_get_bool(xreply, "hidden");
-                xpc_release(xreply);
-                return hidden;
-        }
-        return false;
 }
