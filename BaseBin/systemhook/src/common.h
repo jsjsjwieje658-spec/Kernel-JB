@@ -34,9 +34,13 @@
 // Declare HOOK_DYLIB_PATH as an extern variable (defined in roothider_main.c).
 extern const char *HOOK_DYLIB_PATH;
 
-// NOTE: kSpawnConfig enum (kSpawnConfigInject, kSpawnConfigTrust,
-// kSpawnConfigPatchProcess) is already defined in Kernel-JB's common/common.h
-// (lines 11-13). The wrapper inherits it via the #include above; no need to
-// redefine here.
+// NOTE: kSpawnConfig enum (kSpawnConfigInject, kSpawnConfigTrust) is inherited
+// from common/common.h via the #include above. Kernel-JB's common/common.h
+// does NOT define kSpawnConfigPatchProcess (the third Relaxin enum value
+// needed by roothider_main.c:268). Define it here as a macro so it doesn't
+// conflict with the typedef in common/common.h.
+#ifndef kSpawnConfigPatchProcess
+#define kSpawnConfigPatchProcess (1 << 2)
+#endif
 
 #endif
