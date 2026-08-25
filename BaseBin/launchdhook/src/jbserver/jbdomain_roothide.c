@@ -191,10 +191,10 @@ static int roothide_set_dyld_patch(audit_token_t *callerToken, bool enabled) {
     return 0;
 }
 
-struct jbserver_domain gRootHideDomain = {
-	.permissionHandler = roothide_domain_allowed,
-	.actions = {
-		//JBS_ROOTHIDE_JAILBROKEN_CHECK
+struct jbserver_domain gRoothideDomain = {
+        .permissionHandler = roothide_domain_allowed,
+        .actions = {
+                //JBS_ROOTHIDE_JAILBROKEN_CHECK
         {
             .handler = roothide_jailbroken_check,
             .args = (jbserver_arg[]) {
@@ -203,7 +203,7 @@ struct jbserver_domain gRootHideDomain = {
                     { 0 },
             },
         },
-		//JBS_ROOTHIDE_PALEHIDE_PRESENT
+                //JBS_ROOTHIDE_PALEHIDE_PRESENT
         {
             .handler = roothide_palehide_present,
             .args = (jbserver_arg[]) {
@@ -212,18 +212,18 @@ struct jbserver_domain gRootHideDomain = {
                     { 0 },
             },
         },
-		//JBS_ROOTHIDE_BLACKLIST_CHECK
+                //JBS_ROOTHIDE_BLACKLIST_CHECK
         {
             .handler = roothide_blacklist_check,
             .args = (jbserver_arg[]) {
                     { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN, .out = false },
-					{ .name = "checktype", .type = JBS_TYPE_STRING, .out = false },
-					{ .name = "checkvalue", .type = JBS_TYPE_XPC_GENERIC, .out = false },
+                                        { .name = "checktype", .type = JBS_TYPE_STRING, .out = false },
+                                        { .name = "checkvalue", .type = JBS_TYPE_XPC_GENERIC, .out = false },
                     { .name = "blacklisted", .type = JBS_TYPE_BOOL, .out = true },
                     { 0 },
             },
         },
-		//JBS_ROOTHIDE_JAILBREAKD_LOOKUP
+                //JBS_ROOTHIDE_JAILBREAKD_LOOKUP
         {
             .handler = roothide_jailbreakd_lookup,
             .args = (jbserver_arg[]) {
@@ -232,7 +232,7 @@ struct jbserver_domain gRootHideDomain = {
                     { 0 },
             },
         },
-		//JBS_ROOTHIDE_JAILBREAKD_CHECKIN
+                //JBS_ROOTHIDE_JAILBREAKD_CHECKIN
         {
             .handler = roothide_jailbreakd_checkin,
             .args = (jbserver_arg[]) {
@@ -241,28 +241,28 @@ struct jbserver_domain gRootHideDomain = {
                     { 0 },
             },
         },
-		// JBS_ROOTHIDE_TRUST_LIBRARY_RECURSE
-		{
-			.handler = roothide_trust_library_recurse,
-			.args = (jbserver_arg[]){
-				{ .name = "library-path", .type = JBS_TYPE_STRING, .out = false },
-				{ .name = "caller-library-path", .type = JBS_TYPE_STRING, .out = false },
-				{ .name = "caller-executable-path", .type = JBS_TYPE_STRING, .out = false },
-				{ .name = "current-working-dir", .type = JBS_TYPE_STRING, .out = false },
-				{ 0 },
-			},
-		},
-		// JBS_ROOTHIDE_TRUST_EXECUTABLE_RECURSE
-		{
-			.handler = roothide_trust_executable_recurse,
-			.args = (jbserver_arg[]){
-				{ .name = "executable-path", .type = JBS_TYPE_STRING, .out = false },
-				{ .name = "process-working-dir", .type = JBS_TYPE_STRING, .out = false },
-				{ .name = "preferred-archs", .type = JBS_TYPE_ARRAY, .out = false },
-				{ 0 },
-			},
-		},
-		//JBS_ROOTHIDE_DYLD_PATCH_ENABLED_GET
+                // JBS_ROOTHIDE_TRUST_LIBRARY_RECURSE
+                {
+                        .handler = roothide_trust_library_recurse,
+                        .args = (jbserver_arg[]){
+                                { .name = "library-path", .type = JBS_TYPE_STRING, .out = false },
+                                { .name = "caller-library-path", .type = JBS_TYPE_STRING, .out = false },
+                                { .name = "caller-executable-path", .type = JBS_TYPE_STRING, .out = false },
+                                { .name = "current-working-dir", .type = JBS_TYPE_STRING, .out = false },
+                                { 0 },
+                        },
+                },
+                // JBS_ROOTHIDE_TRUST_EXECUTABLE_RECURSE
+                {
+                        .handler = roothide_trust_executable_recurse,
+                        .args = (jbserver_arg[]){
+                                { .name = "executable-path", .type = JBS_TYPE_STRING, .out = false },
+                                { .name = "process-working-dir", .type = JBS_TYPE_STRING, .out = false },
+                                { .name = "preferred-archs", .type = JBS_TYPE_ARRAY, .out = false },
+                                { 0 },
+                        },
+                },
+                //JBS_ROOTHIDE_DYLD_PATCH_ENABLED_GET
         {
             .handler = roothide_dyld_patch_enabled,
             .args = (jbserver_arg[]) {
@@ -271,7 +271,7 @@ struct jbserver_domain gRootHideDomain = {
                     { 0 },
             },
         },
-		//JBS_ROOTHIDE_DYLD_PATCH_ENABLED_SET
+                //JBS_ROOTHIDE_DYLD_PATCH_ENABLED_SET
         {
             .handler = roothide_set_dyld_patch,
             .args = (jbserver_arg[]) {
@@ -280,7 +280,7 @@ struct jbserver_domain gRootHideDomain = {
                     { 0 },
             },
         },
-		//JBS_ROOTHIDE_JAILBREAKD_CHECKIN_STATUS
+                //JBS_ROOTHIDE_JAILBREAKD_CHECKIN_STATUS
         {
             .handler = roothide_jailbreakd_checkin_status,
             .args = (jbserver_arg[]) {
@@ -288,6 +288,6 @@ struct jbserver_domain gRootHideDomain = {
                     { 0 },
             },
         },
-		{ 0 },
-	},
+                { 0 },
+        },
 };
