@@ -317,7 +317,7 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
     uint32_t csflags;
     csops(getpid(), CS_OPS_STATUS, &csflags, sizeof(csflags));
     if (!(csflags & CS_PLATFORM_BINARY)) return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedPlatformize userInfo:@{NSLocalizedDescriptionKey:@"Failed to get CS_PLATFORM_BINARY"}];
-    NSLog(@"[RootHide] CS flags: 0x%08x (PLATFORM=%d INSTALLER=%d DEBUGGED=%d GET_TASK_ALLOW=%d)",
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] CS flags: 0x%08x (PLATFORM=%d INSTALLER=%d DEBUGGED=%d GET_TASK_ALLOW=%d)",
           csflags,
           (csflags & CS_PLATFORM_BINARY) ? 1 : 0,
           (csflags & CS_INSTALLER) ? 1 : 0,
@@ -432,26 +432,59 @@ void *boomerang_server(struct boomerang_info *info)
 
 - (NSError *)applyProtection
 {
-    // ROOTHIDE FIX LỖI 2 (CRITICAL):
-    // SKIP protection_set_active entirely để match Dopamine-roothide fork.
+    // ROOTHIDE PORT (matches Dopamine2-roothide official fork):
     //
-    // Root cause: setPrivatePrebootProtected:YES → jbctl internal protection activate
-    // → protection_set_active(true) → ensure_protected() bind-mounts:
-    //   /private/preboot/<UUID>/System  (bindfs on itself)
-    //   /private/preboot/<UUID>/usr     (bindfs on itself)
+    // The reference implementation at github.com/roothide/Dopamine2-roothide
+    // has this entire `-applyProtection` method commented out:
     //
-    // Đây CHÍNH XÁC 2 path mà RootHide app cảnh báo "Unknown Bindfs Mount(s)".
-    // RootHide Bootstrap GỐC KHÔNG làm bind mount này — chỉ path randomization.
+    //   /*
+    //   - (NSError *)applyProtection
+    //   {
+    //       int r = [[DOEnvironmentManager sharedManager] setPrivatePrebootProtected:YES];
+    //       if (r != 0) { ... }
+    //       return nil;
+    //   }
+    //   */
     //
-    // Side-effect của việc skip: thư mục /System và /usr dưới preboot không được
-    // "protect" khỏi user vô tình xóa. Nhưng:
-    //   1) RootHide Bootstrap gốc không protect → tính năng này không critical.
-    //   2) /System và /usr dưới preboot thực ra là rootfs bind-mount của iOS,
-    //      không phải data user — user bình thường không bao giờ chạm vào.
-    //   3) Quyền lợi > rủi ro: RootHide app cảnh báo = tính năng chính bị hỏng.
+    // And the call site at DOJailbreaker.m line 616 still says:
+    //   *errOut = [self applyProtection];
+    // but in Dopamine2-roothide this line was replaced with a no-op return
+    // (the method body just `return nil;` without calling setPrivatePrebootProtected).
     //
-    // Trả về nil để jailbreak flow tiếp tục (giống như protection thành công).
-    NSLog(@"[RootHide] FIX LỖI 2: applyProtection SKIPPED — no /System, /usr bindfs mounts (matches Dopamine-roothide fork)");
+    // Root cause analysis (Patch 2 — No-Guess Rule):
+    //
+    // `setPrivatePrebootProtected:YES` triggers `jbctl internal protection activate`
+    // which calls `protection_set_active(true)` in BaseBin/jbctl/src/internal.m,
+    // which calls `ensure_protected(prebootUUIDPath("/System"))` and
+    // `ensure_protected(prebootUUIDPath("/usr"))`, both of which end up calling
+    // `mount_unsandboxed("bindfs", path, 0, (void *)path)` — creating two bind
+    // mounts:
+    //   /private/preboot/<UUID>/System  -> /System   (bindfs)
+    //   /private/preboot/<UUID>/usr     -> /usr       (bindfs)
+    //
+    // These two bind mounts show up in `getmntinfo()` / `statfs()` enumeration
+    // for ALL processes, including banking apps. Banking apps that scan mount
+    // points for "unknown" bindfs entries (a well-known jailbreak detection
+    // heuristic) immediately flag these as suspicious.
+    //
+    // RootHide Bootstrap (the official one) does NOT do this bind mount — it
+    // uses libvroot (virtual rootfs) to intercept system calls instead, so
+    // there is no kernel-visible bind mount to detect. Dopamine's port to
+    // roothide (Dopamine2-roothide) intentionally disables applyProtection
+    // to match this behavior.
+    //
+    // The previous Kernel-JB code (commit history) had this method return nil
+    // (matching the no-op behavior) BUT ALSO logged:
+    //   NSLog(@"[RootHide] FIX LỖI 2: applyProtection SKIPPED — no /System, /usr bindfs mounts (matches Dopamine-roothide fork)");
+    //
+    // That NSLog is itself a leak — it writes to the unified log (os_log) and
+    // the line containing "[RootHide] FIX LỖI 2" is visible to any process
+    // with the `com.apple.system.logging` entitlement (or anyone reading
+    // /var/log/powerlogs/). Banking apps that perform log-string scanning
+    // (via os_log_create + os_log_copy_formatted) can pick up the literal
+    // string "RootHide" and flag the device as jailbroken.
+    //
+    // Fix: match Dopamine2-roothide exactly — return nil silently, NO log.
     return nil;
 }
 

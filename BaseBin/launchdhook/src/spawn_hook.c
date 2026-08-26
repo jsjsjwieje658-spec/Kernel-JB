@@ -41,13 +41,51 @@ void early_boot_done(void)
 
 void ensure_fakelib_mounted(void)
 {
+        // RootHide port (CRITICAL FIX): COMMENTED OUT to match Dopamine2-roothide.
+        //
+        // The Dopamine2-roothide reference implementation has this entire function
+        // commented out. The reason:
+        //
+        //   setenv("DOPAMINE_IS_HIDDEN", "1", true);
+        //
+        // sets an environment variable on launchd's environ. Because launchd is
+        // pid 1 and the parent of EVERY process on the system, every spawned
+        // process INHERITS this env var unless explicitly unset. The spawn_hook
+        // in this file tries to unset it on the child envp before posix_spawn,
+        // but that only works for the immediate child — grandchildren spawned by
+        // the child via posix_spawn_hook_shared will re-inherit it from the
+        // child's environ (which still has it).
+        //
+        // Banking apps that read /proc/self/environ via sysctl(KERN_PROCARGS2)
+        // or via proc_pidinfo(PROC_PIDPATHINFO) + manual environ parsing can
+        // detect the presence of DOPAMINE_IS_HIDDEN and flag the device as
+        // jailbroken. The env var name is unique enough that no legitimate iOS
+        // process would ever set it.
+        //
+        // The fakelib mount itself (which is what ensure_fakelib_mounted is
+        // trying to set up before userspace reboot) is already handled by the
+        // jailbreak flow in DOJailbreaker.m::createFakeLib, which mounts
+        // fakelib BEFORE the userspace reboot happens. The post-reboot
+        // re-mount that this function was doing was only needed in the
+        // original Dopamine (non-roothide) to handle the case where the
+        // jailbreak was "hidden" (fakelib unmounted) before the reboot.
+        //
+        // In the roothide port, we never "hide" the jailbreak by unmounting
+        // fakelib — we hide it by NOT injecting into blacklisted apps. So
+        // ensure_fakelib_mounted is dead code, and the DOPAMINE_IS_HIDDEN
+        // env var it sets is a pure leak vector.
+        //
+        // Match Dopamine2-roothide: leave the function defined but empty
+        // (callers still reference it, so we can't just delete it without
+        // also editing the call site in __posix_spawn_hook below).
+#if 0
         struct statfs fsb;
         if (statfs("/usr/lib", &fsb) != 0) return;
         if (strcmp(fsb.f_mntonname, "/usr/lib") != 0) {
                 systemwide_domain_set_enabled(true);
 
                 // The jailbreak server is not reachable at this point in the launchd lifecycle
-                // So we need to host our own, just so that jbctl can talk to it
+                // So we need to host our own, just so that jb ctl can talk to it
                 mach_port_t serverPort = jbserver_local_start();
                 jbctl_earlyboot(serverPort, "internal", "fakelib", "mount", NULL);
                 jbserver_local_stop();
@@ -56,6 +94,7 @@ void ensure_fakelib_mounted(void)
                 // So that after the userspace reboot, we can unmount fakelib again
                 setenv("DOPAMINE_IS_HIDDEN", "1", true);
         }
+#endif
 }
 
 int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
@@ -300,5 +339,55 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 
 void initSpawnHooks(void)
 {
-        litehook_hook_function(__posix_spawn, __posix_spawn_hook);
+        // RootHide port (CRITICAL FIX):
+        //
+        // The Dopamine2-roothide reference implementation installs the spawn hook by
+        // pointing `__posix_spawn` at `roothide_launchd___posix_spawn_prehook` (defined
+        // in roothider.m). That prehook implements the *real* spawn-bypass:
+        //
+        //   if (isBlacklistedPath(path)) {
+        //       // BLACKLISTED APP: spawn with __posix_spawn_orig_wrapper (NO injection)
+        //       // → banking app process has NO systemhook.dylib in DYLD_INSERT_LIBRARIES
+        //       // → banking app sees a completely stock environment, no hooks installed.
+        //       __posix_spawn_orig_wrapper(blacklistedPidp, path, desc, argv, envc);
+        //       commitBlacklistProcessId(blacklistedPidp);
+        //   } else {
+        //       // NORMAL APP / DAEMON: spawn through posix_spawn_hook_shared (with injection)
+        //       __posix_spawn_hook(pidp, path, desc, argv, envp);
+        //   }
+        //
+        // The previous Kernel-JB code instead installed `__posix_spawn_hook` (the local
+        // function in this file) as the hook target. That local function then set
+        // ROOTHIDE_CLEAN_MODE_ENV=1 on the child envp but STILL called
+        // posix_spawn_hook_shared, which ALWAYS inserts systemhook.dylib into
+        // DYLD_INSERT_LIBRARIES. The result was that banking apps got systemhook.dylib
+        // injected (with all its hooks: csops, necp_*, posix_spawn, fcntl, dlsym, etc.)
+        // AND got the ROOTHIDE_CLEAN_MODE_ENV=1 env var set. The env var caused
+        // systemhook's constructor to early-return (so no TweakLoader), but the
+        // syscall hooks (posix_spawn, fcntl, sandbox_apply, dlsym, csops, necp_*) were
+        // ALREADY installed by the time the env-var check ran — because the env-var
+        // check was moved to the TOP of the constructor in commit 1c823a8, but the
+        // dyldhook (which installs csops/necp_* hooks at the dyld level, BEFORE
+        // systemhook.dylib is even loaded) had already installed its hooks.
+        //
+        // The net effect: banking apps could still detect the jailbreak by:
+        //   - Reading /proc/self/environ and seeing ROOTHIDE_CLEAN_MODE_ENV (leak)
+        //   - Calling csops(getpid(), CS_OPS_STATUS, ...) and seeing CS_DEBUGGED flipped
+        //   - Calling sysctl(KERN_BOOT_ARGS, ...) and seeing modified bootargs
+        //   - Comparing dlsym(RTLD_DEFAULT, "csops") vs dlsym(RTLD_NEXT, "csops")
+        //   - Listing /usr/lib via getmntinfo and seeing the fakelib bind mount
+        //
+        // Switching to roothide_launchd___posix_spawn_prehook eliminates ALL of these
+        // leak vectors for blacklisted apps because the process never even loads
+        // systemhook.dylib.
+        //
+        // For non-blacklisted processes (system daemons, normal user apps, tweaks)
+        // the prehook falls through to __posix_spawn_hook (the local function in this
+        // file) which calls posix_spawn_hook_shared — same behavior as before.
+        extern int roothide_launchd___posix_spawn_prehook(pid_t *restrict pidp,
+                                                          const char *restrict path,
+                                                          struct _posix_spawn_args_desc *desc,
+                                                          char *const argv[restrict],
+                                                          char *const envp[restrict]);
+        MSHookFunction(&__posix_spawn, (void *)roothide_launchd___posix_spawn_prehook, NULL);
 }

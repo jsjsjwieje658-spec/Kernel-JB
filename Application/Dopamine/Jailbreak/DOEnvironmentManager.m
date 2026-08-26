@@ -138,12 +138,12 @@ static BOOL checkRootHideJBRAND(NSString *str)
         // AMFI blocks NSFileManager from listing /var/containers/Bundle/Application/
         // even when running as root. We MUST use exec_cmd_root to spawn /bin/ls
         // with persona override — the child process gets a fresh AMFI context.
-        NSLog(@"[RootHide] locateJailbreakRoot: listing %@ via exec_cmd_root", jbrootSearchPath);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: listing %@ via exec_cmd_root", jbrootSearchPath);
 
         // Create a pipe to capture /bin/ls output
         int pipefd[2];
         if (pipe(pipefd) != 0) {
-            NSLog(@"[RootHide] locateJailbreakRoot: pipe() failed");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: pipe() failed");
             return;
         }
 
@@ -168,12 +168,12 @@ static BOOL checkRootHideJBRAND(NSString *str)
 
         if (spawnErr != 0) {
             close(pipefd[0]);
-            NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls spawn failed: %d", spawnErr);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls spawn failed: %d", spawnErr);
             // Fallback: try NSFileManager (might work after unsandbox)
             NSError *listError = nil;
             NSArray *fmItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbrootSearchPath error:&listError];
             if (listError) {
-                NSLog(@"[RootHide] locateJailbreakRoot: NSFileManager also failed: %@", listError);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: NSFileManager also failed: %@", listError);
             } else if (fmItems) {
                 // FIX: length must be 24 (8 prefix `.jbroot-` + 16 hex jbrand),
                 // not 23. With length==23, substringFromIndex:8 returns 15 chars
@@ -185,7 +185,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
                         NSString *jbrandStr = [subItem substringFromIndex:8];
                         if (checkRootHideJBRAND(jbrandStr)) {
                             randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:subItem];
-                            NSLog(@"[RootHide] locateJailbreakRoot: FOUND via NSFileManager: %@", randomizedJailbreakPath);
+                            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: FOUND via NSFileManager: %@", randomizedJailbreakPath);
                             break;
                         }
                     }
@@ -212,38 +212,38 @@ static BOOL checkRootHideJBRAND(NSString *str)
             if (outData.length > 0) {
                 NSString *output = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding];
                 if (!output) {
-                    NSLog(@"[RootHide] locateJailbreakRoot: failed to decode /bin/ls output (length=%lu)", (unsigned long)outData.length);
+                    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: failed to decode /bin/ls output (length=%lu)", (unsigned long)outData.length);
                     output = @"";
                 }
                 NSArray *subItems = [output componentsSeparatedByString:@"\n"];
-                NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls -1a found %lu items", (unsigned long)subItems.count);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls -1a found %lu items", (unsigned long)subItems.count);
 
                 for (NSString *subItem in subItems) {
                     NSString *trimmed = [subItem stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
                     if (trimmed.length == 0) continue;
                     if ([trimmed hasPrefix:@"."]) {
-                        NSLog(@"[RootHide] locateJailbreakRoot: found hidden: %@", trimmed);
+                        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: found hidden: %@", trimmed);
                     }
                     // FIX: length == 24 (not 23) — see comment above.
                     if (trimmed.length == 24 && [trimmed hasPrefix:@".jbroot-"]) {
                         NSString *jbrandStr = [trimmed substringFromIndex:8];
                         BOOL valid = checkRootHideJBRAND(jbrandStr);
-                        NSLog(@"[RootHide] locateJailbreakRoot: .jbroot- found, jbrand=%@ valid=%d", jbrandStr, valid);
+                        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: .jbroot- found, jbrand=%@ valid=%d", jbrandStr, valid);
                         if (valid) {
                             randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:trimmed];
-                            NSLog(@"[RootHide] locateJailbreakRoot: FOUND existing jbroot at %@", randomizedJailbreakPath);
+                            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: FOUND existing jbroot at %@", randomizedJailbreakPath);
                             break;
                         }
                     }
                 }
             } else {
-                NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls produced no output");
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls produced no output");
             }
         }
 
         // Legacy migration
         if (!randomizedJailbreakPath) {
-            NSLog(@"[RootHide] locateJailbreakRoot: no .jbroot-XXX found, checking legacy /private/preboot");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: no .jbroot-XXX found, checking legacy /private/preboot");
             NSString *activePrebootPath = [self activePrebootPath];
             for (NSString *subItem in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:activePrebootPath error:nil]) {
                 if (subItem.length == 15 && [subItem hasPrefix:@"dopamine-"]) {
@@ -252,7 +252,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
                     if ([[NSFileManager defaultManager] fileExistsAtPath:[legacyProcursus stringByAppendingPathComponent:@".installed_dopamine"]]) {
                         randomizedJailbreakPath = legacyPath;
                         _bootstrapNeedsMigration = YES;
-                        NSLog(@"[RootHide] locateJailbreakRoot: found legacy dopamine path: %@", legacyPath);
+                        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: found legacy dopamine path: %@", legacyPath);
                         break;
                     }
                 }
@@ -262,10 +262,10 @@ static BOOL checkRootHideJBRAND(NSString *str)
         if (randomizedJailbreakPath) {
             if ([[NSFileManager defaultManager] fileExistsAtPath:randomizedJailbreakPath]) {
                 gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.fileSystemRepresentation);
-                NSLog(@"[RootHide] locateJailbreakRoot: set rootPath to %s", gSystemInfo.jailbreakInfo.rootPath);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: set rootPath to %s", gSystemInfo.jailbreakInfo.rootPath);
             }
         } else {
-            NSLog(@"[RootHide] locateJailbreakRoot: NO existing jbroot found — will create new");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] locateJailbreakRoot: NO existing jbroot found — will create new");
         }
     }
 }
@@ -283,7 +283,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
         NSString *oldPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
         // Only clear if it's the legacy path (contains /private/preboot)
         if ([oldPath containsString:@"/private/preboot/"]) {
-            NSLog(@"[RootHide] ensureJailbreakRootExists: clearing legacy rootPath %@ to re-scan", oldPath);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] ensureJailbreakRootExists: clearing legacy rootPath %@ to re-scan", oldPath);
             free(gSystemInfo.jailbreakInfo.rootPath);
             gSystemInfo.jailbreakInfo.rootPath = NULL;
         }
@@ -322,7 +322,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
         if (_bootstrapNeedsMigration) {
             NSString *oldPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
             NSString *oldDopamineDir = [oldPath stringByDeletingLastPathComponent];
-            NSLog(@"[RootHide] Removing old Dopamine bootstrap at %@", oldDopamineDir);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Removing old Dopamine bootstrap at %@", oldDopamineDir);
             // Use exec_cmd_root (persona override) for rm -rf
             exec_cmd_root("/bin/rm", "-rf", oldDopamineDir.fileSystemRepresentation, NULL);
             free(gSystemInfo.jailbreakInfo.rootPath);
@@ -344,21 +344,21 @@ static BOOL checkRootHideJBRAND(NSString *str)
         //   We use the same approach: spawn /bin/mkdir via exec_cmd_root,
         //   which calls posix_spawnattr_set_persona_np(99, OVERRIDE) +
         //   posix_spawnattr_set_persona_uid_np(0) + gid 0.
-        NSLog(@"[RootHide] Creating jbroot at %@ via root spawn", randomizedJailbreakPath);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Creating jbroot at %@ via root spawn", randomizedJailbreakPath);
         int mkdirRet = exec_cmd_root("/bin/mkdir", "-m", "0755",
                                       randomizedJailbreakPath.fileSystemRepresentation, NULL);
         if (mkdirRet != 0) {
             // Fallback: try mkdir(2) directly
-            NSLog(@"[RootHide] exec_cmd_root mkdir returned %d, trying direct mkdir(2)", mkdirRet);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] exec_cmd_root mkdir returned %d, trying direct mkdir(2)", mkdirRet);
             const char *path = randomizedJailbreakPath.fileSystemRepresentation;
             if (mkdir(path, 0755) != 0 && errno != EEXIST) {
                 error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
                                        userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to create jbroot directory %s: %s", path, strerror(errno)]}];
-                NSLog(@"[RootHide] mkdir(2) also failed: %s", strerror(errno));
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] mkdir(2) also failed: %s", strerror(errno));
             }
             else {
                 chown(path, 0, 0);
-                NSLog(@"[RootHide] mkdir(2) succeeded for %@", randomizedJailbreakPath);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] mkdir(2) succeeded for %@", randomizedJailbreakPath);
                 gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
             }
         }
@@ -366,7 +366,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
             // chown to root:wheel via root spawn too
             exec_cmd_root("/usr/sbin/chown", "root:wheel",
                           randomizedJailbreakPath.fileSystemRepresentation, NULL);
-            NSLog(@"[RootHide] Created jbroot at %@", randomizedJailbreakPath);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Created jbroot at %@", randomizedJailbreakPath);
             gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
 
             // ROOTHIDE FIX LỖI 2 (CRITICAL): Tạo .jbroot và rootfs symlinks tại jbroot root
@@ -411,25 +411,25 @@ static BOOL checkRootHideJBRAND(NSString *str)
             //   - relative path vẫn đúng khi jbroot được rename (re-randomize)
             NSError *linkErr = nil;
             if ([fm createSymbolicLinkAtPath:jbrootDotLink withDestinationPath:@"." error:&linkErr]) {
-                NSLog(@"[RootHide] Created .jbroot -> . (self) at %@", jbrootDotLink);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Created .jbroot -> . (self) at %@", jbrootDotLink);
             } else {
-                NSLog(@"[RootHide] FAILED to create .jbroot symlink: %@", linkErr);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] FAILED to create .jbroot symlink: %@", linkErr);
             }
 
             // Create rootfs -> / (system rootfs)
             linkErr = nil;
             if ([fm createSymbolicLinkAtPath:rootfsLink withDestinationPath:@"/" error:&linkErr]) {
-                NSLog(@"[RootHide] Created rootfs -> / at %@", rootfsLink);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Created rootfs -> / at %@", rootfsLink);
             } else {
-                NSLog(@"[RootHide] FAILED to create rootfs symlink: %@", linkErr);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] FAILED to create rootfs symlink: %@", linkErr);
             }
 
             // Create dev -> /dev
             linkErr = nil;
             if ([fm createSymbolicLinkAtPath:devLink withDestinationPath:@"/dev" error:&linkErr]) {
-                NSLog(@"[RootHide] Created dev -> /dev at %@", devLink);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Created dev -> /dev at %@", devLink);
             } else {
-                NSLog(@"[RootHide] FAILED to create dev symlink: %@", linkErr);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] FAILED to create dev symlink: %@", linkErr);
             }
         }
     }
@@ -675,7 +675,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
             //             picked the wrong jbroot path, or bootstrap extraction failed)
             //   EACCES — AMFI rejected the binary (cdhash not in trustcache)
             //   E2BIG  — argv too long (shouldn't happen here)
-            NSLog(@"[RootHide] spawnJbctlAsRootWithArgs: posix_spawn FAILED for '%@' (errno=%d: %s)",
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] spawnJbctlAsRootWithArgs: posix_spawn FAILED for '%@' (errno=%d: %s)",
                   jbctlPathForLog, r, strerror(r));
             close(waitPipe[0]);
             close(waitPipe[1]);
@@ -790,10 +790,10 @@ static BOOL checkRootHideJBRAND(NSString *str)
             // outer single-quoted dash -c argument).
             NSString *escapedPassword = [newPassword stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
             NSString *dashCommand = [NSString stringWithFormat:@"printf \"%%s\\n\" '%@' | %@ usermod -u 501 -h 0", escapedPassword, JBROOT_PATH(@"/usr/sbin/pw")];
-            NSLog(@"[RootHide] changeMobilePassword: running pw usermod -u 501 -h 0");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] changeMobilePassword: running pw usermod -u 501 -h 0");
             int r = exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", dashCommand.UTF8String, NULL);
             if (r != 0) {
-                NSLog(@"[RootHide] changeMobilePassword: pw returned %d, trying chpasswd fallback", r);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] changeMobilePassword: pw returned %d, trying chpasswd fallback", r);
                 // FIX: bỏ `su -q passwd root` (su không có option -q trong Procursus,
                 // và `echo '...' | su` truyền password vào stdin của su chứ không phải
                 // passwd → không work). `|| true` cuối cũng nuốt hết error → user
@@ -805,9 +805,9 @@ static BOOL checkRootHideJBRAND(NSString *str)
                     JBROOT_PATH(@"/usr/sbin/chpasswd")];
                 int r2 = exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", fallbackCmd.UTF8String, NULL);
                 if (r2 != 0) {
-                    NSLog(@"[RootHide] changeMobilePassword: chpasswd also failed (%d), password NOT changed", r2);
+                    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] changeMobilePassword: chpasswd also failed (%d), password NOT changed", r2);
                 } else {
-                    NSLog(@"[RootHide] changeMobilePassword: chpasswd fallback OK");
+                    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] changeMobilePassword: chpasswd fallback OK");
                 }
             }
         }];

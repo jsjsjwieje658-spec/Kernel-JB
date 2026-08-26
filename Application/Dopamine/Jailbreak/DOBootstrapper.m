@@ -311,7 +311,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // in the FAT binary, because dpkg and other binaries may load either slice.
     NSError *patchError = [self patchRootHideAssertions];
     if (patchError) {
-        NSLog(@"[RootHide] patchRootHideAssertions failed (continuing): %@", patchError);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] patchRootHideAssertions failed (continuing): %@", patchError);
     }
 
     // Write marker files so re-jailbreak skips extraction.
@@ -348,7 +348,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 // callers that still reference it.
 - (NSError *)patchRootHideAssertions
 {
-    NSLog(@"[RootHide] Using RootHide-compatible jbroot path — no dylib patching needed");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Using RootHide-compatible jbroot path — no dylib patching needed");
     return nil;
 }
 
@@ -417,7 +417,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                                userInfo:@{NSLocalizedDescriptionKey : @"RootHide dylibs missing after restore"}];
     }
 
-    NSLog(@"[RootHide] restored pristine roothideinit.dylib + libroothide.dylib from bundle");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] restored pristine roothideinit.dylib + libroothide.dylib from bundle");
     return nil;
 }
 
@@ -550,7 +550,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         BOOL is_arm64e = ((cpusubtype & 0x00ffffff) == 2);
         BOOL is_arm64  = ((cpusubtype & 0x00ffffff) == 0);
         if (!is_arm64 && !is_arm64e) {
-            NSLog(@"[RootHide] roothideinit arch %u: unrecognized cpusubtype 0x%x, skipping", i, cpusubtype);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] roothideinit arch %u: unrecognized cpusubtype 0x%x, skipping", i, cpusubtype);
             continue;
         }
 
@@ -598,7 +598,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
 
         if (!haveText) {
-            NSLog(@"[RootHide] roothideinit arch %u: no __TEXT,__text section, skipping", i);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] roothideinit arch %u: no __TEXT,__text section, skipping", i);
             continue;
         }
 
@@ -627,21 +627,21 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
 
         if (matchCount < 2) {
-            NSLog(@"[RootHide] roothideinit arch %u (%s): found only %lu prologue match(es), expected 2 — skipping",
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] roothideinit arch %u (%s): found only %lu prologue match(es), expected 2 — skipping",
                   i, is_arm64e ? "arm64e" : "arm64", (unsigned long)matchCount);
             continue;
         }
 
         // Bounds check
         if (firstMatchOff + patchLen > length || secondMatchOff + patchLen > length) {
-            NSLog(@"[RootHide] roothideinit arch %u: patch offset OOB", i);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] roothideinit arch %u: patch offset OOB", i);
             continue;
         }
 
         // Verify prologue bytes (sanity check — already done above but explicit)
         if (memcmp(bytes + firstMatchOff,  prologue, 8) != 0 ||
             memcmp(bytes + secondMatchOff, prologue, 8) != 0) {
-            NSLog(@"[RootHide] roothideinit arch %u: prologue verification failed at last moment, skipping", i);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] roothideinit arch %u: prologue verification failed at last moment, skipping", i);
             continue;
         }
 
@@ -650,7 +650,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         memcpy(bytes + secondMatchOff, patch2, patchLen);
 
         patchesApplied++;
-        NSLog(@"[RootHide] roothideinit arch %u (%s): patched is_jbroot_name@%lx + resolve@%lx (vaddr 0x%llx + 0x%llx)",
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] roothideinit arch %u (%s): patched is_jbroot_name@%lx + resolve@%lx (vaddr 0x%llx + 0x%llx)",
               i, is_arm64e ? "arm64e" : "arm64",
               (unsigned long)firstMatchOff, (unsigned long)secondMatchOff,
               (unsigned long long)(textVirt + (firstMatchOff  - textStart)),
@@ -711,7 +711,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             }
         }
         if (alreadyPatched) {
-            NSLog(@"[RootHide] roothideinit.dylib already patched (idempotent), returning success");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] roothideinit.dylib already patched (idempotent), returning success");
             return nil;
         }
         return [NSError errorWithDomain:bootstrapErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : @"Failed to patch any architecture in roothideinit.dylib"}];
@@ -728,7 +728,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // after BOTH dylibs are patched AND trust-cached.
     chmod(path.fileSystemRepresentation, 0755);
 
-    NSLog(@"[RootHide] patched %lu architectures in roothideinit.dylib", (unsigned long)patchesApplied);
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] patched %lu architectures in roothideinit.dylib", (unsigned long)patchesApplied);
     return nil;
 }
 
@@ -832,7 +832,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
 
         if (!haveText) {
-            NSLog(@"[RootHide] libroothide arch %u: no __TEXT,__text section, skipping", i);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] libroothide arch %u: no __TEXT,__text section, skipping", i);
             continue;
         }
 
@@ -882,7 +882,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
                 funcVirt  = n_value;
                 foundFunc = YES;
-                NSLog(@"[RootHide] libroothide arch %u: found symbol '%.*s' @ 0x%llx (sec=%u)",
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] libroothide arch %u: found symbol '%.*s' @ 0x%llx (sec=%u)",
                       i, (int)nameLen, bytes + nameStart, (unsigned long long)n_value, n_sect);
                 break;
             }
@@ -893,7 +893,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         NSUInteger scanBytes   = 0;
         if (foundFunc) {
             if (funcVirt < textVirt || funcVirt >= textVirt + textSize) {
-                NSLog(@"[RootHide] libroothide arch %u: func vaddr 0x%llx outside __text [0x%llx, 0x%llx), skipping",
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] libroothide arch %u: func vaddr 0x%llx outside __text [0x%llx, 0x%llx), skipping",
                       i, (unsigned long long)funcVirt,
                       (unsigned long long)textVirt, (unsigned long long)(textVirt + textSize));
                 continue;
@@ -906,7 +906,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         } else {
             // Fallback: scan entire __text section for the bl+cbnz pattern.
             // This is more expensive but works even if the symbol was stripped.
-            NSLog(@"[RootHide] libroothide arch %u: symbol _jbrootat_alloc not found, falling back to full __text scan", i);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] libroothide arch %u: symbol _jbrootat_alloc not found, falling back to full __text scan", i);
             funcFileOff = archOffset + textOff;
             scanBytes   = (NSUInteger)textSize;
             if (funcFileOff + scanBytes > length) scanBytes = length - funcFileOff;
@@ -932,7 +932,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             // NOP the cbnz in-place.
             memcpy(bytes + funcFileOff + off + 4, nop, 4);
             nopsThisArch++;
-            NSLog(@"[RootHide] libroothide arch %u: NOP'd cbnz@0x%llx (after bl@0x%llx)",
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] libroothide arch %u: NOP'd cbnz@0x%llx (after bl@0x%llx)",
                   i,
                   (unsigned long long)(funcVirt ? funcVirt + off + 4 : 0),
                   (unsigned long long)(funcVirt ? funcVirt + off     : 0));
@@ -942,13 +942,13 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             patchesApplied++;
             patchesTotal += nopsThisArch;
         } else {
-            NSLog(@"[RootHide] libroothide arch %u: no bl+cbnz pattern found%s, skipping",
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] libroothide arch %u: no bl+cbnz pattern found%s, skipping",
                   i, foundFunc ? " in _jbrootat_alloc" : " in __text");
         }
     }
 
     if (patchesApplied == 0 || patchesTotal == 0) {
-        NSLog(@"[RootHide] No architectures patched in libroothide.dylib (continuing)");
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] No architectures patched in libroothide.dylib (continuing)");
         return nil;  // Non-fatal
     }
 
@@ -960,7 +960,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // for explanation.  Re-signing is done in resignPatchedDylibs.
     chmod(path.fileSystemRepresentation, 0755);
 
-    NSLog(@"[RootHide] patched %lu architectures (%lu total NOPs) in libroothide.dylib",
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] patched %lu architectures (%lu total NOPs) in libroothide.dylib",
           (unsigned long)patchesApplied, (unsigned long)patchesTotal);
     return nil;
 }
@@ -1123,7 +1123,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         // No patching needed.  This is a no-op.
         NSError *patchError = [self patchRootHideAssertions];
         if (patchError) {
-            NSLog(@"[RootHide] patchRootHideAssertions (post-bootstrap) failed: %@", patchError);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] patchRootHideAssertions (post-bootstrap) failed: %@", patchError);
         }
 
         NSString *defaultSources = @"Types: deb\n"
@@ -1179,7 +1179,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     BOOL isBootstrapped = [fm fileExistsAtPath:bootstrappedPath];
     BOOL installedExists = [fm fileExistsAtPath:installedPath];
     BOOL needsBootstrap = !isBootstrapped && !installedExists;
-    NSLog(@"[RootHide] prepareBootstrap: .thebootstrapped=%d .installed_dopamine=%d dpkg=%d needsBootstrap=%d",
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] prepareBootstrap: .thebootstrapped=%d .installed_dopamine=%d dpkg=%d needsBootstrap=%d",
           isBootstrapped, installedExists, dpkgExists, needsBootstrap);
 
     // CASE 2: bootstrap was extracted before but with the wrong structure.
@@ -1187,7 +1187,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     if (!needsBootstrap && !dpkgExists) {
         NSString *oldDpkgPath = JBROOT_PATH(@"/var/jb/usr/bin/dpkg");
         if ([fm fileExistsAtPath:oldDpkgPath]) {
-            NSLog(@"[RootHide] Detected old Procursus bootstrap structure (dpkg at /var/jb/usr/bin/dpkg). Forcing re-extraction of RootHide bootstrap.");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Detected old Procursus bootstrap structure (dpkg at /var/jb/usr/bin/dpkg). Forcing re-extraction of RootHide bootstrap.");
             [[DOUIManager sharedInstance] sendLog:@"Migrating bootstrap to RootHide structure" debug:NO];
 
             // Wipe everything except basebin (we keep basebin because the
@@ -1427,11 +1427,11 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         NSString *installedVersion = [self installedVersionForPackageWithIdentifier:bundleID];
         BOOL shouldInstall = !installedVersion || !binaryExists;
 
-        NSLog(@"[RootHide] installPackageManagers: %@ (bundleID=%@ version=%@ binary=%d -> shouldInstall=%d)",
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] installPackageManagers: %@ (bundleID=%@ version=%@ binary=%d -> shouldInstall=%d)",
               name, bundleID, installedVersion, binaryExists, shouldInstall);
 
         if (!shouldInstall) {
-            NSLog(@"[RootHide] %@ already installed — re-trust-cache binary only (defensive)", name);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] %@ already installed — re-trust-cache binary only (defensive)", name);
             // Defensive: trust-cache lại (cdhash có thể bị mất sau reboot)
             [self trustCacheAppBinariesAfterInstall:name];
             // Refresh icon (uicache idempotent)
@@ -1439,7 +1439,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             continue;
         }
 
-        NSLog(@"[RootHide] Installing %@ from %@", name, debPath);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Installing %@ from %@", name, debPath);
 
         // ============================================================
         // FIX CRASH (per video RPReplay_Final1787506627.mp4):
@@ -1479,16 +1479,16 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
                                   "-i", "--force-all",
                                   debPath.fileSystemRepresentation, NULL);
-        NSLog(@"[RootHide] dpkg -i %@ exit code: %d", name, r);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] dpkg -i %@ exit code: %d", name, r);
         fflush(stderr);
 
         if (r != 0) {
             // Fallback: manuallyInstallDeb (cho case dpkg chưa available)
-            NSLog(@"[RootHide] dpkg -i failed (%d), falling back to manuallyInstallDeb", r);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] dpkg -i failed (%d), falling back to manuallyInstallDeb", r);
             fflush(stderr);
             NSError *installError = [self manuallyInstallDeb:debPath appName:name];
             if (installError) {
-                NSLog(@"[RootHide] Failed to install %@ (continuing — non-fatal): %@", name, installError);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Failed to install %@ (continuing — non-fatal): %@", name, installError);
                 continue;
             }
         } else {
@@ -1498,7 +1498,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
 
         // Run uicache to refresh the app icon
-        NSLog(@"[RootHide] uicache -p %@", appPath);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] uicache -p %@", appPath);
         exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", appPath.UTF8String, NULL);
     }
     return nil;
@@ -1541,7 +1541,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         NSString *executablePath = [realAppBundlePath stringByAppendingPathComponent:executableName];
         if ([fm fileExistsAtPath:executablePath]) {
             int tcR = jbclient_trust_file_by_path(executablePath.fileSystemRepresentation);
-            NSLog(@"[RootHide] trust-cache %@/%@ (binary): %d", appName, executableName, tcR);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] trust-cache %@/%@ (binary): %d", appName, executableName, tcR);
         }
 
         // Trust-cache tất cả .dylib trong Frameworks/
@@ -1622,7 +1622,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         // Remove trailing slash from BSD format names
         entryName = [entryName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 
-        NSLog(@"[RootHide] ar entry: %@ (size=%lu)", entryName, fileSize);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] ar entry: %@ (size=%lu)", entryName, fileSize);
 
         if ([entryName hasPrefix:@"data.tar"]) {
             dataTarData = [debData subdataWithRange:NSMakeRange(dataStart, fileSize)];
@@ -1641,7 +1641,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                                userInfo:@{NSLocalizedDescriptionKey: @"data.tar not found in .deb file"}];
     }
 
-    NSLog(@"[RootHide] Found %@ (%lu bytes)", dataTarName, (unsigned long)dataTarData.length);
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Found %@ (%lu bytes)", dataTarName, (unsigned long)dataTarData.length);
 
     // Write data.tar to a temp file
     NSString *tmpDir = [NSString stringWithFormat:@"/tmp/deb_%d", getpid()];
@@ -1652,20 +1652,20 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // Extract data.tar to jbroot using libarchive
     // libarchive can handle xz, gzip, lzma compression automatically
     NSString *jbrootPath = [NSString stringWithUTF8String:JBROOT_PATH("/")];
-    NSLog(@"[RootHide] Extracting data.tar to %@", jbrootPath);
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Extracting data.tar to %@", jbrootPath);
 
     // Write data.tar and use libarchive_unarchive to extract
     int extractRet = libarchive_unarchive(dataTarPath.fileSystemRepresentation,
                                           jbrootPath.fileSystemRepresentation);
     if (extractRet != 0) {
-        NSLog(@"[RootHide] libarchive extraction failed (%d), trying jbroot tar", extractRet);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] libarchive extraction failed (%d), trying jbroot tar", extractRet);
         // Fallback: use jbroot's /bin/tar
         NSString *tarCmd = [NSString stringWithFormat:
             @"\"%@\" -xf \"%@\" -C \"%@\"",
             JBROOT_PATH("/bin/tar"), dataTarPath, jbrootPath];
         int tarRet = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-c", tarCmd.UTF8String, NULL);
         if (tarRet != 0) {
-            NSLog(@"[RootHide] jbroot tar also failed (%d)", tarRet);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] jbroot tar also failed (%d)", tarRet);
         }
     }
 
@@ -1726,7 +1726,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
                             [fh writeData:[statusEntry dataUsingEncoding:NSUTF8StringEncoding]];
                             [fh closeFile];
                         } @catch (NSException *e) {
-                            NSLog(@"[RootHide] WARNING: failed to write dpkg status for %@: %@", appName, e);
+                            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] WARNING: failed to write dpkg status for %@: %@", appName, e);
                             [fh closeFile];
                         }
                     } else {
@@ -1743,7 +1743,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // Cleanup
     [fm removeItemAtPath:tmpDir error:nil];
 
-    NSLog(@"[RootHide] Successfully installed %@ (manual extraction)", appName);
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Successfully installed %@ (manual extraction)", appName);
 
     // ROOTHIDE: After installing the .deb, ensure every .app directory inside
     // <jbroot>/Applications/ has a `.jbroot` symlink pointing back to <jbroot>.
@@ -1787,7 +1787,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     NSString *appsRoot = JBROOT_PATH(@"/Applications");
     NSArray *apps = [fm contentsOfDirectoryAtPath:appsRoot error:nil];
     if (!apps) {
-        NSLog(@"[RootHide] ensureJbrootSymlinksInApps: /Applications not listable (yet) — skipping");
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] ensureJbrootSymlinksInApps: /Applications not listable (yet) — skipping");
         return;
     }
     NSUInteger created = 0;
@@ -1819,12 +1819,12 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         NSError *createErr = nil;
         if ([fm createSymbolicLinkAtPath:jbrootLink withDestinationPath:@"../.." error:&createErr]) {
             created++;
-            NSLog(@"[RootHide] ensureJbrootSymlinksInApps: created %@/.jbroot -> ../..", appPath);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] ensureJbrootSymlinksInApps: created %@/.jbroot -> ../..", appPath);
         } else {
-            NSLog(@"[RootHide] ensureJbrootSymlinksInApps: FAILED to create %@/.jbroot: %@", jbrootLink, createErr);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] ensureJbrootSymlinksInApps: FAILED to create %@/.jbroot: %@", jbrootLink, createErr);
         }
     }
-    NSLog(@"[RootHide] ensureJbrootSymlinksInApps: scanned %lu .app dirs, created %lu symlinks, verified %lu existing",
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] ensureJbrootSymlinksInApps: scanned %lu .app dirs, created %lu symlinks, verified %lu existing",
           (unsigned long)apps.count, (unsigned long)created, (unsigned long)verified);
 }
 
@@ -1885,21 +1885,21 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     //      even though the file exists and is readable.
     //   3. Trust-caching is sufficient — AMFI checks the trust cache
     //      before checking the embedded code signature.
-    NSLog(@"[RootHide] trust-caching patched dylibs...");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] trust-caching patched dylibs...");
 
     if ([fm fileExistsAtPath:roothideInitPath]) {
         chmod(roothideInitPath.fileSystemRepresentation, 0755);
         int tcR = jbclient_trust_file_by_path(roothideInitPath.fileSystemRepresentation);
-        NSLog(@"[RootHide] trust-cache roothideinit.dylib: %d", tcR);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] trust-cache roothideinit.dylib: %d", tcR);
     } else {
-        NSLog(@"[RootHide] WARNING: roothideinit.dylib missing — cannot trust-cache");
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] WARNING: roothideinit.dylib missing — cannot trust-cache");
     }
     if ([fm fileExistsAtPath:libroothidePath]) {
         chmod(libroothidePath.fileSystemRepresentation, 0755);
         int tcR = jbclient_trust_file_by_path(libroothidePath.fileSystemRepresentation);
-        NSLog(@"[RootHide] trust-cache libroothide.dylib: %d", tcR);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] trust-cache libroothide.dylib: %d", tcR);
     } else {
-        NSLog(@"[RootHide] WARNING: libroothide.dylib missing — cannot trust-cache");
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] WARNING: libroothide.dylib missing — cannot trust-cache");
     }
 
     return nil;
@@ -1955,7 +1955,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         }
     }
 
-    NSLog(@"[RootHide] trust-cache: %lu binaries trusted, %lu skipped", (unsigned long)trusted, (unsigned long)skipped);
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] trust-cache: %lu binaries trusted, %lu skipped", (unsigned long)trusted, (unsigned long)skipped);
 }
 
 // FIX LỖI 1 + 2: Tách install RootHide Manager thành method riêng để dễ retry
@@ -1980,11 +1980,11 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         BOOL roothideAppBinaryExists = [fm fileExistsAtPath:roothideAppBinaryPath];
         NSString *existingRootHideVersion = [self installedVersionForPackageWithIdentifier:@"com.roothide.manager"];
         BOOL shouldInstall = !existingRootHideVersion || !roothideAppBinaryExists;
-        NSLog(@"[RootHide] RootHide Manager: dpkg_version=%@ binary_exists=%d -> shouldInstall=%d",
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] RootHide Manager: dpkg_version=%@ binary_exists=%d -> shouldInstall=%d",
               existingRootHideVersion, roothideAppBinaryExists, shouldInstall);
 
         if (!shouldInstall) {
-            NSLog(@"[RootHide] RootHide Manager đã cài rồi — chỉ trust-cache lại (defensive)");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] RootHide Manager đã cài rồi — chỉ trust-cache lại (defensive)");
             // Ngay cả khi đã cài, vẫn trust-cache lại để đảm bảo cdhash trong trustcache
             // (có thể trustcache đã bị clear sau reboot)
             [self trustCacheAppBinariesAfterInstall:@"RootHide"];
@@ -2000,12 +2000,12 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         NSString *packagesDir = [[[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"Packages"] copy];
         NSString *roothideAppDeb = [packagesDir stringByAppendingPathComponent:@"roothideapp_1.3.9_iphoneos-arm64e.deb"];
         if (![fm fileExistsAtPath:roothideAppDeb]) {
-            NSLog(@"[RootHide] RootHide Manager deb NOT FOUND in bundle — skipping auto-install");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] RootHide Manager deb NOT FOUND in bundle — skipping auto-install");
             [[DOUIManager sharedInstance] sendLog:@"RootHide Manager deb not bundled (skipped)" debug:YES];
             return;
         }
 
-        NSLog(@"[RootHide] Installing RootHide Manager from %@", roothideAppDeb);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Installing RootHide Manager from %@", roothideAppDeb);
         [[DOUIManager sharedInstance] sendLog:@"Installing RootHide Manager" debug:NO];
 
         // ============================================================
@@ -2019,23 +2019,23 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
                                   "-i", "--force-all",
                                   roothideAppDeb.fileSystemRepresentation, NULL);
-        NSLog(@"[RootHide] dpkg -i RootHide Manager exit code: %d", r);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] dpkg -i RootHide Manager exit code: %d", r);
         fflush(stderr);
 
         if (r != 0) {
             // Fallback: manuallyInstallDeb
-            NSLog(@"[RootHide] dpkg -i failed (%d), falling back to manuallyInstallDeb", r);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] dpkg -i failed (%d), falling back to manuallyInstallDeb", r);
             fflush(stderr);
             NSError *installErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
             if (installErr) {
-                NSLog(@"[RootHide] RootHide Manager install FAILED (continuing — non-fatal): %@", installErr);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] RootHide Manager install FAILED (continuing — non-fatal): %@", installErr);
                 [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"RootHide Manager install failed: %@", installErr] debug:YES];
                 // FIX: Retry một lần. Có thể fail lần đầu do thư mục chưa exist sau extract.
                 // manuallyInstallDeb idempotent (nếu files đã exist, extract đè).
-                NSLog(@"[RootHide] Retrying RootHide Manager install...");
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Retrying RootHide Manager install...");
                 NSError *retryErr = [self manuallyInstallDeb:roothideAppDeb appName:@"RootHide"];
                 if (retryErr) {
-                    NSLog(@"[RootHide] RootHide Manager retry FAILED: %@", retryErr);
+                    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] RootHide Manager retry FAILED: %@", retryErr);
                     return;  // Cho up, không crash JB
                 }
             }
@@ -2047,9 +2047,9 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
         // Verify binary on disk
         BOOL binaryNowExists = [fm fileExistsAtPath:roothideAppBinaryPath];
-        NSLog(@"[RootHide] RootHide Manager install OK, binary on disk: %d", binaryNowExists);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] RootHide Manager install OK, binary on disk: %d", binaryNowExists);
         if (!binaryNowExists) {
-            NSLog(@"[RootHide] WARNING: install reported success but binary missing — dpkg status may be stale");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] WARNING: install reported success but binary missing — dpkg status may be stale");
             return;
         }
 
@@ -2057,7 +2057,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         // RootHide Manager cần setuid root để gọi jbctl/mount/trust-cache.
         exec_cmd_root("/usr/sbin/chown", "root:wheel", roothideAppBinaryPath.fileSystemRepresentation, NULL);
         exec_cmd_root("/bin/chmod", "6755", roothideAppBinaryPath.fileSystemRepresentation, NULL);
-        NSLog(@"[RootHide] Applied postinst-equivalent: chown root:wheel + chmod 6755 on RootHide binary");
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Applied postinst-equivalent: chown root:wheel + chmod 6755 on RootHide binary");
 
         // Trust-cache lần cuối (defensive — có thể fail lần đầu do binary
         // mới extract và jbserver chưa pick up)
@@ -2065,9 +2065,9 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
         // Refresh icon cache
         exec_cmd_trusted(JBROOT_PATH("/usr/bin/uicache"), "-p", "/Applications/RootHide.app", NULL);
-        NSLog(@"[RootHide] RootHide Manager install complete");
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] RootHide Manager install complete");
     } @catch (NSException *e) {
-        NSLog(@"[RootHide] EXCEPTION during RootHide Manager install: %@: %@", e.name, e.reason);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] EXCEPTION during RootHide Manager install: %@: %@", e.name, e.reason);
         // KHÔNG throw lên — JB tiếp tục
     }
 }
@@ -2093,7 +2093,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // 6. Re-trust-cache toàn bộ /Applications (defensive)
     // 7. Ensure .jbroot symlinks
     // 8. Trust-cache Dopamine app itself
-    NSLog(@"[RootHide] finalizeBootstrap: starting");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] finalizeBootstrap: starting");
 
     // ROOTHIDE FIX LỖI 1 (CRITICAL, v5):
     // Revert về flow ĐƠN GIẢN theo fork gốc (github.com/roothide/Dopamine)
@@ -2113,17 +2113,17 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     // Reboot sẽ do caller (DOJailbreaker.finalize → rebootUserspace) handle
 
     // Step 1: trust-cache bootstrap binaries (đảm bảo dpkg, sh, tar chạy được)
-    NSLog(@"[RootHide] Step 1/5: trust-caching bootstrap binaries...");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 1/5: trust-caching bootstrap binaries...");
     fflush(stderr);
     @try {
         [self trustCacheBootstrapBinaries];
     } @catch (NSException *e) {
-        NSLog(@"[RootHide] Step 1 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 1 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
     }
     fflush(stderr);
 
     // Step 2: run prep_bootstrap.sh (chỉ first jailbreak)
-    NSLog(@"[RootHide] Step 2/5: prep_bootstrap.sh check");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 2/5: prep_bootstrap.sh check");
     fflush(stderr);
     @try {
         NSString *prepBootstrapPath = JBROOT_PATH(@"/prep_bootstrap.sh");
@@ -2131,43 +2131,43 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             [[DOUIManager sharedInstance] sendLog:@"Finalizing Bootstrap" debug:NO];
             int r = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), prepBootstrapPath.fileSystemRepresentation, NULL);
             if (r != 0) {
-                NSLog(@"[RootHide] prep_bootstrap.sh returned %d (continuing — non-fatal)", r);
+                if (getenv("JB_DEBUG")) NSLog(@"[RootHide] prep_bootstrap.sh returned %d (continuing — non-fatal)", r);
             }
         } else {
-            NSLog(@"[RootHide] prep_bootstrap.sh not found (re-jailbreak) — skipping");
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] prep_bootstrap.sh not found (re-jailbreak) — skipping");
         }
         fflush(stderr);
     } @catch (NSException *e) {
-        NSLog(@"[RootHide] Step 2 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 2 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
         fflush(stderr);
     }
 
     // Step 3: install RootHide Manager app FIRST.
-    NSLog(@"[RootHide] Step 3/5: installing RootHide Manager app...");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 3/5: installing RootHide Manager app...");
     fflush(stderr);
     @try {
         [self installRootHideManagerApp];
     } @catch (NSException *e) {
-        NSLog(@"[RootHide] Step 3 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 3 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
         fflush(stderr);
     }
 
     // Step 4: install Sileo/Zebra
-    NSLog(@"[RootHide] Step 4/5: installing package managers (Sileo/Zebra)...");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 4/5: installing package managers (Sileo/Zebra)...");
     fflush(stderr);
     @try {
         NSError *pmError = [self installPackageManagers];
         if (pmError) {
-            NSLog(@"[RootHide] installPackageManagers FAILED (continuing — non-fatal): %@", pmError);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] installPackageManagers FAILED (continuing — non-fatal): %@", pmError);
         }
         fflush(stderr);
     } @catch (NSException *e) {
-        NSLog(@"[RootHide] Step 4 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 4 EXCEPTION (non-fatal): %@: %@", e.name, e.reason);
         fflush(stderr);
     }
 
     // Step 5: install bundled packages
-    NSLog(@"[RootHide] Step 5/5: installing bundled packages (libroot, libkrw, basebin-link, launchctl)...");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Step 5/5: installing bundled packages (libroot, libkrw, basebin-link, launchctl)...");
     fflush(stderr);
     @try {
         BOOL shouldInstallLibroot = [self shouldInstallPackage:@"libroot-dopamine"];
@@ -2193,12 +2193,12 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
                                       "-i", "--force-all",
                                       launchctlPath.fileSystemRepresentation, NULL);
-            NSLog(@"[RootHide] dpkg -i launchctl exit: %d", r);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] dpkg -i launchctl exit: %d", r);
             fflush(stderr);
             if (r != 0) {
                 // Fallback manuallyInstallDeb
                 NSError *installErr = [self manuallyInstallDeb:launchctlPath appName:@"launchctl"];
-                if (installErr) NSLog(@"[RootHide] launchctl install (non-fatal): %@", installErr);
+                if (installErr && getenv("JB_DEBUG")) NSLog(@"[RootHide] launchctl install (non-fatal): %@", installErr);
             }
         }
         if (shouldInstallLibroot) {
@@ -2206,11 +2206,11 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
                                       "-i", "--force-all",
                                       librootPath.fileSystemRepresentation, NULL);
-            NSLog(@"[RootHide] dpkg -i libroot exit: %d", r);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] dpkg -i libroot exit: %d", r);
             fflush(stderr);
             if (r != 0) {
                 NSError *installErr = [self manuallyInstallDeb:librootPath appName:@"libroot"];
-                if (installErr) NSLog(@"[RootHide] libroot install (non-fatal): %@", installErr);
+                if (installErr && getenv("JB_DEBUG")) NSLog(@"[RootHide] libroot install (non-fatal): %@", installErr);
             }
         }
         if (shouldInstallLibkrw) {
@@ -2218,11 +2218,11 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
                                       "-i", "--force-all",
                                       libkrwPath.fileSystemRepresentation, NULL);
-            NSLog(@"[RootHide] dpkg -i libkrw exit: %d", r);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] dpkg -i libkrw exit: %d", r);
             fflush(stderr);
             if (r != 0) {
                 NSError *installErr = [self manuallyInstallDeb:libkrwPath appName:@"libkrw"];
-                if (installErr) NSLog(@"[RootHide] libkrw install (non-fatal): %@", installErr);
+                if (installErr && getenv("JB_DEBUG")) NSLog(@"[RootHide] libkrw install (non-fatal): %@", installErr);
             }
         }
         if (shouldInstallBasebinLink) {
@@ -2239,23 +2239,23 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             int r = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
                                       "-i", "--force-all",
                                       basebinLinkPath.fileSystemRepresentation, NULL);
-            NSLog(@"[RootHide] dpkg -i basebin-link exit: %d", r);
+            if (getenv("JB_DEBUG")) NSLog(@"[RootHide] dpkg -i basebin-link exit: %d", r);
             fflush(stderr);
             if (r != 0) {
                 NSError *installErr = [self manuallyInstallDeb:basebinLinkPath appName:@"basebin-link"];
-                if (installErr) NSLog(@"[RootHide] basebin-link install (non-fatal): %@", installErr);
+                if (installErr && getenv("JB_DEBUG")) NSLog(@"[RootHide] basebin-link install (non-fatal): %@", installErr);
             }
         }
         fflush(stderr);
     } @catch (NSException *e) {
-        NSLog(@"[RootHide] EXCEPTION during bundled packages install: %@: %@", e.name, e.reason);
+        if (getenv("JB_DEBUG")) NSLog(@"[RootHide] EXCEPTION during bundled packages install: %@: %@", e.name, e.reason);
         fflush(stderr);
     }
 
     // ROOTHIDE FIX LỖI 1 v5: KHÔNG gọi reboot trong finalizeBootstrap
     // Caller (DOMainViewController → fadeToBlack → jailbreaker.finalize → rebootUserspace)
     // sẽ handle reboot SAU khi finalizeBootstrap return thành công
-    NSLog(@"[RootHide] finalizeBootstrap: DONE — caller will handle reboot");
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] finalizeBootstrap: DONE — caller will handle reboot");
     fflush(stderr);
     return nil;
 }
@@ -2274,19 +2274,19 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     //   /var/mobile/Containers/Shared/AppGroup/.jbroot-<JBRAND>
     //   /var/mobile/Containers/Data/Application/.jbroot-<JBRAND> (old)
     NSString *jbrootPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
-    NSLog(@"[RootHide] deleteBootstrap: removing %@", jbrootPath);
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] deleteBootstrap: removing %@", jbrootPath);
 
     // Remove the jbroot directory itself — use exec_cmd_root (rm -rf) because
     // NSFileManager removeItemAtPath fails on /var/containers/Bundle/Application/
     // due to AMFI restrictions (same reason mkdir fails).
     exec_cmd_root("/bin/rm", "-rf", jbrootPath.fileSystemRepresentation, NULL);
-    NSLog(@"[RootHide] Removed jbroot at %@", jbrootPath);
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Removed jbroot at %@", jbrootPath);
 
     // Remove the secondary AppGroup container
     NSString *jbrootName = jbrootPath.lastPathComponent;
     NSString *secondaryPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", jbrootName];
     exec_cmd_root("/bin/rm", "-rf", secondaryPath.fileSystemRepresentation, NULL);
-    NSLog(@"[RootHide] Removed secondary at %@", secondaryPath);
+    if (getenv("JB_DEBUG")) NSLog(@"[RootHide] Removed secondary at %@", secondaryPath);
 
     // Also remove old-style path
     NSString *oldSecondaryPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", jbrootName];
