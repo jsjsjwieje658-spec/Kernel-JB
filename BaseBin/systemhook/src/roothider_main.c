@@ -64,10 +64,31 @@ bool _CFCanChangeEUIDs(void) {
 void loadPathHook() {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        void *roothidehooks = dlopen(JBROOT_PATH("/basebin/roothidehooks.dylib"), RTLD_NOW);
-        ASSERT(roothidehooks != NULL);
+        // RootHide port: hardened against missing dylib.
+        // The original Relaxin / Dopamine2 code uses ASSERT() here, which abort()s the
+        // process if /basebin/roothidehooks.dylib is missing or if the `pathhook` symbol
+        // is not exported. That is fine on a fully-installed bootstrap, but on a
+        // partially-installed one (e.g. interrupted tipa install, or first launch after
+        // an OTA where the bootstrap hasn't been re-staged yet), ASSERT would crash the
+        // Relaxin / SideStore app at startup — which the user sees as "the jailbreak app
+        // won't open" and may reboot, leading to a perceived bootloop.
+        //
+        // We instead silently skip the path hook if the dylib or symbol is unavailable.
+        // The only consequence is that the Relaxin / SideStore app's _CFCopyHomeDirURLForUser
+        // won't be redirected to jbroot, which means the app sees its stock home dir —
+        // a much better failure mode than crashing.
+        const char *roothidehooksPath = JBROOT_PATH("/basebin/roothidehooks.dylib");
+        if (access(roothidehooksPath, F_OK) != 0) {
+            return;
+        }
+        void *roothidehooks = dlopen(roothidehooksPath, RTLD_NOW);
+        if (roothidehooks == NULL) {
+            return;
+        }
         void (*pathhook)() = dlsym(roothidehooks, "pathhook");
-        ASSERT(pathhook != NULL);
+        if (pathhook == NULL) {
+            return;
+        }
         pathhook();
     });
 }
@@ -513,7 +534,19 @@ void roothide_init_with_checkin(const char *rootdir) {
 
     redirect_paths(rootdir);
 
-    dlopen(JBROOT_PATH("/usr/lib/roothideinit.dylib"), RTLD_NOW);
+    // RootHide port: guard dlopen with access(F_OK) so a missing roothideinit.dylib
+    // cannot crash this constructor. The dylib is part of the RootHide bootstrap and
+    // is normally always present, but if the bootstrap was only partially installed
+    // (e.g. interrupted tipa install, or first launch after OTA before re-staging),
+    // dlopen would return NULL and any further dlsym calls on the handle would crash.
+    // We already have the early-exit guard in main.c::initializer() for clean mode,
+    // but here we're on the normal code path where hooks must be installed.
+    {
+        const char *roothideinitPath = JBROOT_PATH("/usr/lib/roothideinit.dylib");
+        if (access(roothideinitPath, F_OK) == 0) {
+            dlopen(roothideinitPath, RTLD_NOW);
+        }
+    }
 }
 
 void roothide_init_with_executable(const char *executable) {
@@ -528,5 +561,14 @@ void roothide_init_with_executable(const char *executable) {
         loadPathHook(); //requre jit
     }
 
-    dlopen(JBROOT_PATH("/usr/lib/roothidepatch.dylib"), RTLD_NOW); //require jit
+    // RootHide port: same access(F_OK) guard as above. roothidepatch.dylib contains
+    // per-executable patches (e.g. additional hiding / path normalization). If it's
+    // missing, we silently skip — the rest of the per-process hooks installed by this
+    // constructor (sysctl + loadPathHook) still work.
+    {
+        const char *roothidepatchPath = JBROOT_PATH("/usr/lib/roothidepatch.dylib");
+        if (access(roothidepatchPath, F_OK) == 0) {
+            dlopen(roothidepatchPath, RTLD_NOW);
+        }
+    }
 }

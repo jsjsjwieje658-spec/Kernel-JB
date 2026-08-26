@@ -21,6 +21,10 @@
 #include "sandbox.h"
 #include "common/private.h"
 #include "common/inline.h"
+// RootHide port: required for roothide_init_with_executable() declaration
+// (called from initializer() below). Without this include the build fails
+// with "implicit declaration of function 'roothide_init_with_executable'".
+#include "roothider.h"
 
 bool gFullyDebugged = false;
 static void *gLibSandboxHandle;
@@ -432,6 +436,40 @@ int parse_dyldhook_jbinfo(char **jbRootPathOut, char **bootUUIDOut, char **sandb
 
 __attribute__((constructor)) static void initializer(void)
 {
+        // ========== ROOTHIDE CLEAN MODE EARLY EXIT ==========
+        // If this process was launched with ROOTHIDE_CLEAN_MODE_ENV=1 (or ROOTHIDE_MODE_ENV=hide)
+        // AND we are NOT launchd (pid 1), we must skip ALL hook installation and dylib loading.
+        //
+        // Why pid != 1 guard:
+        //   launchd (pid 1) is the ROOT process that spawns every other process. It must NEVER
+        //   be in clean mode — if it were, no daemon would get the trust-cache upload / sandbox
+        //   extension / posix_spawn hooks, and the entire jailbreak would silently die, leading
+        //   to a soft-brick where apps launch but immediately crash because their jbroot-relative
+        //   dependencies cannot be resolved.
+        //   The spawn_hook.c in launchdhook only sets ROOTHIDE_CLEAN_MODE_ENV on the *child* envp,
+        //   not on launchd's own environ, so pid=1 will never actually see this env var — but we
+        //   guard anyway as a defense-in-depth measure.
+        //
+        // What we skip on early-exit (everything below this block):
+        //   - posix_spawn / execve / fcntl / sandbox_apply / dlsym / csops / necp_* hooks
+        //   - dlopen forkfix / roothidehooks / watchdoghook / TweakLoader
+        //   - roothide_init_with_checkin / roothide_init_with_executable
+        //   - jbclient_cs_revalidate
+        // All of these would either install detectable hooks into the banking app, or load
+        // dylibs that themselves contain __attribute__((constructor)) code which would install
+        // further hooks. Skipping them all gives the cleanest possible "looks-stock" process.
+        if (getpid() != 1) {
+                const char *cleanMode = getenv(ROOTHIDE_CLEAN_MODE_ENV);
+                if (cleanMode && strcmp(cleanMode, "1") == 0) {
+                        return;
+                }
+                const char *roothideMode = getenv(ROOTHIDE_MODE_ENV);
+                if (roothideMode && strcmp(roothideMode, "hide") == 0) {
+                        return;
+                }
+        }
+        // ========== END CLEAN MODE EARLY EXIT ==========
+
         // Under normal circumstances, dyldhook will have already handled the check-in, so get the check-in information from the __jbinfo section
         // For more information on the check-in process, check the comments in dyldhook
         if (parse_dyldhook_jbinfo(&JB_RootPath, &JB_BootUUID, &JB_SandboxExtensions, &gFullyDebugged) != 0) {
@@ -571,42 +609,23 @@ __attribute__((constructor)) static void initializer(void)
                         litehook_hook_function(necp_session_action, necp_session_action_hook);
                 }
 #endif
-                // Load tweaks if desired
-                // Resolve the loader through the active jbroot so relocated roots remain supported.
-                
-                // ========== ROOTHIDE HIDE INITIALIZATION ==========
-                // Initialize RootHide hiding subsystem for blacklisted apps
-                // This must happen BEFORE loading tweaks to ensure clean environment
-                //
-                // RootHide port: the old `roothide_hide_init(true)` call (from
-                // the deleted patchwork file `libjailbreak/src/roothide_hide.c`)
-                // has been removed. In the Relaxin upstream fork, per-process
-                // hiding is implemented by `roothidehooks.dylib` (loaded into
-                // cfprefsd/lsd/SpringBoard/runningboardd via DYLD_INSERT_LIBRARIES
-                // from systemhook/src/roothider_main.c). The clean-mode env var
-                // check below is preserved for backward compatibility with the
-                // existing Kernel-JB Application-side bootstrap logic in
-                // DOBootstrapper.m (which still sets ROOTHIDE_CLEAN_MODE_ENV on
-                // children that should skip tweak injection).
-                bool isCleanMode = false;
-                if (getenv(ROOTHIDE_CLEAN_MODE_ENV)) {
-                        const char *cleanMode = getenv(ROOTHIDE_CLEAN_MODE_ENV);
-                        if (cleanMode && strcmp(cleanMode, "1") == 0) {
-                                isCleanMode = true;
-                        }
-                }
-                if (getenv(ROOTHIDE_MODE_ENV)) {
-                        const char *roothideMode = getenv(ROOTHIDE_MODE_ENV);
-                        if (roothideMode && strcmp(roothideMode, "hide") == 0) {
-                                isCleanMode = true;
-                        }
-                }
-                // Silence unused-variable warning; the env-var reads above are kept
-                // for backward-compat inspection (a future commit will route the
-                // clean-mode flag through the Relaxin roothidehooks per-process dylib).
-                (void)isCleanMode;
-                // ========== END ROOTHIDE INIT ==========
-                
+                // ========== ROOTHIDE PER-EXECUTABLE PATCH ==========
+                // Run roothide_init_with_executable AFTER posix_spawn/fcntl/sandbox hooks are
+                // in place (so that dylib-load hooks triggered by the dlopen below see the
+                // patched environment) but BEFORE TweakLoader so that:
+                //   - On arm64 + iOS 16-18 + non-removable-bundle system daemons (coreauthd,
+                //     ctkd, securityd, keybagd), __sysctl / __sysctlbyname hooks get installed
+                //     (Dopamine2 has these since ios16).
+                //   - On arm64, palera1n hook gets loaded into coreauthd/ctkd/securityd/keybagd
+                //     via roothidehooks.dylib (no-op on arm64e — guarded inside
+                //     roothider_main.c::roothide_init_with_executable by `#ifndef __arm64e__`).
+                //   - On Relaxin / SideStore app paths, loadPathHook() hooks _CFCopyHomeDirURLForUser.
+                //   - roothidepatch.dylib is loaded for all jbroot-relative executables.
+                // The dlopen inside roothide_init_with_executable is guarded by access(F_OK)
+                // internally so a missing dylib cannot crash the constructor.
+                roothide_init_with_executable(gExecutablePath);
+                // ========== END ROOTHIDE PER-EXECUTABLE PATCH ==========
+
                 if (should_enable_tweaks()) {
                         const char *tweakLoaderPath = JBROOT_PATH("/usr/lib/TweakLoader.dylib");
                         if (access(tweakLoaderPath, F_OK) == 0) {
