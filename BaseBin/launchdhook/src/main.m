@@ -30,6 +30,26 @@
 #import "jbserver/jbserver_local.h"
 #import "asl.h"
 
+// RootHide port: forward-declare the roothide init hooks that live in roothider.m.
+// These MUST be called from this constructor in the correct order:
+//   1. roothide_launchd_preinit() — at the very top, BEFORE boomerang_recoverPrimitives.
+//      Sets jbinfo(dyld_patch_enabled) = false and calls exec_set_patch(false) so that
+//      the early-spawned processes (xpcproxy, runtimed, etc.) do NOT get dyld-patched
+//      before the jailbreak is fully initialized.
+//   2. roothide_launchd_postinit(firstLoad) — at the very END, after setenv() calls.
+//      Initializes jailbreakd (assert(initJailbreakd(firstLoad) == 0)), installs
+//      the sysctl/bind/xpc hooks, loads app-stored identifiers, and (if !firstLoad)
+//      publishes the system-wide SystemHook dylib at /usr/lib/systemhook-<jbrand>.dylib.
+// Without these two calls:
+//   - jailbreakd never starts → every subsequent XPC call to jbserver fails →
+//     spawn-bypass can't check isBlacklistedPath → banking apps spawn without
+//     protection AND normal apps can't get trust-cache uploads → AMFI rejects
+//     every binary → process crashes → launchd can't recover → kernel panic
+//     → userspace reboot → launchdhook re-runs → cycle repeats → user must
+//     force-restart the device (the "tắt nguồn" symptom the user reported).
+extern void roothide_launchd_preinit(void);
+extern void roothide_launchd_postinit(bool firstLoad);
+
 bool gInEarlyBoot = true;
 
 void abort_with_reason(uint32_t reason_namespace, uint64_t reason_code, const char *reason_string, uint64_t reason_flags);
@@ -88,6 +108,14 @@ int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp,
 __attribute__((constructor)) static void initializer(void)
 {
         crashreporter_start();
+
+        // RootHide port: roothide_launchd_preinit() MUST run before anything else.
+        // It calls jbinfo(dyld_patch_enabled) = false and exec_set_patch(false),
+        // which prevents the early-spawned processes (xpcproxy, runtimed) from
+        // being dyld-patched before the jailbreak is fully initialized.
+        // Without this, the post-init hook below (which enables exec_patch) would
+        // race with the first spawn, leaving processes in an inconsistent state.
+        roothide_launchd_preinit();
 
         // Retrieve jbroot path early based on our dylib path (<JBROOT>/basebin/launchd) so we can use JBROOT_PATH before boomerang_recoverPrimitives
         @autoreleasepool {
@@ -214,4 +242,55 @@ __attribute__((constructor)) static void initializer(void)
         // Set an identifier that uniquely identifies this userspace boot
         // Part of rootless v2 spec
         setenv("LAUNCHD_UUID", [NSUUID UUID].UUIDString.UTF8String, 1);
+
+        // RootHide port: roothide_launchd_postinit(firstLoad) MUST run last.
+        //
+        // This function (defined in roothider.m) does the following critical work:
+        //   - Sets jbinfo(dyld_patch_enabled) = false (matches preinit policy)
+        //   - Calls exec_set_patch(true) — enables execve patching for spawned processes
+        //   - On first load (jailbreak just activated): hides Developer Mode (iOS 16+),
+        //     sets roothide_config spinlock fix (iOS 15 arm64e)
+        //   - On subsequent loads (userspace reboot): publishes the system-wide
+        //     SystemHook dylib by moving /basebin/systemhook.dylib to
+        //     /basebin/systemhook-<jbrand>.dylib and bind-mounting it onto
+        //     /usr/lib/systemhook-<jbrand>.dylib, then sets HOOK_DYLIB_PATH
+        //   - Installs sysctl/bind/xpc hooks (MSHookFunction)
+        //   - Loads app-stored identifiers
+        //   - assert(initJailbreakd(firstLoad) == 0) — starts the jailbreakd daemon
+        //     which serves the JBS_DOMAIN_ROOTHIDE / JBS_DOMAIN_ROOT / JBS_DOMAIN_SYSTEMWIDE
+        //     XPC domains that every other process on the system talks to for:
+        //       * trust-cache uploads (jbclient_trust_file_by_path etc.)
+        //       * process check-in (jbclient_process_checkin)
+        //       * blacklist queries (isBlacklistedPath → jbclient_blacklist_check_bundle)
+        //       * jailbreak settings (jbsettings)
+        //
+        // Without this call (the bug fixed in this commit):
+        //   - jailbreakd NEVER starts
+        //   - roothide_launchd___posix_spawn_prehook (now installed by initSpawnHooks
+        //     as the __posix_spawn hook) calls isBlacklistedPath(), which XPC-calls
+        //     jailbreakd → XPC fails → returns false → spawn-bypass falls through to
+        //     __posix_spawn_hook → posix_spawn_hook_shared → tries to insert
+        //     systemhook.dylib into DYLD_INSERT_LIBRARIES, but trust_binary(path)
+        //     also XPC-calls jailbreakd → fails → binary is NOT trust-cached →
+        //     AMFI rejects the binary at exec time → process crashes with SIGKILL.
+        //   - Every system daemon that spawns after this point crashes the same way.
+        //   - launchd can't recover because launchdhook itself is in DYLD_INSERT_LIBRARIES
+        //     and re-runs on every userspace reboot, re-triggering the same failure.
+        //   - The user sees: Dopamine logo (drawn by draw_boot_logo before the boot
+        //     attempt) → black screen (no Apple logo because launchd never got far
+        //     enough to start backboardd) → device turns off (kernel panic watchdog).
+        //
+        // Risk mitigation (Patch 3 — Devil's Advocate):
+        //   - If initJailbreakd fails (returns non-zero), the assert() inside
+        //     roothide_launchd_postinit will abort launchd → userspace reboot →
+        //     on next boot, firstLoad=true path is taken (because DOPAMINE_INITIALIZED
+        //     was set), which defers SystemHook publication and just calls
+        //     initJailbreakd again. If initJailbreakd persistently fails, the user
+        //     will see a bootloop — but this is the SAME behavior as Dopamine2-roothide,
+        //     and indicates a real problem (broken bootstrap) that should be fixed
+        //     by re-installing the jailbreak, not by silently continuing.
+        //   - On firstLoad=true (first jailbreak, not userspace reboot), the
+        //     SystemHook publication is deferred to the next userspace reboot,
+        //     so the assert can't take down a previously-working jailbreak.
+        roothide_launchd_postinit(firstLoad);
 }
