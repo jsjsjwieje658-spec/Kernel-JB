@@ -196,27 +196,18 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
                 }
         }
 
-        // ========== ROOTHIDE ENVIRONMENT PROPAGATION ==========
-        // Check if the spawned process should run in clean mode
-        // This is the key mechanism for RootHide's selective injection
+        // ========== ROOTHIDE SELECTIVE INJECTION ==========
+        // Decide whether this child should be spawned completely clean (no
+        // systemhook injection, no jailbreak-related env modifications).
         bool shouldHideForChild = false;
 
-        // FIX BUG #28: defer roothide_init() đến khi launchd XPC server đã up.
-        // Trước đây roothide_init() được gọi ở đây ngay khi launchd spawn bất kỳ
-        // process nào, kể cả khi jbserver chưa ready. Khi đó get_jbroot() trả về
-        // NULL → fallback "/private/preboot" → g_roothide.base_jbroot bị set
-        // sai → mọi check should_hide_path() sau đó fail.
+        // FIX BUG #28: defer any roothide logic until the launchd XPC server is
+        // up (i.e. after early_boot_done / first xpcproxy spawn). Before that,
+        // the jbserver is not reachable, so blacklist queries would fail anyway.
         //
-        // Fix: chỉ init sau early_boot_done (sau khi thấy xpcproxy spawn).
-        // Trước đó, không check blacklist (trả về shouldHideForChild=false).
-        //
-        // RootHide port: the old `roothide_init()` call has been removed because
-        // the patchwork libjailbreak/src/roothide.c was deleted. The Relaxin
-        // upstream equivalent (`roothider/common.m::roothide_patch_proc`,
-        // `roothider/main.m::roothide_init_with_checkin`) is invoked from the
-        // Relaxin launchdhook roothider.m (roothide_launchd_preinit / postinit)
-        // at process startup. We retain only the env-var propagation + the
-        // dynamic `jbclient_blacklist_check_bundle()` lookup below.
+        // RootHide port: per-process init is handled by the Relaxin launchdhook
+        // roothider.m (roothide_launchd_preinit / postinit). We retain only the
+        // env-var propagation check + the dynamic blacklist lookup below.
         if (!gInEarlyBoot) {
 
                 // Check if current process is already in clean mode (propagate to children)
@@ -227,75 +218,71 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
                         }
                 }
 
-                // FIX LỖI 1 (bonus): nếu path có chứa app name (vd /var/containers/Bundle/Application/.../Foo.app/Foo)
-                // thì cũng check blacklist động để đảm bảo app banking/detection được skip injection
-                // kể cả khi parent chưa set env var (vd SpringBoard launch trực tiếp).
+                // FIX BLACKLIST INPUT BUG (root cause of banking apps detecting
+                // the jailbreak despite the RootHide app blacklist):
+                //
+                // The old code extracted the app bundle DIRECTORY NAME from the
+                // spawn path (e.g. "iBank" from
+                // /var/containers/Bundle/Application/<UUID>/iBank.app/iBank) and
+                // passed it to jbclient_blacklist_check_bundle(). However the
+                // server side (isBlacklistedApp, blacklist.m:76) looks up by
+                // CFBundleIdentifier (e.g. "com.vietinbank.iBank") inside
+                // RootHideConfig.plist appconfig — so the lookup could never
+                // match and blacklisted apps still got tweak injection.
+                //
+                // Fix: pass the FULL executable path via jbclient_blacklist_check_path().
+                // The server side (isBlacklistedPath, blacklist.m:99) resolves
+                // path -> <Bundle>.app/Info.plist -> CFBundleIdentifier ->
+                // appconfig lookup, which is exactly how the official
+                // Dopamine2-roothide does it (roothider.m:378 calls
+                // isBlacklistedPath(path) in the launchd prehook).
+                //
+                // The strstr(".app/") pre-filter keeps system daemons (the vast
+                // majority of spawns) off the XPC path; only user app launches
+                // pay the ~1ms round-trip. Extensions of blacklisted apps are
+                // covered too: getAppBundlePathFromSpawnPath resolves
+                // /PlugIns/*.appex/ paths to the main bundle identifier.
+                //
+                // Fail-safe: if the jbserver is unreachable, the query returns
+                // false and the app is spawned normally (same behaviour as
+                // before) — this can never hang or break boot.
                 if (!shouldHideForChild && path && strstr(path, ".app/")) {
-                        // Extract bundle ID từ path: lấy substring giữa "/" cuối cùng trước ".app/" và "/<binary>" sau .app/
-                        char bundleBuf[256];
-                        const char *appMarker = strstr(path, ".app/");
-                        if (appMarker) {
-                                // Tìm "/" trước ".app/"
-                                const char *p = appMarker - 1;
-                                while (p >= path && *p != '/') p--;
-                                if (p >= path && *p == '/') {
-                                        p++; // skip '/'
-                                        size_t len = appMarker - p;
-                                        if (len > 0 && len < sizeof(bundleBuf)) {
-                                                memcpy(bundleBuf, p, len);
-                                                bundleBuf[len] = '\0';
-                                                // Query động blacklist
-                                                // Chỉ dùng nếu launchd đã up (đã check ở trên)
-                                                // RootHide port: switched from jbclient_roothide_is_blacklisted (old patchwork API)
-                                                // to jbclient_blacklist_check_bundle (Relaxin upstream API, declared in jbclient_xpc.h).
-                                                if (jbclient_blacklist_check_bundle(bundleBuf)) {
-                                                        shouldHideForChild = true;
-                                                }
-                                        }
-                                }
+                        if (jbclient_blacklist_check_path(path)) {
+                                shouldHideForChild = true;
                         }
                 }
         }
 
-        // If we need to hide this child, modify envp to include clean mode flag
-        // We do this by using environ instead of envp and setting the env var
         if (shouldHideForChild) {
 #if LOG_PROCESS_LAUNCHES
                 FILE *f = fopen("/var/mobile/launch_log.txt", "a");
-                fprintf(f, "RootHide: Hiding child process %s\n", path);
+                fprintf(f, "RootHide: Spawning clean (no injection): %s\n", path);
                 fclose(f);
 #endif
-                setenv(ROOTHIDE_CLEAN_MODE_ENV, "1", 1); // Propagate to child
+                // Spawn completely clean, mirroring the official Dopamine2-roothide
+                // behaviour (roothider.m prehook calls __posix_spawn_orig_wrapper for
+                // blacklisted apps). The old implementation only set a "clean mode"
+                // env var and STILL injected systemhook.dylib into the child —
+                // detectable by any app enumerating its dyld image list — and it
+                // polluted launchd's environ with ROOTHIDE_CLEAN_MODE_ENV forever
+                // after the first blacklisted launch, disabling tweaks system-wide.
+                //
+                // Going through the original wrapper here means:
+                //   - no DYLD_INSERT_LIBRARIES injection
+                //   - no trustcache upload / CS_DEBUGGED marking for the child
+                //   - the caller's envp is passed through untouched
+                // Children spawned by the clean app are naturally clean as well
+                // (the app itself has no systemhook, so nothing hooks its
+                // posix_spawn calls).
+                return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
         }
 
-        // FIX BUG #23 + #propagation: trước đây setenv(ROOTHIDE_CLEAN_MODE_ENV)
-        // được gọi trên `environ` của launchd, nhưng posix_spawn_hook_shared vẫn
-        // truyền `envp` gốc → child KHÔNG thấy env var → app banking vẫn được
-        // inject tweak → crash.
-        //
-        // Fix:
-        // 1) Nếu shouldHideForChild=true → truyền envp=NULL để spawn dùng environ
-        //    (đã có ROOTHIDE_CLEAN_MODE_ENV=1 set ở trên).
-        // 2) Tạm thời unset DOPAMINE_IS_HIDDEN trên environ để child không thấy
-        //    env var này (anti-detection). Sau spawn, set lại để launchd giữ state.
-        bool isHidden = (getenv("DOPAMINE_IS_HIDDEN") != NULL);
-        const char *hiddenVal = isHidden ? strdup(getenv("DOPAMINE_IS_HIDDEN")) : NULL;
-        if (isHidden) {
-                unsetenv("DOPAMINE_IS_HIDDEN");
-        }
-        char *const *childEnvp = shouldHideForChild ? NULL : envp;
-        int r = posix_spawn_hook_shared(pid, path, desc, argv, childEnvp,
+        return posix_spawn_hook_shared(pid, path, desc, argv, envp,
                                        __posix_spawn_orig_wrapper,
                                        systemwide_trust_file_by_path,
                                        platform_set_process_debugged,
                                        jbsetting(jetsamMultiplier));
-        // Restore launchd env (cho launchd tiếp tục biết trạng thái hide)
-        if (isHidden && hiddenVal) {
-                setenv("DOPAMINE_IS_HIDDEN", hiddenVal, 1);
-                free((void *)hiddenVal);
-        }
-        return r;
-        // ========== END ROOTHIDE PROPAGATION ==========
+        // ========== END ROOTHIDE SELECTIVE INJECTION ==========
 }
 
 void initSpawnHooks(void)

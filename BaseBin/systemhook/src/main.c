@@ -218,7 +218,8 @@ bool should_enable_tweaks(void)
         }
         // ========== END ROOTHIDE CHECK ==========
 
-        // FIX LỖI 1: Dynamic blacklist query.
+        // FIX BLACKLIST INPUT BUG (defense in depth — matches the launchd-side
+        // fix in spawn_hook.c):
         // Env var check ở trên CHỈ hiệu quả khi spawn_hook của launchd đã set
         // env var đúng trước khi spawn child. Tuy nhiên có nhiều path mà env
         // var không được truyền đúng:
@@ -232,45 +233,30 @@ bool should_enable_tweaks(void)
         // blacklist từ launchd. Nhược điểm: +1 XPC round-trip mỗi launch, nhưng
         // chi phí ~0.5ms, không đáng kể so với thời gian load dylib.
         //
+        // FIX: The old code extracted the app bundle DIRECTORY NAME (e.g. "iBank")
+        // and passed it to jbclient_blacklist_check_bundle(). The server side
+        // (isBlacklistedApp, blacklist.m:76) looks up by CFBundleIdentifier
+        // (e.g. "com.vietinbank.iBank") in RootHideConfig.plist appconfig — so
+        // the lookup NEVER matched and tweaks were still loaded into blacklisted
+        // apps. Fix: pass the FULL executable path via jbclient_blacklist_check_path();
+        // the server resolves path -> Info.plist -> CFBundleIdentifier -> appconfig
+        // (isBlacklistedPath, blacklist.m:99), exactly like the official
+        // Dopamine2-roothide does.
+        //
         // Fail-safe: nếu không kết nối được tới launchd (early boot, trong
         // xpcproxy đầu tiên), return true (cho phép tweaks) để tránh bootloop.
         // Sau khi launchdhook install xong, lần query sau sẽ thành công.
+        // Nếu là system binary (trong /usr/, /bin/, /sbin/) → skip query.
         {
-                // Lấy bundle ID của process hiện tại từ executable path.
-                // Heuristic: nếu executable path có dạng /private/var/containers/Bundle/Application/<UUID>/<Bundle>.app/<Binary>
-                // thì bundle ID chính là <Bundle> (chưa chính xác 100%, nhưng đủ tốt
-                // cho các app banking phổ biến như com.vcb.IB → "IB" hoặc com.vietinbank.iBank → "iBank").
-                // Cách chính xác hơn: đọc Info.plist trong cùng thư mục với executable.
-                // Nhưng để tránh I/O overhead, ta chỉ query khi env var không có.
-                // Nếu là system binary (trong /usr/, /bin/, /sbin/) → skip query.
                 if (gExecutablePath[0] != '\0' &&
                     strstr(gExecutablePath, "/var/containers/Bundle/Application/") != NULL) {
-                        // Đây là app user-installed → query blacklist động
-                        // Lấy bundle ID từ Info.plist
-                        char infoPlistPath[PATH_MAX];
-                        snprintf(infoPlistPath, sizeof(infoPlistPath), "%s", gExecutablePath);
-                        // Tìm "/<binary_name>" cuối cùng trong path
-                        char *lastSlash = strrchr(infoPlistPath, '/');
-                        if (lastSlash) {
-                                // Cắt bớt để lấy thư mục .app
-                                *lastSlash = '\0';
-                                char *appDir = strrchr(infoPlistPath, '/');
-                                if (appDir && strstr(appDir, ".app")) {
-                                        // Bundle ID = directory name trước .app
-                                        char *bundleIDStart = appDir + 1; // skip '/'
-                                        char *dotApp = strstr(bundleIDStart, ".app");
-                                        if (dotApp) {
-                                                *dotApp = '\0';
-                                                // RootHide port: switched from jbclient_roothide_is_blacklisted (old patchwork API)
-                                                // to jbclient_blacklist_check_bundle (Relaxin upstream API).
-                                                if (jbclient_blacklist_check_bundle(bundleIDStart)) {
-                                                        // FIX: cũng set env để các dylib khác trong cùng process
-                                                        // (nếu được inject trước khi check này) biết clean mode đang on
-                                                        setenv(ROOTHIDE_CLEAN_MODE_ENV, "1", 1);
-                                                        return false;
-                                                }
-                                        }
-                                }
+                        // Đây là app user-installed → query blacklist động theo FULL PATH
+                        // (server tự resolve bundle ID từ Info.plist của .app bundle)
+                        if (jbclient_blacklist_check_path(gExecutablePath)) {
+                                // FIX: cũng set env để các dylib khác trong cùng process
+                                // (nếu được inject trước khi check này) biết clean mode đang on
+                                setenv(ROOTHIDE_CLEAN_MODE_ENV, "1", 1);
+                                return false;
                         }
                 }
         }
@@ -527,11 +513,21 @@ __attribute__((constructor)) static void initializer(void)
 #endif
 
         if (load_executable_path() == 0) {
-                // Load rootlesshooks / watchdoghook when neccessary
+                // Load roothidehooks / watchdoghook when neccessary
+                // FIX DYLIB NAME BUG: this used to dlopen "rootlesshooks.dylib",
+                // but that subproject was removed from the BaseBin build (the
+                // rootlesshooks target in BaseBin/Makefile is a no-op stub) and
+                // only "roothidehooks.dylib" is actually built and shipped in
+                // basebin.tar. The silent dlopen failure meant cfprefsd,
+                // SpringBoard and lsd never got their RootHide hiding hooks.
+                // The official Dopamine2-roothide loads roothidehooks.dylib
+                // into these exact three daemons (roothidehooks' constructor
+                // self-checks the process name, so loading it elsewhere is a
+                // harmless no-op).
                 if (!strcmp(gExecutablePath, "/usr/sbin/cfprefsd") ||
                         !strcmp(gExecutablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ||
                         !strcmp(gExecutablePath, "/usr/libexec/lsd")) {
-                        dlopen(JBROOT_PATH("/basebin/rootlesshooks.dylib"), RTLD_NOW);
+                        dlopen(JBROOT_PATH("/basebin/roothidehooks.dylib"), RTLD_NOW);
                 }
                 else if (!strcmp(gExecutablePath, "/usr/libexec/watchdogd")) {
                         dlopen(JBROOT_PATH("/basebin/watchdoghook.dylib"), RTLD_NOW);
