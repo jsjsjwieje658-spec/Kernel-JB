@@ -513,8 +513,9 @@ void *boomerang_server(struct boomerang_info *info)
         return;
     }
     if ([preset writeToFile:configPath atomically:YES]) {
+        NSDictionary *seededAppConfig = preset[@"appconfig"];
         NSLog(@"[RootHide] Seeded RootHideConfig.plist with %lu bank app preset",
-              (unsigned long)preset[@"appconfig"].count);
+              (unsigned long)seededAppConfig.count);
     }
     else {
         NSLog(@"[RootHide] Failed to write RootHideConfig.plist preset");
