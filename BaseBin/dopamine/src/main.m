@@ -371,6 +371,32 @@ void activate_environment(bool applyProtection, bool prepareBootstrap)
         }
 }
 
+// RootHide port Build 3: the fakelib bindfs mount is gone - systemhook is
+// published into /usr/lib under a randomized name (systemhook-<jbrand>.dylib)
+// via kernel namecache injection during the GUI bootstrap. Resolve the name
+// from <jbroot>/basebin (the filename is the source of truth) instead of
+// hardcoding the old well-known path, which no longer exists. When nothing
+// is published (fresh CLI-only install?), simply do not set the env var -
+// spawned binaries then run clean instead of dying on an unresolvable
+// DYLD_INSERT_LIBRARIES.
+static void set_systemhook_insert_env_if_published(void)
+{
+        const char *rootPath = gSystemInfo.jailbreakInfo.rootPath;
+        if (!rootPath || !rootPath[0]) return;
+
+        NSString *basebin = [[NSString stringWithUTF8String:rootPath] stringByAppendingPathComponent:@"basebin"];
+        for (NSString *item in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:basebin error:nil]) {
+                if (![item hasPrefix:@"systemhook-"] || ![item hasSuffix:@".dylib"]) continue;
+                char published[PATH_MAX];
+                snprintf(published, sizeof(published), "/usr/lib/%s", item.UTF8String);
+                if (access(published, F_OK) == 0) {
+                        setenv("DYLD_INSERT_LIBRARIES", published, 1);
+                        return;
+                }
+        }
+        printf("WARNING: no published systemhook found, spawning tools without injection\n");
+}
+
 void install_dopamine(void)
 {
         activate_environment(false, true);
@@ -378,8 +404,8 @@ void install_dopamine(void)
         install_basebin_gen();
         activate_basebin(JBROOT_PATH(@"/basebin"));
 
-        // Now that fakelib is up, we want to make systemhook inject into any binary we spawn
-        setenv("DYLD_INSERT_LIBRARIES", "/usr/lib/systemhook.dylib", 1);
+        // RootHide port Build 3: resolve the randomized published systemhook path
+        set_systemhook_insert_env_if_published();
 
         finalize_bootstrap_if_needed(NULL);
         load_var_jb_daemons();
@@ -411,8 +437,8 @@ void activate_dopamine(void)
         activate_environment(true, false);
         activate_basebin(JBROOT_PATH(@"/basebin"));
         
-        // Now that fakelib is up, we want to make systemhook inject into any binary we spawn
-        setenv("DYLD_INSERT_LIBRARIES", "/usr/lib/systemhook.dylib", 1);
+        // RootHide port Build 3: resolve the randomized published systemhook path
+        set_systemhook_insert_env_if_published();
 
         finalize_bootstrap_if_needed(NULL);
         load_var_jb_daemons();

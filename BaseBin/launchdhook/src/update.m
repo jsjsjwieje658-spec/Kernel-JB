@@ -127,6 +127,7 @@ void jbupdate_update_system_info(void)
 				NULL,
 				NULL,
 				NULL,
+				NULL,
 			};
 
 			uint32_t idx = 0;
@@ -144,6 +145,10 @@ void jbupdate_update_system_info(void)
 			if (xpf_set_is_supported("perfkrw")) {
 				sets[idx++] = "perfkrw";
 			}
+
+			// RootHide port (Relaxin structure): keep the namecache hash globals
+			// in the refreshed system info (kernelSymbol.nchashtbl/nchashmask).
+			sets[idx++] = "namecache";
 
 			newSystemInfoXdict = xpf_construct_offset_dictionary((const char **)sets);
 			if (!newSystemInfoXdict) {

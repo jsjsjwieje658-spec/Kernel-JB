@@ -479,7 +479,12 @@ extern struct system_info gSystemInfo;
         iterator(ctx, kernelSymbol.papt_ranges_compressed); \
         iterator(ctx, kernelSymbol.libsptm_frame_type_params); \
         iterator(ctx, kernelSymbol.txm_developer_mode_storage); \
-        iterator(ctx, kernelSymbol.txm_trustcache_root);
+        iterator(ctx, kernelSymbol.txm_trustcache_root); \
+        /* RootHide port Build 3: kernel namecache hash globals for the */ \
+        /* unsandbox() namecache publication (replaces /usr/lib bindfs  */ \
+        /* mount). Filled from the XPF "namecache" items.               */ \
+        iterator(ctx, kernelSymbol.nchashtbl); \
+        iterator(ctx, kernelSymbol.nchashmask);
 
 #define KERNEL_GADGETS_ITERATE(ctx, iterator) \
         iterator(ctx, kernelGadget.pacda); \

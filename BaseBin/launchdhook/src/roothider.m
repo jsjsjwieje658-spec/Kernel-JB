@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 #include <spawn.h>
+#include <unistd.h>
 #include <substrate.h>
 #include <sys/sysctl.h>
 
@@ -86,6 +87,43 @@ extern xpc_object_t (*orig_xpc_dictionary_create_reply)(xpc_object_t original);
 extern xpc_object_t new_xpc_dictionary_create_reply(xpc_object_t original);
 extern int (*orig_xpc_pipe_routine_reply)(xpc_object_t reply);
 extern int new_xpc_pipe_routine_reply(xpc_object_t reply);
+
+// RootHide port Build 3: resolve the published systemhook injection path by
+// scanning <jbroot>/basebin for systemhook-*.dylib - the randomized file the
+// app renamed and published into /usr/lib via kernel namecache injection at
+// bootstrap. The FILENAME is the single source of truth: whatever the file is
+// called in basebin is exactly what was published to /usr/lib, so no jbrand
+// re-derivation is needed and a future rename scheme keeps working.
+//
+// Called from the launchdhook constructor only (never per-spawn). When the
+// scan finds nothing - e.g. this launchdhook instance was injected mid-
+// bootstrap, BEFORE createFakeLib published the files - HOOK_DYLIB_PATH
+// stays NULL and every spawn degrades to clean (never a crash). The next
+// launchd (after the userspace reboot) runs a fresh constructor and picks
+// the published file up.
+void roothide_launchd_resolve_hook_path(void) {
+    const char *rootPath = gSystemInfo.jailbreakInfo.rootPath;
+    if (!rootPath || !rootPath[0]) {
+        JBLogError("roothide: resolve hook path: jbroot not set");
+        return;
+    }
+
+    NSString *basebin = [[NSString stringWithUTF8String:rootPath] stringByAppendingPathComponent:@"basebin"];
+    NSArray<NSString *> *items = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:basebin error:nil];
+    for (NSString *item in items) {
+        if (![item hasPrefix:@"systemhook-"] || ![item hasSuffix:@".dylib"]) continue;
+        char *candidate = NULL;
+        asprintf(&candidate, "/usr/lib/%s", item.UTF8String);
+        if (access(candidate, F_OK) == 0) {
+            HOOK_DYLIB_PATH = candidate;
+            JBLogError("roothide: systemhook insert path resolved: %s", HOOK_DYLIB_PATH);
+            return;
+        }
+        free(candidate);
+    }
+    JBLogError("roothide: no published systemhook found in %s (injection disabled until next launchd)",
+               basebin.UTF8String);
+}
 
 void roothide_launchd_preinit() {
     jbinfo(dyld_patch_enabled) = false;

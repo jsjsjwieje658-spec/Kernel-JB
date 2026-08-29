@@ -929,12 +929,19 @@ static BOOL checkRootHideJBRAND(NSString *str)
 
 - (int)setFakelibMounted:(BOOL)mounted
 {
-    int r = 0;
-    if (mounted != [self isFakelibMounted]) {
-        NSString *arg = mounted ? @"mount" : @"unmount";
-        r = [self spawnJbctlAsRootWithArgs:@[@"internal", @"fakelib", arg]];
-    }
-    return r;
+    // RootHide port Build 3: the fakelib bindfs mount no longer exists -
+    // systemhook and the patched dyld are published into /usr/lib via
+    // kernel namecache injection instead (see DOJailbreaker
+    // publishFakeLibNoMount). Mounting here would recreate the globally
+    // visible bindfs entry ("Unknown Bindfs Mount(s)" detection), so this
+    // method is now a no-op kept for API compatibility.
+    //
+    // Side effect (known limitation): the "hide jailbreak" toggle can no
+    // longer disable injection by unmounting - the published namecache
+    // entries cannot be removed without a reboot. Blacklisted apps are
+    // unaffected (they are spawned clean via isBlacklistedPath).
+    NSLog(@"[RootHide] Build 3: setFakelibMounted:%@ is a no-op (namecache publication, no bindfs mount)", mounted ? @"YES" : @"NO");
+    return 0;
 }
 
 - (int)setPrivatePrebootProtected:(BOOL)protected

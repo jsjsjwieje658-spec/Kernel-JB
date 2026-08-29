@@ -4,7 +4,22 @@
 #include "private.h"
 #include "inline.h"
 
-#define HOOK_DYLIB_PATH "/usr/lib/systemhook.dylib"
+// RootHide port Build 3: HOOK_DYLIB_PATH is now a RUNTIME variable instead of
+// a compile-time constant. The jailbreak publishes systemhook into /usr/lib
+// under a randomized name (systemhook-<jbrand>.dylib) through the kernel
+// namecache — the old well-known "/usr/lib/systemhook.dylib" path is exactly
+// what jailbreak detection probes for and no longer exists.
+//
+// Definition (exactly one per binary that links this file):
+//   - systemhook.dylib:   roothider_main.c (set in roothide_init() from the
+//                         dyld image path systemhook was actually loaded from)
+//   - launchdhook.dylib:  roothider.m (set in the launchdhook constructor by
+//                         scanning <jbroot>/basebin for systemhook-*.dylib)
+//
+// NULL means "injection path not resolved (yet)": every consumer MUST treat
+// NULL as "do not inject" so a spawn degrades to clean instead of inserting
+// a garbage DYLD_INSERT_LIBRARIES path that would make dyld kill the child.
+extern const char *HOOK_DYLIB_PATH;
 
 typedef enum 
 {

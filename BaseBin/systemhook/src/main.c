@@ -18,6 +18,9 @@
 #include "common/hookd_external.h"
 #include <choma/CSBlob.h>
 #include "litehook.h"
+// RootHide port (Relaxin upstream): per-process hiding subsystem
+// (roothide_init / roothide_init_with_checkin / roothide_init_with_executable).
+#include "roothider.h"
 #include "sandbox.h"
 #include "common/private.h"
 #include "common/inline.h"
@@ -418,6 +421,16 @@ int parse_dyldhook_jbinfo(char **jbRootPathOut, char **bootUUIDOut, char **sandb
 
 __attribute__((constructor)) static void initializer(void)
 {
+        /***** roothide specific (Relaxin main.m:786) *****/
+        // Must run FIRST: sets HOOK_DYLIB_PATH to the path this systemhook
+        // instance was injected through (the randomized published path,
+        // e.g. /usr/lib/systemhook-<jbrand>.dylib), clears DYLD_IN_CACHE
+        // leftovers and arms the dyld-patch fallback detection. Every later
+        // use of HOOK_DYLIB_PATH (env cleanup below, spawn hooks in common.c)
+        // depends on this assignment.
+        roothide_init();
+        /**************************************************/
+
         // Under normal circumstances, dyldhook will have already handled the check-in, so get the check-in information from the __jbinfo section
         // For more information on the check-in process, check the comments in dyldhook
         if (parse_dyldhook_jbinfo(&JB_RootPath, &JB_BootUUID, &JB_SandboxExtensions, &gFullyDebugged) != 0) {
@@ -437,7 +450,9 @@ __attribute__((constructor)) static void initializer(void)
         // Feeable attempt at making jailbreak detection harder
         const char *dyldInsertLibraries = getenv("DYLD_INSERT_LIBRARIES");
         if (dyldInsertLibraries) {
-                if (!strcmp(dyldInsertLibraries, HOOK_DYLIB_PATH)) {
+                // RootHide port Build 3: HOOK_DYLIB_PATH is a runtime variable now;
+                // guard NULL (unresolved path) before strcmp.
+                if (HOOK_DYLIB_PATH && !strcmp(dyldInsertLibraries, HOOK_DYLIB_PATH)) {
                         unsetenv("DYLD_INSERT_LIBRARIES");
                 }
         }

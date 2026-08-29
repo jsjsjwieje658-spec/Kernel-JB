@@ -169,6 +169,8 @@ void trust_insert_libraries(char **envc) {
     if (!DYLD_INSERT_LIBRARIES)
         return;
 
+    if (!HOOK_DYLIB_PATH) return; // Build 3: runtime variable, guard NULL
+
     string_enumerate_components(DYLD_INSERT_LIBRARIES, ":", ^(const char *path, bool *stop) {
         if (strcmp(path, HOOK_DYLIB_PATH) != 0) {
             jbclient_trust_library_recurse(path, NULL);

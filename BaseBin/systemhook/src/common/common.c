@@ -178,7 +178,7 @@ static int spawn_exec_hook_common(bool isExec,
 
 	const char *existingLibraryInserts = envbuf_getenv((const char **)envp, "DYLD_INSERT_LIBRARIES");
 	__block bool systemHookAlreadyInserted = false;
-	if (existingLibraryInserts) {
+	if (existingLibraryInserts && HOOK_DYLIB_PATH) {
 		string_enumerate_components(existingLibraryInserts, ":", ^(const char *existingLibraryInsert, bool *stop) {
 			if (!strcmp(existingLibraryInsert, HOOK_DYLIB_PATH)) {
 				systemHookAlreadyInserted = true;
@@ -193,6 +193,16 @@ static int spawn_exec_hook_common(bool isExec,
 	bool shouldInsertJBEnv = true;
 	bool hasSafeModeVariable = false;
 	do {
+		// RootHide port Build 3: with HOOK_DYLIB_PATH now a runtime
+		// variable, NULL means the injection path is not (yet)
+		// published/resolved. NEVER insert a NULL/garbage path -
+		// dyld kills any process whose DYLD_INSERT_LIBRARIES cannot
+		// be opened. Degrade to a clean spawn instead.
+		if (!HOOK_DYLIB_PATH) {
+			shouldInsertJBEnv = false;
+			break;
+		}
+
 		if (!(spawnConfig & kSpawnConfigInject)) {
 			shouldInsertJBEnv = false;
 			break;
@@ -317,7 +327,7 @@ static int spawn_exec_hook_common(bool isExec,
 			}
 		}
 		else {
-			if (systemHookAlreadyInserted && existingLibraryInserts) {
+			if (systemHookAlreadyInserted && existingLibraryInserts && HOOK_DYLIB_PATH) {
 				if (!strcmp(existingLibraryInserts, HOOK_DYLIB_PATH)) {
 					envbuf_unsetenv(&envc, "DYLD_INSERT_LIBRARIES");
 				}

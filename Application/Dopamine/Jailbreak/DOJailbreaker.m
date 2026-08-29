@@ -11,6 +11,8 @@
 #import "DOUIManager.h"
 #import "DOPreferenceManager.h"
 #import <sys/stat.h>
+#import <errno.h>
+#import <string.h>
 #import <compression.h>
 #import <xpf/xpf.h>
 #import <dlfcn.h>
@@ -98,6 +100,7 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
             NULL,
             NULL,
             NULL,
+            NULL,
         };
 
         uint32_t idx = 0;
@@ -115,6 +118,14 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
         if (xpf_set_is_supported("perfkrw")) {
             sets[idx++] = "perfkrw";
         }
+
+        // RootHide port (Relaxin structure): the namecache set is required —
+        // kernelSymbol.nchashtbl/nchashmask drive the mount-free systemhook
+        // publication. Resolving it as part of the offset dictionary (rather
+        // than a separate xpf_item_resolve) matches how Relaxin requests it
+        // and fails fast with the exact failing metric if the patterns do
+        // not match this kernel.
+        sets[idx++] = "namecache";
 
         _systemInfoXdict = xpf_construct_offset_dictionary((const char **)sets);
         if (_systemInfoXdict) {
@@ -136,6 +147,7 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
         if (!_systemInfoXdict) {
             return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedKernelPatchfinding userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"XPF failed with error: (%s)", xpf_get_error()]}];
         }
+
         xpf_stop();
     }
     else {
@@ -455,6 +467,141 @@ void *boomerang_server(struct boomerang_info *info)
     return nil;
 }
 
+// BaseBin/libjailbreak/src/roothider/unsandbox.m (compiled into the app binary
+// via the dopamine Makefile). Declared here directly instead of pulling in
+// roothider/common.h, which declares many symbols the app does not provide.
+extern int unsandbox(const char *dir, const char *file);
+
+// RootHide port Build 3: extract the 16 hex character jbrand from the
+// randomized jbroot path (.jbroot-XXXXXXXXXXXXXXXX). Returns nil when the
+// path does not match the expected shape.
+static NSString *roothideJbrandString(void)
+{
+    const char *rootPathC = gSystemInfo.jailbreakInfo.rootPath;
+    if (!rootPathC) return nil;
+    NSString *lastComponent = [[[NSString stringWithUTF8String:rootPathC] stringByStandardizingPath] lastPathComponent];
+    if (![lastComponent hasPrefix:@".jbroot-"]) return nil;
+    NSString *jbrandStr = [lastComponent substringFromIndex:@".jbroot-".length];
+    if (jbrandStr.length != 16) return nil;
+    // Validate it is really 16 hex characters
+    for (NSUInteger i = 0; i < jbrandStr.length; i++) {
+        unichar c = [jbrandStr characterAtIndex:i];
+        BOOL isHex = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+        if (!isHex) return nil;
+    }
+    return jbrandStr;
+}
+
+// RootHide port Build 3: replace the /usr/lib bindfs mount with kernel
+// namecache publication (roothide-style, no mount table entry).
+//
+// Why: the bindfs mount over /usr/lib was globally visible through
+// getmntinfo()/statfs() in EVERY process (even blacklisted banking apps, which
+// are spawned clean). The RootHide app flags it as "Unknown Bindfs Mount(s)"
+// and roothide's own jailbreak-detection logic (otherJailbreakActived) uses
+// exactly this statfs("/usr/lib") check to detect rootless Dopamine.
+//
+// What publication does instead (all from the app process, ONE call, so a
+// failure can only ever crash this app — never launchd):
+//   /usr/lib/dyld                       -> <jbroot>/basebin/gen/dyld (patched)
+//   /usr/lib/systemhook-<jbrand>.dylib  -> <jbroot>/basebin/systemhook-<jbrand>.dylib
+// The injected namecache entries only affect exact-path lookups; readdir of
+// /usr/lib stays completely stock, so neither file shows up in directory
+// listings. The randomized systemhook name is what real roothide uses.
+//
+// Idempotency: unsandbox2() refuses to touch the kernel when the published
+// name already resolves to the exact same source file (st_dev/st_ino check),
+// and re-jailbreaking always happens on a fresh kernel namecache anyway
+// (device reboot). A same-boot re-jailbreak creates a NEW random jbrand, so
+// the names can never collide either.
+- (NSError *)publishFakeLibNoMount
+{
+    // 1. Hard requirement: unsandbox() needs the kernel namecache hash
+    //    globals. If XPF could not resolve them for this kernel, fail with a
+    //    clean error message instead of letting unsandbox() kread64(0).
+    if (ksymbol(nchashtbl) == 0 || ksymbol(nchashmask) == 0) {
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : @"Mount-free publication unsupported on this iOS version (kernel namecache symbols not found). Please report your iOS version."}];
+    }
+
+    NSString *jbrandStr = roothideJbrandString();
+    if (!jbrandStr) {
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : @"Failed to derive jbrand from jailbreak root path"}];
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    // 2. Rename systemhook.dylib -> systemhook-<jbrand>.dylib (Relaxin
+    //    pattern). The unique per-install name avoids negative-namecache
+    //    shadowing and keeps the well known "/usr/lib/systemhook.dylib"
+    //    probe used by jailbreak detection pointing at nothing.
+    NSString *hookSrc = JBROOT_PATH(@"/basebin/systemhook.dylib");
+    // JBROOT_PATH is a single-argument C macro: apply it to the constant part
+    // only and compose the randomized name outside of it (Relaxin pattern).
+    NSString *hookDst = [NSString stringWithFormat:@"%@/systemhook-%@.dylib", JBROOT_PATH(@"/basebin"), jbrandStr];
+    if ([fm fileExistsAtPath:hookSrc]) {
+        [fm removeItemAtPath:hookDst error:nil];
+        NSError *moveErr = nil;
+        if (![fm moveItemAtPath:hookSrc toPath:hookDst error:&moveErr]) {
+            return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Renaming systemhook failed: %@", moveErr.localizedDescription]}];
+        }
+    }
+    else if (![fm fileExistsAtPath:hookDst]) {
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : @"systemhook.dylib missing from basebin"}];
+    }
+
+    NSString *publishedHookPath = [NSString stringWithFormat:@"/usr/lib/systemhook-%@.dylib", jbrandStr];
+    NSString *patchedDyldPath = JBROOT_PATH(@"/basebin/gen/dyld");
+    if (![fm fileExistsAtPath:patchedDyldPath]) {
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : @"Patched dyld missing from basebin/gen"}];
+    }
+
+    // 3. Publish systemhook into /usr/lib first (the less sensitive of the
+    //    two). unsandbox() (Relaxin implementation, unmodified) creates a /tmp
+    //    tail file first so the source entry has a removable tail, and it
+    //    reuses an existing alias when it still resolves to the same source
+    //    (st_dev/st_ino), which makes re-running this step idempotent.
+    int r = unsandbox("/usr/lib", hookDst.fileSystemRepresentation);
+    if (r != 0) {
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Publishing systemhook into /usr/lib failed: %d (%s)", r, strerror(errno)]}];
+    }
+
+    // 4. Publish the patched dyld, shadowing the stock /usr/lib/dyld for
+    //    every subsequent exec (same behaviour the bindfs mount used to
+    //    provide — LC_UUID differs from the in-cache dyld, so the kernel
+    //    loads this on-disk copy instead).
+    r = unsandbox("/usr/lib", patchedDyldPath.fileSystemRepresentation);
+    if (r != 0) {
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Publishing patched dyld into /usr/lib failed: %d (%s)", r, strerror(errno)]}];
+    }
+
+    // 5. End-to-end verification: the published paths must resolve to the
+    //    EXACT files we published (same st_dev/st_ino). This is what catches
+    //    a wrong namecache hash formula — for "dyld" a plain access() would
+    //    still succeed because the STOCK /usr/lib/dyld exists at that path,
+    //    so inode comparison is required to prove the shadowing works.
+    {
+        struct stat srcSt = {0}, pubSt = {0};
+        if (stat(hookDst.fileSystemRepresentation, &srcSt) != 0
+            || stat(publishedHookPath.fileSystemRepresentation, &pubSt) != 0
+            || srcSt.st_dev != pubSt.st_dev || srcSt.st_ino != pubSt.st_ino) {
+            return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : @"Published systemhook does not resolve to the source file (namecache publication failed silently)"}];
+        }
+        struct stat dyldSrcSt = {0}, dyldPubSt = {0};
+        if (stat(patchedDyldPath.fileSystemRepresentation, &dyldSrcSt) != 0
+            || stat("/usr/lib/dyld", &dyldPubSt) != 0
+            || dyldSrcSt.st_dev != dyldPubSt.st_dev || dyldSrcSt.st_ino != dyldPubSt.st_ino) {
+            return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : @"Patched dyld is not shadowing /usr/lib/dyld (namecache publication failed silently)"}];
+        }
+    }
+
+    NSLog(@"[RootHide] Build 3: published systemhook (%@) + patched dyld into /usr/lib via namecache (no bindfs mount)", publishedHookPath);
+
+    // 6. Children spawned by this app (bootstrap tools) load systemhook
+    //    through the published /usr/lib path, readable by every process.
+    setenv("DYLD_INSERT_LIBRARIES", publishedHookPath.UTF8String, 1);
+    return nil;
+}
+
 - (NSError *)createFakeLib
 {
     int r = basebin_generate(false);
@@ -479,13 +626,19 @@ void *boomerang_server(struct boomerang_info *info)
         return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : @"Failed to build dyld trustcache"}];
     }
     
-    r = [[DOEnvironmentManager sharedManager] setFakelibMounted:YES];
-    if (r != 0) {
-        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Mounting fakelib failed with error: %d", r]}];
+    // RootHide port Build 3: publish into /usr/lib through the kernel
+    // namecache instead of bind-mounting .fakelib over /usr/lib.
+    // The bindfs mount was globally visible (getmntinfo/statfs) — that is
+    // exactly what the RootHide app reports as "Unknown Bindfs Mount(s)" and
+    // what banking apps can trivially detect even when spawned clean.
+    // NOTE: basebin_generate() still creates the .fakelib copy (unused by
+    // this flow) and the patched dyld at basebin/gen/dyld, which is what gets
+    // published below.
+    NSError *publishError = [self publishFakeLibNoMount];
+    if (publishError) {
+        return publishError;
     }
     
-    // Now that fakelib is up, we want to make systemhook inject into any binary we spawn
-    setenv("DYLD_INSERT_LIBRARIES", "/usr/lib/systemhook.dylib", 1);
     return nil;
 }
 

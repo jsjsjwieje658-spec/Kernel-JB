@@ -98,6 +98,15 @@ __attribute__((constructor)) static void initializer(void)
 		}
 	}
 
+	// RootHide port Build 3: resolve the published systemhook injection path
+	// (see roothider.m). Pure file I/O - safe before primitives recovery.
+	// NULL result (not published yet / interrupted bootstrap) simply disables
+	// injection for this launchd instance; spawns then run clean, never crash.
+	{
+		extern void roothide_launchd_resolve_hook_path(void);
+		roothide_launchd_resolve_hook_path();
+	}
+
 	// If we performed a jbupdate before the userspace reboot, these vars will be set
 	// In that case, we want to run finalizers
 	const char *jbupdatePrevVersion = getenv("JBUPDATE_PREV_VERSION");

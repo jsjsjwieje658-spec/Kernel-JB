@@ -14,7 +14,11 @@ sign: $(TARGET)
 
 # FIX: thêm ../_external/modules/litehook/src/*.c vào source list để linker
 # tìm thấy symbol _litehook_rebind_symbol được roothide_hide.c gọi.
-$(TARGET): $(wildcard src/*.c src/*.m src/*.S src/ui-stub/*.m ../libjailbreak/src/*.c ../libjailbreak/src/*.m ../libjailbreak/src/*.S ../_external/modules/litehook/src/*.c ../ChOma/src/*.c ../XPF/src/*.c ../../Application/Dopamine/Jailbreak/*.m ../../Application/Dopamine/Jailbreak/*.c ../../Application/Dopamine/Extensions/NSData+Hex.m external/lib/*.a) $(XPF_DEPS)
+# RootHide port Build 3: compile the unsandbox namecache-publication sources
+# into the app binary so publishFakeLibNoMount can call unsandbox() directly
+# from the app process (never from launchd — a fault here must only ever
+# crash the app, not pid 1).
+$(TARGET): $(wildcard src/*.c src/*.m src/*.S src/ui-stub/*.m ../libjailbreak/src/*.c ../libjailbreak/src/*.m ../libjailbreak/src/*.S ../libjailbreak/src/roothider/unsandbox.m ../libjailbreak/src/roothider/unsandbox1.m ../libjailbreak/src/roothider/unsandbox2.m ../_external/modules/litehook/src/*.c ../ChOma/src/*.c ../XPF/src/*.c ../../Application/Dopamine/Jailbreak/*.m ../../Application/Dopamine/Jailbreak/*.c ../../Application/Dopamine/Extensions/NSData+Hex.m external/lib/*.a) $(XPF_DEPS)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 clean:

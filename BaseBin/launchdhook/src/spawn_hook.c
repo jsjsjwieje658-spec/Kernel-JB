@@ -113,9 +113,13 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 
                         hookd_provider_teardown();
 
-                        // If the jailbreak is currently hidden, fakelib is not mounted
-                        // It needs to be mounted to regain launchd code execution after the userspace reboot
-                        ensure_fakelib_mounted();
+                        // RootHide port Build 3: the fakelib bindfs mount is GONE. The patched
+                        // dyld published into /usr/lib via kernel namecache injection survives
+                        // the userspace reboot (the namecache is kernel state), so the new
+                        // launchd still honors DYLD_INSERT_LIBRARIES and re-injects
+                        // launchdhook.dylib without any mount. Re-mounting here would recreate
+                        // the "Unknown Bindfs Mount(s)" detection vector this build removes.
+                        // ensure_fakelib_mounted();
 
 #if LOG_PROCESS_LAUNCHES
                         FILE *f = fopen("/var/mobile/launch_log.txt", "a");
