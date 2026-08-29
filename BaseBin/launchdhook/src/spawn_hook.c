@@ -23,6 +23,26 @@ void abort_with_reason(uint32_t reason_namespace, uint64_t reason_code, const ch
 extern int systemwide_trust_file_by_path(const char *path);
 extern int platform_set_process_debugged(uint64_t pid, bool fullyDebugged);
 extern void systemwide_domain_set_enabled(bool enabled);
+// RootHide port (Relaxin upstream, roothider.m:197-199): recursive trust for
+// spawned binaries. When called the function walks the executable AND its
+// dependency tree, normalizes signatures (roothide randomized-cdhash scheme)
+// and adds every missing cdhash to the kernel trustcache. This is what makes
+// dev-cert signed apps survive AMFI (the flat systemwide trust only covered
+// the main binary and never normalized anything).
+//
+// Safety notes (Build 2):
+// - The return value of trust_binary is IGNORED by posix_spawn_hook_shared,
+//   so a failed trust can never block a spawn -> no boot-hang vector.
+// - Apple system daemons live on the sealed FS: signature normalization
+//   attempts fail with EROFS and are skipped; those daemons are covered by
+//   Apple's static trustcache exactly as before.
+// - Everything runs locally inside launchd (no XPC, no jailbreakd needed):
+//   roothide_trust_executable_recurse lives in jbdomain_roothide.c which is
+//   compiled into launchdhook.dylib, and its callees (recurse_collect_
+//   untrusted_cdhashes, ensure_randomized_cdhash_for_slice, is_cdhash_
+//   trustcached, jb_trustcache_add_cdhashes) are the same libjailbreak
+//   functions the flat flow already exercises on every boot.
+extern int roothide_launchd_trust_executable(const char *path);
 
 #define LOG_PROCESS_LAUNCHES 0
 
@@ -279,7 +299,17 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 
         return posix_spawn_hook_shared(pid, path, desc, argv, envp,
                                        __posix_spawn_orig_wrapper,
-                                       systemwide_trust_file_by_path,
+                                       // RootHide port (Relaxin spawn_hook.c:97-105):
+                                       // recursive trust instead of the flat
+                                       // systemwide trust. Fixes dev-cert app
+                                       // crashes (dependency tree is trusted and
+                                       // signatures get roothide-normalized).
+                                       // Keep __posix_spawn_orig_wrapper as orig:
+                                       // Relaxin's posthook variant requires
+                                       // jailbreakd (jbdSpawnPatchChild) which is
+                                       // not built in Kernel-JB — wiring it would
+                                       // SIGKILL every spawned process.
+                                       roothide_launchd_trust_executable,
                                        platform_set_process_debugged,
                                        jbsetting(jetsamMultiplier));
         // ========== END ROOTHIDE SELECTIVE INJECTION ==========

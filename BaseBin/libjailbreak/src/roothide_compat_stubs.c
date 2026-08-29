@@ -88,22 +88,11 @@ int trustcache_query_cdhash(const uint8_t hash[JBS_TRUSTCACHE_HASH_SIZE], bool *
     return jbclient_platform_trustcache_query_cdhash(hash, foundOut);
 }
 
-// Stub: Relaxin's macho_calculate_adhoc_cdhash (from roothider/signatures.m).
-// Called with 2 args (MachO *, cdhash_t which is uint8_t[20]). Returns false
-// (failure) until the real impl is ported. Callers should fall back to
-// Kernel-JB's existing cdhash calculation helpers.
-//
-// NOTE: csd_superblob_is_adhoc_signed is NOT stubbed here because Kernel-JB
-// already has a native implementation in signatures.c (line 60) with the
-// matching Relaxin signature `bool csd_superblob_is_adhoc_signed(CS_DecodedSuperBlob *)`.
-// We just need a forward declaration in signatures.h — added there separately.
-bool macho_calculate_adhoc_cdhash(void *macho, uint8_t *cdhashOut) {
-    (void)macho;
-    if (cdhashOut) {
-        for (int i = 0; i < 20; i++) cdhashOut[i] = 0;
-    }
-    return false;
-}
+// Stub: Relaxin's macho_calculate_adhoc_cdhash — REMOVED. The real
+// implementation now lives in signatures.c (ported from Relaxin
+// signatures.c:79-95) and is declared in signatures.h. The old stub always
+// returned false, which broke the roothide recursive trust flow
+// (roothider/signatures.m:247) and killed dev-cert apps at AMFI.
 
 // Stub: Relaxin's rlx_ksymbol (used by trustcache_nokcall_kernel.c).
 // Returns 0 (not found) until the real symbol resolver is ported.
