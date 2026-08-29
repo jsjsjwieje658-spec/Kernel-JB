@@ -615,7 +615,7 @@ static NSString *roothideJbrandString(void)
         }
     }
 
-    NSLog(@"[RootHide] Build 3.1: published systemhook (%@) + patched dyld into /usr/lib via namecache shadow (no bindfs mount)", publishedHookPath);
+    NSLog(@"[RootHide] Build 3.2: published self-contained systemhook (%@) + patched dyld into /usr/lib via namecache shadow (no bindfs mount)", publishedHookPath);
 
     // 6. Children spawned by this app (bootstrap tools) load systemhook
     //    through the published /usr/lib path, readable by every process.
