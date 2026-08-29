@@ -2,31 +2,37 @@
 //  DORootHideManager.h
 //  Dopamine
 //
-//  RootHide Manager - Jailbreak Hiding Interface
-//  Provides UI for managing RootHide mode, blacklist, and path randomization
+//  RootHide App Manager — manages the AppHide blacklist
+//  (apps that are spawned 100% clean: no systemhook injection, no tweaks).
+//
+//  Build 3.3 rewrite:
+//  - Subclasses DOPSListController (proven themed base) instead of raw
+//    PSListController with custom cells (old version crashed Settings).
+//  - Persists directly to <jbroot>/var/mobile/Library/RootHide/RootHideConfig.plist
+//    key "appconfig" — the exact file isBlacklistedApp() (libjailbreak
+//    roothider/blacklist.m) reads from launchd on every app spawn.
+//  - No jbclient_roothide_* calls (those functions do not exist in this fork).
 //
 
-#import <Preferences/PSListController.h>
+#import "DOPSListController.h"
 #import <Preferences/PSSpecifier.h>
 
-@interface DORootHideManager : PSListController
+NS_ASSUME_NONNULL_BEGIN
 
-@property (nonatomic, strong) NSArray *blacklistedApps;
-@property (nonatomic, copy) NSString *currentJBRootPath;
+@interface DORootHideManager : DOPSListController
 
-// Action handlers (receive PSSpecifier from DOButtonCell)
-- (void)addToBlacklist:(PSSpecifier *)specifier;
-- (void)viewBlacklist:(PSSpecifier *)specifier;
-- (void)clearBlacklist:(PSSpecifier *)specifier;
-- (void)addBankingApps:(PSSpecifier *)specifier;
-- (void)addDetectionApps:(PSSpecifier *)specifier;
-- (void)applyRootHideSettings:(PSSpecifier *)specifier;
+// Button actions (invoked by DOButtonCell with the specifier as argument)
+- (void)addBankingAppsPressed:(PSSpecifier *)specifier;
+- (void)addAppPressed:(PSSpecifier *)specifier;
+- (void)removeAllPressed:(PSSpecifier *)specifier;
 
-// Data management
-- (void)refreshBlacklist;
+// Row action (invoked by PSListController on row selection)
+- (void)removeAppPressed:(PSSpecifier *)specifier;
 
-// Property accessors
-- (BOOL)isRootHideEnabled;
-- (void)setRootHideEnabled:(BOOL)enabled specifier:(PSSpecifier *)specifier;
+// Config I/O (read/write RootHideConfig.plist as root+unsandboxed)
+- (NSDictionary *)loadAppConfig;
+- (BOOL)saveAppConfig:(NSDictionary *)appconfig;
 
 @end
+
+NS_ASSUME_NONNULL_END

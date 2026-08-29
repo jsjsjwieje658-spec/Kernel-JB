@@ -2,651 +2,352 @@
 //  DORootHideManager.m
 //  Dopamine
 //
-//  RootHide Manager Implementation
-//  Manages jailbreak hiding, blacklist, and path randomization
+//  RootHide App Manager implementation (Build 3.3).
+//
+//  WHAT THIS DOES
+//  ==============
+//  Apps listed here are added to RootHideConfig.plist -> appconfig.
+//  On every app launch, launchd's spawn hook (spawn_hook.c) and systemhook's
+//  tweak loader (main.c enableTweakLoading) query the blacklist via
+//  jbclient_blacklist_check_path() -> isBlacklistedPath() (libjailbreak
+//  roothider/blacklist.m), which resolves the spawn path to a bundle ID and
+//  looks it up in appconfig. Blacklisted apps are spawned completely clean:
+//    - no DYLD_INSERT_LIBRARIES (no systemhook-<jbrand>.dylib in the dyld
+//      image list — the #1 thing bank SDKs check via _dyld_image_count())
+//    - no trustcache upload / CS_DEBUGGED marking for the child
+//    - no tweak injection of any kind
+//
+//  WHY THE OLD UI WAS REMOVED (and what is different now)
+//  ======================================================
+//  The old DORootHideManager (removed in c790271 / abe0290) crashed Settings
+//  because it mixed custom cells (DOHeaderCell inside a PSSpecifier group,
+//  DOButtonCell wired through set:/get: selectors) into a raw PSListController.
+//  It also called jbclient_roothide_add_blacklist / set_enabled /
+//  clear_blacklist / apply_settings — functions that DO NOT EXIST in this
+//  fork's libjailbreak — and persisted the blacklist into NSUserDefaults,
+//  which nothing on the jailbreak side ever reads.
+//
+//  This rewrite:
+//    - subclasses DOPSListController (same base as the theme/exploit pages)
+//    - uses only the two cell patterns proven in DOSettingsController:
+//        a) DOButtonCell rows (cellClass + "action" selector-name property)
+//        b) plain PSStaticTextCell rows
+//    - reads/writes the REAL config file via DOEnvironmentManager
+//      runAsRoot + runUnsandboxed (same pattern as refreshJailbreakApps)
 //
 
 #import "DORootHideManager.h"
-#import <UIKit/UIKit.h>
-#import <objc/runtime.h>
-#import "DOUIManager.h"
+#import "DOPSListItemsController.h"
 #import "DOButtonCell.h"
-#import "DOHeaderCell.h"
-#import <libjailbreak/jbclient_xpc.h>
+#import "DOEnvironmentManager.h"
+#import "DOUIManager.h"
+#import <Preferences/PSListController.h>
+#import <Preferences/PSSpecifier.h>
+#import <libjailbreak/jbroot.h>
 
-static NSString * const kRootHideEnabledKey = @"RootHideEnabled";
-static NSString * const kRootHideBlacklistKey = @"RootHideBlacklist";
+// Vietnamese banking / e-wallet apps (preset). Bundle IDs verified against
+// App Store metadata. Users can add more manually.
+static NSArray<NSString *> * const kVietnameseBankingApps = @[
+    @"com.vietinbank.iBank",             // VietinBank iBank
+    @"com.vcb.IB",                       // Vietcombank Digibank
+    @"com.techcombank.business",         // Techcombank Mobile
+    @"com.mbmobile",                     // MB Bank
+    @"com.acb.ACBMobileBanking",         // ACB ONE
+    @"com.vib.VIBMobileBanking",         // VIB Digibank (MyVIB)
+    @"com.babk.BABMobileBanking",        // BaoViet Bank
+    @"com.agribank.DigiBank",            // Agribank E-mobile
+    @"vnpay.NapAsVnPay",                 // VNPAY
+    @"com.viettel.wallet.viettelpay",    // Viettel Money
+    @"com.mservice.SmartPay",            // MoMo
+];
 
 @interface DORootHideManager ()
-@property (nonatomic, strong) NSMutableArray *mutableBlacklist;
+@property (nonatomic, strong) NSMutableArray<NSString *> *blacklist;
+@property (nonatomic, copy) NSString *statusText;
 @end
 
 @implementation DORootHideManager
 
-#pragma mark - Initialization Safety
+#pragma mark - Lifecycle
 
 - (instancetype)init
 {
     self = [super init];
     if (self) {
-        _mutableBlacklist = [NSMutableArray new];
+        _blacklist = [NSMutableArray new];
+        _statusText = @"";
     }
     return self;
 }
 
 - (void)viewDidLoad
 {
-    @try {
-        [super viewDidLoad];
-        [self refreshBlacklist];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] viewDidLoad error: %@", exception.reason);
-        if (!_mutableBlacklist) {
-            _mutableBlacklist = [NSMutableArray new];
-        }
-    }
+    [super viewDidLoad];
+    [self reloadBlacklist];
+    _table.tableHeaderView = [DOPSListItemsController makeHeader:@"RootHide App Manager" withTarget:self];
 }
 
 - (void)viewWillAppear:(BOOL)animated
 {
-    @try {
-        [super viewWillAppear:animated];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] viewWillAppear error: %@", exception.reason);
-    }
+    [super viewWillAppear:animated];
+    // Refresh in case the config changed elsewhere (e.g. re-jailbreak seeded it)
+    [self reloadBlacklist];
+    [self reloadSpecifiers];
 }
 
-#pragma mark - Safe Blacklist Accessor
+#pragma mark - Config I/O (root + unsandboxed)
 
-- (NSMutableArray *)mutableBlacklist
+- (NSString *)configPath
 {
-    if (!_mutableBlacklist) {
-        _mutableBlacklist = [NSMutableArray new];
-    }
-    return _mutableBlacklist;
+    return JBROOT_PATH(@"/var/mobile/Library/RootHide/RootHideConfig.plist");
 }
 
-#pragma mark - Specifiers (UI Layout)
+// Read the appconfig dictionary from RootHideConfig.plist.
+// Runs as root+unsandboxed because the jbroot lives outside the app sandbox.
+- (NSDictionary *)loadAppConfig
+{
+    __block NSDictionary *result = nil;
+    [[DOEnvironmentManager sharedManager] runAsRoot:^{
+        [[DOEnvironmentManager sharedManager] runUnsandboxed:^{
+            NSDictionary *config = [NSDictionary dictionaryWithContentsOfFile:[self configPath]];
+            NSDictionary *appconfig = config[@"appconfig"];
+            if ([appconfig isKindOfClass:[NSDictionary class]]) {
+                result = appconfig;
+            }
+        }];
+    }];
+    return result;
+}
+
+// Write the appconfig dictionary back into RootHideConfig.plist,
+// preserving any other keys already present in the file.
+- (BOOL)saveAppConfig:(NSDictionary *)appconfig
+{
+    __block BOOL ok = NO;
+    [[DOEnvironmentManager sharedManager] runAsRoot:^{
+        [[DOEnvironmentManager sharedManager] runUnsandboxed:^{
+            NSString *path = [self configPath];
+            NSMutableDictionary *config = [NSMutableDictionary dictionaryWithDictionary:([NSDictionary dictionaryWithContentsOfFile:path] ?: @{})];
+            config[@"appconfig"] = appconfig;
+            // Ensure the directory exists (first write ever)
+            NSString *dir = [path stringByDeletingLastPathComponent];
+            [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+            ok = [config writeToFile:path atomically:YES];
+            if (!ok) {
+                NSLog(@"[RootHide] saveAppConfig failed to write %@", path);
+            }
+        }];
+    }];
+    return ok;
+}
+
+- (void)reloadBlacklist
+{
+    NSMutableArray *ids = [NSMutableArray new];
+    for (NSString *key in [[self loadAppConfig] allKeys]) {
+        if ([key isKindOfClass:[NSString class]] && key.length > 0) {
+            [ids addObject:key];
+        }
+    }
+    [ids sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+    self.blacklist = ids;
+
+    if (![DOEnvironmentManager sharedManager].isJailbroken) {
+        self.statusText = @"Jailbreak required. Hidden apps start completely clean (no tweaks, no injection).";
+    }
+    else {
+        self.statusText = [NSString stringWithFormat:@"%lu app(s) hidden. Hidden apps start completely clean — no tweaks, no injection.\nKill an app from the app switcher and reopen it to apply.", (unsigned long)ids.count];
+    }
+}
+
+#pragma mark - Specifiers
 
 - (NSArray *)specifiers
 {
-    @try {
-        if (_specifiers == nil) {
-            NSMutableArray *specifiers = [NSMutableArray new];
-            
-            // ========== HEADER SECTION ==========
-            PSSpecifier *headerGroup = [PSSpecifier emptyGroupSpecifier];
-            if (headerGroup) {
-                [headerGroup setProperty:@"DOHeaderCell" forKey:@"headerCellClass"];
-                [headerGroup setProperty:@"RootHide Manager" forKey:@"title"];
-                [specifiers addObject:headerGroup];
-            }
-            
-            // ========== TOGGLE SECTION ==========
-            PSSpecifier *toggleGroup = [PSSpecifier emptyGroupSpecifier];
-            if (toggleGroup) {
-                toggleGroup.name = @"JAILBREAK HIDING";
-                [specifiers addObject:toggleGroup];
-            }
-            
-            // Enable/Disable RootHide toggle
-            PSSpecifier *enableSpec = [PSSpecifier 
-                preferenceSpecifierNamed:@"Enable RootHide"
-                target:self
-                set:@selector(setRootHideEnabled:specifier:)
-                get:@selector(isRootHideEnabled)
-                detail:Nil
-                cell:PSSwitchCell
-                edit:Nil];
-            if (enableSpec) {
-                [enableSpec setProperty:kRootHideEnabledKey forKey:@"key"];
-                [enableSpec setProperty:@YES forKey:@"enabled"];
-                [specifiers addObject:enableSpec];
-            }
-            
-            // Status text
-            PSSpecifier *statusSpec = [PSSpecifier 
-                preferenceSpecifierNamed:@"Status"
-                target:self
-                set:NULL
-                get:@selector(rootHideInfoString)
-                detail:Nil
-                cell:PSStaticTextCell
-                edit:Nil];
-            if (statusSpec) {
-                [specifiers addObject:statusSpec];
-            }
-            
-            // ========== BLACKLIST SECTION ==========
-            PSSpecifier *blacklistGroup = [PSSpecifier emptyGroupSpecifier];
-            if (blacklistGroup) {
-                blacklistGroup.name = @"BLACKLIST MANAGEMENT";
-                [specifiers addObject:blacklistGroup];
-            }
-            
-            // Blacklist count
-            PSSpecifier *countSpec = [PSSpecifier 
-                preferenceSpecifierNamed:@"Blacklisted Apps"
-                target:self
-                set:NULL
-                get:@selector(blacklistCountString)
-                detail:Nil
-                cell:PSStaticTextCell
-                edit:Nil];
-            if (countSpec) {
-                [specifiers addObject:countSpec];
-            }
-            
-            // Add to blacklist button - WITH ALL REQUIRED PROPERTIES
-            PSSpecifier *addSpec = [self createButtonSpecifierWithTitle:@"Add App to Blacklist"
-                action:@selector(addToBlacklist:)
-                key:@"add_to_blacklist"
-                image:@"plus.circle"];
-            if (addSpec) {
-                [specifiers addObject:addSpec];
-            }
-            
-            // View blacklist button
-            PSSpecifier *viewSpec = [self createButtonSpecifierWithTitle:@"View Current Blacklist"
-                action:@selector(viewBlacklist:)
-                key:@"view_blacklist"
-                image:@"eye"];
-            if (viewSpec) {
-                [specifiers addObject:viewSpec];
-            }
-            
-            // Clear blacklist button  
-            PSSpecifier *clearSpec = [self createButtonSpecifierWithTitle:@"Clear All Blacklist"
-                action:@selector(clearBlacklist:)
-                key:@"clear_blacklist"
-                image:@"trash"];
-            if (clearSpec) {
-                [specifiers addObject:clearSpec];
-            }
-            
-            // ========== PRESET SECTION ==========
-            PSSpecifier *presetGroup = [PSSpecifier emptyGroupSpecifier];
-            if (presetGroup) {
-                presetGroup.name = @"PRESET BLACKLISTS";
-                [specifiers addObject:presetGroup];
-            }
-            
-            // Add banking apps button
-            PSSpecifier *bankingSpec = [self createButtonSpecifierWithTitle:@"Add Vietnamese Banking Apps"
-                action:@selector(addBankingApps:)
-                key:@"add_banking"
-                image:@"building.columns.fill"];
-            if (bankingSpec) {
-                [specifiers addObject:bankingSpec];
-            }
-            
-            // Add detection apps button
-            PSSpecifier *detectionSpec = [self createButtonSpecifierWithTitle:@"Add Detection/Security Apps"
-                action:@selector(addDetectionApps:)
-                key:@"add_detection"
-                image:@"shield"];
-            if (detectionSpec) {
-                [specifiers addObject:detectionSpec];
-            }
-            
-            // ========== APPLY SECTION ==========
-            PSSpecifier *applyGroup = [PSSpecifier emptyGroupSpecifier];
-            if (applyGroup) {
-                applyGroup.name = @"APPLY CHANGES";
-                [specifiers addObject:applyGroup];
-            }
-            
-            // Apply button
-            PSSpecifier *applySpec = [self createButtonSpecifierWithTitle:@"Apply & Reboot Userspace"
-                action:@selector(applyRootHideSettings:)
-                key:@"apply_settings"
-                image:@"checkmark.circle"];
-            if (applySpec) {
-                [specifiers addObject:applySpec];
-            }
-            
-            _specifiers = [specifiers copy];
+    if (_specifiers != nil) return _specifiers;
+
+    NSMutableArray *specifiers = [NSMutableArray new];
+    SEL defGetter = @selector(readPreferenceValue:);
+    SEL defSetter = @selector(setPreferenceValue:specifier:);
+    NSNumber *buttonHeight = @(44);
+
+    // Status group
+    PSSpecifier *statusGroup = [PSSpecifier emptyGroupSpecifier];
+    if (statusGroup) {
+        statusGroup.name = @"APP HIDING";
+        [statusGroup setProperty:self.statusText forKey:@"footerText"];
+        [specifiers addObject:statusGroup];
+    }
+
+    // Buttons
+    NSArray *buttons = @[
+        @{ @"title": @"Add Vietnamese Bank Apps",
+           @"image": @"banknote",
+           @"action": @"addBankingAppsPressed:" },
+        @{ @"title": @"Add App by Bundle ID",
+           @"image": @"plus.circle",
+           @"action": @"addAppPressed:" },
+    ];
+    if (self.blacklist.count > 0) {
+        buttons = [buttons arrayByAddingObject:
+            @{ @"title": @"Remove All",
+               @"image": @"trash",
+               @"action": @"removeAllPressed:" }];
+    }
+    for (NSDictionary *button in buttons) {
+        PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:@"" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+        if (!spec) continue;
+        [spec setProperty:[DOButtonCell class] forKey:@"cellClass"];
+        [spec setProperty:buttonHeight forKey:@"height"];
+        [spec setProperty:button[@"image"] forKey:@"image"];
+        [spec setProperty:button[@"action"] forKey:@"action"];
+        [spec setProperty:button[@"title"] forKey:@"title"];
+        [specifiers addObject:spec];
+    }
+
+    // Hidden apps list
+    if (self.blacklist.count > 0) {
+        PSSpecifier *listGroup = [PSSpecifier emptyGroupSpecifier];
+        if (listGroup) {
+            listGroup.name = @"HIDDEN APPS";
+            [listGroup setProperty:@"Tap an app to remove it from the hidden list." forKey:@"footerText"];
+            [specifiers addObject:listGroup];
         }
-        
-        return _specifiers;
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] specifiers error: %@", exception.reason);
-        return @[];
-    }
-}
-
-#pragma mark - Button Specifier Factory (Fixes crash on scroll)
-
-- (PSSpecifier *)createButtonSpecifierWithTitle:(NSString *)title 
-    action:(SEL)action 
-    key:(NSString *)key 
-    image:(NSString *)imageName
-{
-    @try {
-        PSSpecifier *specifier = [PSSpecifier 
-            preferenceSpecifierNamed:title
-            target:self
-            set:NULL
-            get:NULL
-            detail:Nil
-            cell:PSStaticTextCell
-            edit:Nil];
-        
-        if (!specifier) return nil;
-        
-        // CRITICAL: All properties DOButtonCell needs
-        [specifier setProperty:[DOButtonCell class] forKey:@"cellClass"];
-        [specifier setProperty:NSStringFromSelector(action) forKey:@"action"];
-        [specifier setProperty:key forKey:@"key"];           // Required by DOButtonCell
-        [specifier setProperty:imageName forKey:@"image"];     // Required by DOButtonCell
-        [specifier setProperty:title forKey:@"title"];         // Ensure title is set
-        
-        return specifier;
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] createButtonSpecifier error: %@", exception.reason);
-        return nil;
-    }
-}
-
-#pragma mark - Property Getters/Setters
-
-- (BOOL)isRootHideEnabled
-{
-    @try {
-        return [[NSUserDefaults standardUserDefaults] boolForKey:kRootHideEnabledKey];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] isRootHideEnabled error: %@", exception.reason);
-        return NO;
-    }
-}
-
-- (void)setRootHideEnabled:(BOOL)enabled specifier:(PSSpecifier *)specifier
-{
-    @try {
-        [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:kRootHideEnabledKey];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-
-        // Push to jbserver so launchd's gRoothideServer.enabled mirror is
-        // kept in sync.  jbclient_roothide_set_enabled will only succeed if
-        // we are the Dopamine app (enforced by jbdomain_roothide.c).
-        // Errors here are non-fatal — the local NSUserDefaults value is
-        // still authoritative for the UI, and the server will be re-pushed
-        // on next applyRootHideSettings:.
-        int r = jbclient_roothide_set_enabled(enabled);
-        if (r != 0) {
-            NSLog(@"[RootHide] jbclient_roothide_set_enabled(%d) returned %d — server may not be ready yet", enabled, r);
-        }
-
-        if (specifier) {
-            [self reloadSpecifier:specifier];
+        for (NSString *bundleID in self.blacklist) {
+            PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:bundleID target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+            if (!spec) continue;
+            [spec setProperty:bundleID forKey:@"title"];
+            [spec setProperty:@"removeAppPressed:" forKey:@"action"];
+            [specifiers addObject:spec];
         }
     }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] setRootHideEnabled error: %@", exception.reason);
-    }
+
+    _specifiers = specifiers;
+    return _specifiers;
 }
 
-- (NSString *)rootHideInfoString
+// Rebuild the specifier list after every change
+- (void)reloadSpecifiers
 {
-    @try {
-        BOOL enabled = self.isRootHideEnabled;
-        return enabled ? 
-            @"✅ RootHide Mode: Enabled" : 
-            @"⚪ RootHide Mode: Disabled";
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] rootHideInfoString error: %@", exception.reason);
-        return @"RootHide Mode: Unknown";
-    }
+    _specifiers = nil;
+    [super reloadSpecifiers];
 }
 
-- (NSString *)blacklistCountString
-{
-    @try {
-        NSUInteger count = self.mutableBlacklist.count;
-        return [NSString stringWithFormat:@"%lu app(s) in blacklist", (unsigned long)count];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] blacklistCountString error: %@", exception.reason);
-        return @"0 app(s) in blacklist";
-    }
-}
+#pragma mark - Actions
 
-#pragma mark - Helper Methods
-
-- (void)refreshBlacklist
+- (void)addBankingAppsPressed:(PSSpecifier *)specifier
 {
-    @try {
-        NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:kRootHideBlacklistKey];
-        if (saved && [saved isKindOfClass:[NSArray class]]) {
-            _mutableBlacklist = [saved mutableCopy];
-        } else {
-            _mutableBlacklist = [NSMutableArray new];
+    NSMutableDictionary *appconfig = [NSMutableDictionary dictionaryWithDictionary:[self loadAppConfig]];
+    NSMutableArray *added = [NSMutableArray new];
+    for (NSString *bundleID in kVietnameseBankingApps) {
+        if (![appconfig[bundleID] boolValue]) {
+            appconfig[bundleID] = @YES;
+            [added addObject:bundleID];
         }
     }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] refreshBlacklist error: %@", exception.reason);
-        _mutableBlacklist = [NSMutableArray new];
+    if (added.count == 0) {
+        [self showAlertWithTitle:@"Bank Apps" message:@"All Vietnamese bank apps are already hidden."];
+        return;
+    }
+    if ([self saveAppConfig:appconfig]) {
+        [self reloadBlacklist];
+        [self reloadSpecifiers];
+        [self showAlertWithTitle:@"Bank Apps Added" message:[NSString stringWithFormat:@"Added %lu app(s):\n\n%@\n\nKill each app from the app switcher and reopen it to apply.", (unsigned long)added.count, [added componentsJoinedByString:@"\n"]]];
+    }
+    else {
+        [self showAlertWithTitle:@"Error" message:@"Failed to write RootHideConfig.plist. Make sure the device is jailbroken."];
     }
 }
 
-- (void)saveBlacklist
+- (void)addAppPressed:(PSSpecifier *)specifier
 {
-    @try {
-        if (_mutableBlacklist) {
-            [[NSUserDefaults standardUserDefaults] setObject:_mutableBlacklist forKey:kRootHideBlacklistKey];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            [self syncBlacklistToServer];
-        }
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] saveBlacklist error: %@", exception.reason);
-    }
-}
-
-// Push the current in-memory blacklist to jbserver (domain 6).
-// Each call re-sends every entry; the server treats duplicates as no-op
-// (rothide_add_blacklist returns 0 for "already exists"). This is O(N) XPC
-// calls which is fine for the expected N (~10-30 entries).
-- (void)syncBlacklistToServer
-{
-    @try {
-        for (NSString *bundleID in _mutableBlacklist) {
-            if ([bundleID isKindOfClass:[NSString class]] && bundleID.length > 0) {
-                int r = jbclient_roothide_add_blacklist([bundleID UTF8String]);
-                if (r != 0) {
-                    NSLog(@"[RootHide] add_blacklist(%@) -> %d", bundleID, r);
-                }
-            }
-        }
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] syncBlacklistToServer error: %@", exception.reason);
-    }
-}
-
-#pragma mark - Action Handlers (Receive PSSpecifier from DOButtonCell)
-
-- (void)addToBlacklist:(PSSpecifier *)specifier
-{
-    @try {
-        UIAlertController *alert = [UIAlertController 
-            alertControllerWithTitle:@"Add to Blacklist" 
-            message:@"Enter the Bundle ID of the app to hide\n(e.g., com.vcb.IB)" 
-            preferredStyle:UIAlertControllerStyleAlert];
-        
-        [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
-            textField.placeholder = @"com.example.app";
-            textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
-            textField.autocorrectionType = UITextAutocorrectionTypeNo;
-        }];
-        
-        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Add" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            @try {
-                NSString *bundleID = alert.textFields.firstObject.text;
-                bundleID = [bundleID stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                
-                if (bundleID.length > 0 && ![self.mutableBlacklist containsObject:bundleID]) {
-                    [self.mutableBlacklist addObject:bundleID];
-                    [self saveBlacklist];
-                    [self reloadSpecifiers];
-                    
-                    // Show success feedback
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                        UIAlertController *successAlert = [UIAlertController 
-                            alertControllerWithTitle:@"Added" 
-                            message:[NSString stringWithFormat:@"%@ added to blacklist", bundleID]
-                            preferredStyle:UIAlertControllerStyleAlert];
-                        [successAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                        [self presentViewController:successAlert animated:YES completion:nil];
-                    });
-                } else if ([self.mutableBlacklist containsObject:bundleID]) {
-                    UIAlertController *dupAlert = [UIAlertController 
-                        alertControllerWithTitle:@"Already Exists" 
-                        message:@"This app is already in the blacklist."
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    [dupAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    [self presentViewController:dupAlert animated:YES completion:nil];
-                }
-            }
-            @catch (NSException *ex) {
-                NSLog(@"[RootHide] addToBlacklist action error: %@", ex.reason);
-            }
-        }]];
-        
-        [self presentViewController:alert animated:YES completion:nil];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] addToBlacklist error: %@", exception.reason);
-    }
-}
-
-- (void)viewBlacklist:(PSSpecifier *)specifier
-{
-    @try {
-        NSArray *blacklist = [self.mutableBlacklist copy];
-        
-        if (blacklist.count == 0) {
-            UIAlertController *alert = [UIAlertController 
-                alertControllerWithTitle:@"Blacklist Empty" 
-                message:@"No apps are currently blacklisted.\n\nTap 'Add App to Blacklist' or use preset buttons to add apps."
-                preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:alert animated:YES completion:nil];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Add App to Hidden List"
+                                                                   message:@"Enter the Bundle ID of the app to hide (e.g. com.vcb.IB)"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder = @"com.example.app";
+        textField.autocorrectionType = UITextAutocorrectionTypeNo;
+        textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Add" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSString *bundleID = [[alert.textFields firstObject].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (bundleID.length == 0 || [bundleID containsString:@" "]) {
+            [self showAlertWithTitle:@"Invalid Bundle ID" message:@"Bundle IDs look like com.company.app (no spaces)."];
             return;
         }
-        
-        NSMutableString *message = [NSMutableString string];
-        [message appendFormat:@"Total: %lu app(s)\n\n", (unsigned long)blacklist.count];
-        
-        for (NSUInteger i = 0; i < blacklist.count; i++) {
-            [message appendFormat:@"%lu. %@\n", (unsigned long)(i + 1), blacklist[i]];
-        }
-        
-        UIAlertController *alert = [UIAlertController 
-            alertControllerWithTitle:@"Current Blacklist" 
-            message:message 
-            preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] viewBlacklist error: %@", exception.reason);
-    }
-}
-
-- (void)clearBlacklist:(PSSpecifier *)specifier
-{
-    @try {
-        NSUInteger count = self.mutableBlacklist.count;
-
-        if (count == 0) {
-            UIAlertController *alert = [UIAlertController
-                alertControllerWithTitle:@"Already Empty"
-                message:@"The blacklist is already empty."
-                preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:alert animated:YES completion:nil];
+        NSMutableDictionary *appconfig = [NSMutableDictionary dictionaryWithDictionary:[self loadAppConfig]];
+        if ([appconfig[bundleID] boolValue]) {
+            [self showAlertWithTitle:@"Already Hidden" message:[NSString stringWithFormat:@"%@ is already in the hidden list.", bundleID]];
             return;
         }
-
-        UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:@"⚠️ Clear Blacklist?"
-            message:[NSString stringWithFormat:@"Remove all %lu app(s) from blacklist?\n\nThis cannot be undone!", (unsigned long)count]
-            preferredStyle:UIAlertControllerStyleAlert];
-
-        [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Clear All" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
-            @try {
-                // ROOTHIDE FIX LỖI 2: Clear local blacklist AND server-side blacklist.
-                // Trước đây chỉ clear local NSUserDefaults, server vẫn giữ entries cũ
-                // → systemhook vẫn skip injection cho apps đã bị xóa khỏi UI.
-                // Fix: gọi jbclient_roothide_clear_blacklist() để clear cả server state.
-                [self.mutableBlacklist removeAllObjects];
-                [self saveBlacklist];
-                int r = jbclient_roothide_clear_blacklist();
-                NSLog(@"[RootHide] jbclient_roothide_clear_blacklist() returned %d", r);
-                [self reloadSpecifiers];
-
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                    UIAlertController *clearedAlert = [UIAlertController
-                        alertControllerWithTitle:@"Cleared"
-                        message:[NSString stringWithFormat:@"All apps removed from blacklist (server r=%d).", r]
-                        preferredStyle:UIAlertControllerStyleAlert];
-                    [clearedAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-                    [self presentViewController:clearedAlert animated:YES completion:nil];
-                });
-            }
-            @catch (NSException *ex) {
-                NSLog(@"[RootHide] clearBlacklist action error: %@", ex.reason);
-            }
-        }]];
-
-        [self presentViewController:alert animated:YES completion:nil];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] clearBlacklist error: %@", exception.reason);
-    }
+        appconfig[bundleID] = @YES;
+        if ([self saveAppConfig:appconfig]) {
+            [self reloadBlacklist];
+            [self reloadSpecifiers];
+            [self showAlertWithTitle:@"App Hidden" message:[NSString stringWithFormat:@"%@ will start completely clean from its next launch. Kill it from the app switcher first.", bundleID]];
+        }
+        else {
+            [self showAlertWithTitle:@"Error" message:@"Failed to write RootHideConfig.plist."];
+        }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)addBankingApps:(PSSpecifier *)specifier
+- (void)removeAllPressed:(PSSpecifier *)specifier
 {
-    @try {
-        NSArray *vietnameseBankingApps = @[
-            @"com.vietinbank.iBank",      // VietinBank
-            @"com.vcb.IB",                 // Vietcombank
-            @"com.techcombank.business",   // Techcombank
-            @"com.mbmobile",               // MB Bank
-            @"com.acb.ACBMobileBanking",  // ACB
-            @"com.vib.VIBMobileBanking",  // VIB
-            @"com.babk.BABMobileBanking", // BAOVIET Bank
-            @"com.agribank.DigiBank",     // Agribank
-            @"vnpay.NapAsVnPay",          // VNPay
-        ];
-        
-        int added = 0;
-        NSMutableArray *addedNames = [NSMutableArray new];
-        
-        for (NSString *bundleID in vietnameseBankingApps) {
-            if (![self.mutableBlacklist containsObject:bundleID]) {
-                [self.mutableBlacklist addObject:bundleID];
-                added++;
-                [addedNames addObject:bundleID];
-            }
+    if (self.blacklist.count == 0) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Remove All"
+                                                                   message:[NSString stringWithFormat:@"Remove all %lu app(s) from the hidden list?", (unsigned long)self.blacklist.count]
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Remove All" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        if ([self saveAppConfig:@{}]) {
+            [self reloadBlacklist];
+            [self reloadSpecifiers];
         }
-        
-        [self saveBlacklist];
-        [self reloadSpecifiers];
-        
-        NSString *message;
-        if (added > 0) {
-            message = [NSString stringWithFormat:@"Added %d Vietnamese banking apps:\n\n%@", added, [addedNames componentsJoinedByString:@"\n"]];
-        } else {
-            message = @"All banking apps are already in the blacklist.";
-        }
-        
-        UIAlertController *alert = [UIAlertController 
-            alertControllerWithTitle:@"🏦 Banking Apps" 
-            message:message
-            preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] addBankingApps error: %@", exception.reason);
-    }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)addDetectionApps:(PSSpecifier *)specifier
+- (void)removeAppPressed:(PSSpecifier *)specifier
 {
-    @try {
-        NSArray *detectionApps = @[
-            @"com.apple.dt.Xcode",         // Xcode Debugger
-            @"com.bugsnag.Bugsnag",        // Bugsnag SDK
-            @"io.fabric.sdk.ios",          // Fabric/Crashlytics
-            @"com.microsoft.IntuneMAM",    // Microsoft Intune
-            @"com.vmware.horizon",         // VMware Horizon
-        ];
-        
-        int added = 0;
-        NSMutableArray *addedNames = [NSMutableArray new];
-        
-        for (NSString *bundleID in detectionApps) {
-            if (![self.mutableBlacklist containsObject:bundleID]) {
-                [self.mutableBlacklist addObject:bundleID];
-                added++;
-                [addedNames addObject:bundleID];
-            }
+    NSString *bundleID = [specifier propertyForKey:@"title"];
+    if (![bundleID isKindOfClass:[NSString class]] || bundleID.length == 0) return;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Remove From Hidden List"
+                                                                   message:[NSString stringWithFormat:@"Unhide %@? Tweaks and injection will be active again on its next launch.", bundleID]
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Unhide" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        NSMutableDictionary *appconfig = [NSMutableDictionary dictionaryWithDictionary:[self loadAppConfig]];
+        [appconfig removeObjectForKey:bundleID];
+        if ([self saveAppConfig:appconfig]) {
+            [self reloadBlacklist];
+            [self reloadSpecifiers];
         }
-        
-        [self saveBlacklist];
-        [self reloadSpecifiers];
-        
-        NSString *message;
-        if (added > 0) {
-            message = [NSString stringWithFormat:@"Added %d detection/security apps:\n\n%@", added, [addedNames componentsJoinedByString:@"\n"]];
-        } else {
-            message = @"All detection apps are already in the blacklist.";
-        }
-        
-        UIAlertController *alert = [UIAlertController 
-            alertControllerWithTitle:@"🛡️ Detection Apps" 
-            message:message
-            preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [self presentViewController:alert animated:YES completion:nil];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] addDetectionApps error: %@", exception.reason);
-    }
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)applyRootHideSettings:(PSSpecifier *)specifier
+#pragma mark - Preference value stubs (never invoked for static/button cells,
+// implemented defensively so PS internals can always resolve the selectors)
+
+- (id)readPreferenceValue:(PSSpecifier *)specifier
 {
-    @try {
-        [self saveBlacklist];
+    return nil;
+}
 
-        NSUInteger count = self.mutableBlacklist.count;
-        BOOL enabled = self.isRootHideEnabled;
+- (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier
+{
+}
 
-        // Push enable flag + apply_settings to jbserver.
-        // We pass shouldReboot=false — the server handler intentionally
-        // ignores this argument for now (see jbdomain_roothide.c), to avoid
-        // accidentally triggering a userspace reboot during setup.
-        jbclient_roothide_set_enabled(enabled);
-        jbclient_roothide_apply_settings(false);
+#pragma mark - Helpers
 
-        NSString *message = [NSString stringWithFormat:
-            @"RootHide Settings Saved!\n\n"
-            @"• Mode: %@\n"
-            @"• Blacklisted: %lu app(s)\n\n"
-            @"Restart SpringBoard to apply changes.",
-            enabled ? @"ENABLED ✅" : @"DISABLED ⚪",
-            (unsigned long)count];
-        
-        UIAlertController *alert = [UIAlertController 
-            alertControllerWithTitle:@"💾 Settings Saved" 
-            message:message
-            preferredStyle:UIAlertControllerStyleAlert];
-        
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [alert addAction:[UIAlertAction actionWithTitle:@"Respring Now" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            // Trigger respring via notification
-            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(), 
-                CFSTR("com.opa334.dopamine.respring"), NULL, NULL, TRUE);
-        }]];
-        
-        [self presentViewController:alert animated:YES completion:nil];
-    }
-    @catch (NSException *exception) {
-        NSLog(@"[RootHide] applyRootHideSettings error: %@", exception.reason);
-    }
+- (void)showAlertWithTitle:(NSString *)title message:(NSString *)message
+{
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 @end

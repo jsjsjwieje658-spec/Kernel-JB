@@ -128,3 +128,8 @@
 "Status_Title_Select_Package_Managers" = "Select Package Manager(s)";
 "Select_Package_Managers_Install_Message" = "If you are unsure which one to select, select Sileo";
 "Continue" = "Continue";
+
+// RootHide App Manager (Build 3.3)
+"Section_RootHide" = "Jailbreak Hiding";
+"RootHide App Manager" = "Hide Apps (RootHide)";
+"Hint_RootHide_Manager" = "Apps in the hidden list start completely clean: no tweak injection and no systemhook, which prevents most jailbreak detection. Bank and security apps should be listed here. Changes take effect the next time each app is opened.";

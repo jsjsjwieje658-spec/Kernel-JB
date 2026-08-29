@@ -467,6 +467,60 @@ void *boomerang_server(struct boomerang_info *info)
     return nil;
 }
 
+// RootHide Build 3.3: seed <jbroot>/var/mobile/Library/RootHide/RootHideConfig.plist
+// with a preset of Vietnamese banking/e-wallet apps on first jailbreak.
+//
+// This is the file isBlacklistedApp() (libjailbreak roothider/blacklist.m) reads
+// on EVERY app spawn from launchd: apps listed under "appconfig" are spawned
+// completely clean (no DYLD_INSERT_LIBRARIES systemhook injection, no trustcache
+// upload, no CS_DEBUGGED marking) — the primary defense against bank-app
+// jailbreak detection via _dyld_image_count() enumeration.
+//
+// Idempotent: does nothing when the config already exists, so edits made in
+// Settings → Hide Apps (RootHide) survive re-jailbreaks.
+- (void)seedRootHideConfigIfAbsent
+{
+    NSString *configPath = JBROOT_PATH(@"/var/mobile/Library/RootHide/RootHideConfig.plist");
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:configPath]) {
+        NSLog(@"[RootHide] RootHideConfig.plist already exists — keeping user config");
+        return;
+    }
+
+    NSDictionary *preset = @{
+        @"appconfig": @{
+            @"com.vietinbank.iBank":          @YES, // VietinBank iBank
+            @"com.vcb.IB":                    @YES, // Vietcombank Digibank
+            @"com.techcombank.business":      @YES, // Techcombank Mobile
+            @"com.mbmobile":                  @YES, // MB Bank
+            @"com.acb.ACBMobileBanking":      @YES, // ACB ONE
+            @"com.vib.VIBMobileBanking":      @YES, // VIB Digibank
+            @"com.babk.BABMobileBanking":     @YES, // BaoViet Bank
+            @"com.agribank.DigiBank":         @YES, // Agribank E-mobile
+            @"vnpay.NapAsVnPay":              @YES, // VNPAY
+            @"com.viettel.wallet.viettelpay": @YES, // Viettel Money
+            @"com.mservice.SmartPay":         @YES, // MoMo
+        }
+    };
+
+    NSError *error = nil;
+    [fm createDirectoryAtPath:[configPath stringByDeletingLastPathComponent]
+      withIntermediateDirectories:YES
+                       attributes:nil
+                            error:&error];
+    if (error) {
+        NSLog(@"[RootHide] seedRootHideConfig mkdir error: %@", error);
+        return;
+    }
+    if ([preset writeToFile:configPath atomically:YES]) {
+        NSLog(@"[RootHide] Seeded RootHideConfig.plist with %lu bank app preset",
+              (unsigned long)preset[@"appconfig"].count);
+    }
+    else {
+        NSLog(@"[RootHide] Failed to write RootHideConfig.plist preset");
+    }
+}
+
 // BaseBin/libjailbreak/src/roothider/unsandbox.m (compiled into the app binary
 // via the dopamine Makefile, and also exported by libjailbreak.dylib which the
 // GUI app links). Declared here directly instead of pulling in
@@ -848,6 +902,15 @@ static NSString *roothideJbrandString(void)
         printf("Creating safe mode marker file since tweaks were disabled in settings\n");
         [[NSData data] writeToFile:JBROOT_PATH(@"/basebin/.safe_mode") atomically:YES];
     }
+
+    // RootHide Build 3.3: seed RootHideConfig.plist with the Vietnamese bank
+    // app preset so AppHide protection works out of the box (bank apps were
+    // still detected because the blacklist config had no way to be populated:
+    // the old manager UI was removed from the build). Only writes when the
+    // file does not exist yet — user edits made in "Hide Apps (RootHide)"
+    // survive re-jailbreak. At this point the app is unsandboxed with kernel
+    // primitives live (same state as the .safe_mode write above).
+    [self seedRootHideConfigIfAbsent];
     
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Loading BaseBin TrustCache") debug:NO];
     *errOut = [self loadBasebinTrustcache];

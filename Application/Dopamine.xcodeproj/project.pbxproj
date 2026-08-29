@@ -253,6 +253,7 @@
 		8CF3E8662F72D57800931CA8 /* DarkSword.m in Sources */ = {isa = PBXBuildFile; fileRef = 8CF3E85B2F72D50200931CA8 /* DarkSword.m */; };
 		8CF3E8672F72DD9400931CA8 /* DarkSword.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8CF3E8582F72D45800931CA8 /* DarkSword.framework */; };
 		8CF3E8682F72DD9400931CA8 /* DarkSword.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 8CF3E8582F72D45800931CA8 /* DarkSword.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		D0D0D0D0D0D0D0D0D0D0D000 /* DORootHideManager.m in Sources */ = {isa = PBXBuildFile; fileRef = D0D0D0D0D0D0D0D0D0D0D001 /* DORootHideManager.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -697,6 +698,8 @@
 		8CF3E85B2F72D50200931CA8 /* DarkSword.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = DarkSword.m; sourceTree = "<group>"; };
 		8CF3E85E2F72D51200931CA8 /* DarkSword.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DarkSword.h; sourceTree = "<group>"; };
 		C075B0CB2B8F2BCE009A26BB /* th */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = th; path = th.lproj/Localizable.strings; sourceTree = "<group>"; };
+		D0D0D0D0D0D0D0D0D0D0D002 /* DORootHideManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DORootHideManager.h; sourceTree = "<group>"; };
+		D0D0D0D0D0D0D0D0D0D0D001 /* DORootHideManager.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = DORootHideManager.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -887,6 +890,8 @@
 				0424796E2B66916B0082581B /* DOCreditsViewController.h */,
 				0424796B2B66916B0082581B /* DOCreditsViewController.m */,
 				042479702B66916B0082581B /* DOSettingsController.h */,
+				D0D0D0D0D0D0D0D0D0D0D002 /* DORootHideManager.h */,
+				D0D0D0D0D0D0D0D0D0D0D001 /* DORootHideManager.m */,
 				0424796C2B66916B0082581B /* DOSettingsController.m */,
 				04DD0B332B7BA38C0055DE4F /* DOLicenseViewController.h */,
 				04DD0B342B7BA38C0055DE4F /* DOLicenseViewController.m */,
@@ -2325,6 +2330,7 @@
 				042479B62B66916B0082581B /* DOActionMenuButton.m in Sources */,
 				8C71981D2ABF0E82003C6658 /* DOSceneDelegate.m in Sources */,
 				042479A32B66916B0082581B /* DOSettingsController.m in Sources */,
+				D0D0D0D0D0D0D0D0D0D0D000 /* DORootHideManager.m in Sources */,
 
 			);
 			runOnlyForDeploymentPostprocessing = 0;

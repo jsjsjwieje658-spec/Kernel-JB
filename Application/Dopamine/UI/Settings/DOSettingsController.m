@@ -20,7 +20,7 @@
 #import "DOSceneDelegate.h"
 #import "DOPSJetsamListItemsController.h"
 #import "DOButtonCell.h"
-// DORootHideManager.h removed — RootHide settings UI causes crash
+#import "DORootHideManager.h"
 
 @interface DOSettingsController ()
 
@@ -341,9 +341,22 @@
                     [specifiers addObject:removeJailbreakSpecifier];
                 }
                 
-                // RootHide Manager section removed — causes Settings crash
-                // when scrolling down.  RootHide hiding is handled
-                // automatically by the bootstrap, no UI needed.
+                // RootHide App Manager (Build 3.3): blacklist apps so they start
+                // completely clean (no systemhook injection, no tweaks).
+                // Pushed as a detail page — same proven pattern as the theme page.
+                if (envManager.isJailbroken) {
+                    PSSpecifier *roothideGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
+                    roothideGroupSpecifier.name = DOLocalizedString(@"Section_RootHide");
+                    [roothideGroupSpecifier setProperty:DOLocalizedString(@"Hint_RootHide_Manager") forKey:@"footerText"];
+                    [specifiers addObject:roothideGroupSpecifier];
+
+                    PSSpecifier *roothideManagerSpecifier = [PSSpecifier preferenceSpecifierNamed:DOLocalizedString(@"RootHide App Manager") target:self set:defSetter get:defGetter detail:nil cell:PSLinkListCell edit:nil];
+                    roothideManagerSpecifier.detailControllerClass = [DORootHideManager class];
+                    [roothideManagerSpecifier setProperty:@YES forKey:@"enabled"];
+                    if (@available(iOS 16.0, *))
+                        [roothideManagerSpecifier setProperty:@"eye.slash" forKey:@"image"];
+                    [specifiers addObject:roothideManagerSpecifier];
+                }
             }
         }
         
