@@ -468,9 +468,17 @@ void *boomerang_server(struct boomerang_info *info)
 }
 
 // BaseBin/libjailbreak/src/roothider/unsandbox.m (compiled into the app binary
-// via the dopamine Makefile). Declared here directly instead of pulling in
+// via the dopamine Makefile, and also exported by libjailbreak.dylib which the
+// GUI app links). Declared here directly instead of pulling in
 // roothider/common.h, which declares many symbols the app does not provide.
 extern int unsandbox(const char *dir, const char *file);
+// Shadow-publication variant (Build 3.1): unlike unsandbox(), this may publish
+// a name that already exists on disk. Relaxin's unsandbox2() refuses with
+// EEXIST when the target name resolves to a different file — correct for
+// upstream (which only ever publishes randomized systemhook-<jbrand>.dylib
+// names that cannot exist yet), but it blocks shadowing the STOCK
+// /usr/lib/dyld with the patched dyld ("File exists", JB error -13).
+extern int unsandbox_shadow(const char *dir, const char *file);
 
 // RootHide port Build 3: extract the 16 hex character jbrand from the
 // randomized jbroot path (.jbroot-XXXXXXXXXXXXXXXX). Returns nil when the
@@ -513,7 +521,11 @@ static NSString *roothideJbrandString(void)
 // name already resolves to the exact same source file (st_dev/st_ino check),
 // and re-jailbreaking always happens on a fresh kernel namecache anyway
 // (device reboot). A same-boot re-jailbreak creates a NEW random jbrand, so
-// the names can never collide either.
+// the systemhook names can never collide either. The dyld publication goes
+// through unsandbox_shadow() (Build 3.1): "dyld" ALWAYS exists on disk
+// (stock), so Relaxin's EEXIST guard must be bypassed for that one call —
+// the injected entry is inserted at the head of the namecache hash bucket
+// and therefore takes precedence over the stock on-disk entry.
 - (NSError *)publishFakeLibNoMount
 {
     // 1. Hard requirement: unsandbox() needs the kernel namecache hash
@@ -569,7 +581,16 @@ static NSString *roothideJbrandString(void)
     //    every subsequent exec (same behaviour the bindfs mount used to
     //    provide — LC_UUID differs from the in-cache dyld, so the kernel
     //    loads this on-disk copy instead).
-    r = unsandbox("/usr/lib", patchedDyldPath.fileSystemRepresentation);
+    //
+    //    Build 3.1: this MUST go through unsandbox_shadow(). The stock
+    //    /usr/lib/dyld exists on disk, so plain unsandbox() (Relaxin's
+    //    EEXIST guard) sees a conflicting st_dev/st_ino and aborts with
+    //    "-1 (File exists)" — that is exactly what broke Build 3 on device.
+    //    unsandbox_shadow() performs the same kernel namecache publication
+    //    but inserts the injected entry at the HEAD of the hash bucket, so
+    //    lookups resolve to the patched dyld while the stock entry remains
+    //    untouched further down the chain (no mount, no file modification).
+    r = unsandbox_shadow("/usr/lib", patchedDyldPath.fileSystemRepresentation);
     if (r != 0) {
         return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedInitFakeLib userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Publishing patched dyld into /usr/lib failed: %d (%s)", r, strerror(errno)]}];
     }
@@ -594,7 +615,7 @@ static NSString *roothideJbrandString(void)
         }
     }
 
-    NSLog(@"[RootHide] Build 3: published systemhook (%@) + patched dyld into /usr/lib via namecache (no bindfs mount)", publishedHookPath);
+    NSLog(@"[RootHide] Build 3.1: published systemhook (%@) + patched dyld into /usr/lib via namecache shadow (no bindfs mount)", publishedHookPath);
 
     // 6. Children spawned by this app (bootstrap tools) load systemhook
     //    through the published /usr/lib path, readable by every process.

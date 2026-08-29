@@ -126,6 +126,9 @@ struct fileglob {
 
 int unsandbox1(const char *dir, const char *file);
 int unsandbox2(const char *dir, const char *file);
+// RootHide port: shadow-publication variant of unsandbox2 (allows publishing
+// over a name that already exists on disk, e.g. the stock /usr/lib/dyld).
+int unsandbox2_shadow(const char *dir, const char *file);
 
 void init_crc32(void);
 unsigned int hash_string(const char *cp, int len);

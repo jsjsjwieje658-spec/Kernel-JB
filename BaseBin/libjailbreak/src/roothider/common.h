@@ -48,6 +48,9 @@ int roothide_patch_proc(pid_t pid);
 int unrestrict(pid_t pid, int (*callback)(pid_t), bool resume);
 
 int unsandbox(const char *dir, const char *file);
+// RootHide port: shadow-publication variant (may publish over a name that
+// already exists on disk, e.g. the stock /usr/lib/dyld).
+int unsandbox_shadow(const char *dir, const char *file);
 
 int ensure_dyld_trustcache(const char *path);
 

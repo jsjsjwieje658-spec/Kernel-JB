@@ -93,4 +93,18 @@ int unsandbox(const char *dir, const char *file) {
     }
 }
 
+// RootHide port: shadow publication. Unlike unsandbox(), this variant may
+// publish a name that already exists on disk (e.g. shadowing the stock
+// /usr/lib/dyld with the patched dyld). On iOS 16.4+ it routes to
+// unsandbox2_shadow (Relaxin's unsandbox2 with the EEXIST idempotency guard
+// bypassed for conflicting names); unsandbox1 (iOS < 16.4) has no such guard
+// and already shadows, so it is used unchanged.
+int unsandbox_shadow(const char *dir, const char *file) {
+    if (@available(iOS 16.4, *)) {
+        return unsandbox2_shadow(dir, file);
+    } else {
+        return unsandbox1(dir, file);
+    }
+}
+
 #pragma clang diagnostic pop

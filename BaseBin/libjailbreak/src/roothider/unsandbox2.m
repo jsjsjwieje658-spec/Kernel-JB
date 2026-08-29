@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <spawn.h>
@@ -73,7 +74,29 @@ static int make_tail_file() {
     return 0;
 }
 
-int unsandbox2(const char *dir, const char *file) {
+/*
+ * RootHide port note (the ONLY delta from Relaxin's unsandbox2.m):
+ *
+ * The function body below is Relaxin's original with one addition: the
+ * `allow_shadow` parameter. Relaxin's EEXIST idempotency guard refuses to
+ * publish when the target name already exists on disk and resolves to a
+ * different file (e.g. the stock /usr/lib/dyld). Relaxin itself only ever
+ * publishes names that cannot exist yet (systemhook-<jbrand>.dylib), so the
+ * guard can never fire upstream.
+ *
+ * The Kernel-JB fork additionally needs to shadow the STOCK /usr/lib/dyld
+ * with the patched dyld (the mount-free replacement for Dopamine's fakelib
+ * bindfs mount). unsandbox2() keeps Relaxin's exact behavior (shadow off);
+ * unsandbox2_shadow() passes allow_shadow=true so a conflicting on-disk
+ * name falls through to the publication instead of failing with EEXIST.
+ * The injected entry is inserted at the HEAD of the hash bucket, so name
+ * lookups resolve to the source file and the stock on-disk entry is simply
+ * shadowed - no mount table entry, invisible to getmntinfo()/statfs().
+ *
+ * (Relaxin's own unsandbox1.m for iOS < 16.4 has no EEXIST guard at all and
+ * already shadows - unsandbox1 callers are unaffected by this change.)
+ */
+static int unsandbox2_impl(const char *dir, const char *file, bool allow_shadow) {
     int ret = 0;
     int filefd = -1, dirfd = -1, newfilefd = -1;
 
@@ -105,13 +128,23 @@ int unsandbox2(const char *dir, const char *file) {
             goto failed;
         }
         if (sourceStat.st_dev != publishedStat.st_dev || sourceStat.st_ino != publishedStat.st_ino) {
-            errno = EEXIST;
-            JBLogError("published file conflicts with source %s %s", file, newfile);
-            goto failed;
+            if (!allow_shadow) {
+                errno = EEXIST;
+                JBLogError("published file conflicts with source %s %s", file, newfile);
+                goto failed;
+            }
+            /* Shadow mode: the published name already exists on disk (e.g. the
+                 * stock /usr/lib/dyld). Proceed with the publication below; the
+                 * injected entry is inserted at the head of the hash bucket and
+                 * therefore takes precedence over the stock entry. */
+            close(newfilefd);
+            newfilefd = -1;
         }
-        goto final;
+        else {
+            goto final;
+        }
     }
-    if (errno != ENOENT) {
+    else if (errno != ENOENT) {
         JBLogError("open published file failed %d,%s", errno, strerror(errno));
         goto failed;
     }
@@ -283,4 +316,14 @@ final:
         close(newfilefd);
 
     return ret;
+}
+
+/* Relaxin's original entry point - behavior identical to upstream. */
+int unsandbox2(const char *dir, const char *file) {
+    return unsandbox2_impl(dir, file, false);
+}
+
+/* RootHide port: shadow-publication variant (see the note above). */
+int unsandbox2_shadow(const char *dir, const char *file) {
+    return unsandbox2_impl(dir, file, true);
 }
