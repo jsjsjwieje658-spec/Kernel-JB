@@ -335,7 +335,15 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
           (csflags & CS_INSTALLER) ? 1 : 0,
           (csflags & CS_DEBUGGED) ? 1 : 0,
           (csflags & CS_GET_TASK_ALLOW) ? 1 : 0);
-    
+
+    // NOTE (audit): upstream Dopamine2-roothide calls otherJailbreakActived(true)
+    // here to block jailbreaking on top of another jailbreak. NOT ported: in this
+    // fork the jailbreak app itself always has the published
+    // /usr/lib/systemhook-<jbrand>.dylib in its dyld image list while the
+    // jailbreak is active, so that check would flag OUR OWN jailbreak and block
+    // the re-jailbreak / recovery flows that currently work. Preserving the
+    // existing (stable) behaviour takes priority.
+
     return nil;
 }
 

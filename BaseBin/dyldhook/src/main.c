@@ -232,7 +232,15 @@ void dyldhook_init(uintptr_t kernelParams)
                 }
                 return;         
         }
-        if (!strstr(insertLibrariesVar, "/systemhook.dylib")) {
+        // RootHide port (Dopamine2-roothide dyldhook/main.c parity): the
+        // systemhook is published under a randomized per-install name
+        // (/usr/lib/systemhook-<jbrand>.dylib). The old check looked for the
+        // literal "/systemhook.dylib", which NEVER matched the published name,
+        // so the dyld-level check-in never ran (every process had to fall back
+        // to the systemhook-constructor check-in, and jbinfo_is_checked_in()
+        // stayed false). Match both the published randomized name and the
+        // in-basebin name used during bootstrap, exactly like upstream.
+        if (!strstr(insertLibrariesVar, "/usr/lib/systemhook-") && !strstr(insertLibrariesVar, "/basebin/systemhook.dylib")) {
                 if (gDyldHookLog) {
                         _simple_dprintf(2, "Not checking in, no systemhook found in DYLD_INSERT_LIBRARIES (%s)\n", insertLibrariesVar);
                 }

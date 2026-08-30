@@ -519,6 +519,22 @@ __attribute__((constructor)) static void initializer(void)
                 }
         }
 
+/*************************** roothide *************************/
+        // RootHide port (Dopamine2-roothide main.c:378 parity): after the
+        // library-trust hook is in place, run the per-process roothide checkin
+        // init. This was previously dead code in this fork (the function
+        // existed but was never called), which meant:
+        //   - redirect_paths() never ran: jailbroken binaries kept the stock
+        //     CFFIXED_USER_HOME instead of the jbroot-relative home
+        //   - /usr/lib/roothideinit.dylib (shipped by the RootHide bootstrap)
+        //     was never loaded into jailbreak processes
+        //   - in dyld-patch fallback mode, the dlopen*/dlsym dyld routine
+        //     hooks (init_dyldhooks) were never installed
+        // JB_RootPath is guaranteed non-NULL here: the constructor returns
+        // early above when neither dyldhook nor fallback check-in succeeded.
+        roothide_init_with_checkin(JB_RootPath); // will hook dlopen* if necessary
+/*************************************************************/
+
 #ifdef __arm64e__
         // Since pages have been modified in this process, we need to load forkfix to ensure forking will work
         // Optimization: If the process cannot fork at all due to sandbox, we don't need to do anything
@@ -571,6 +587,27 @@ __attribute__((constructor)) static void initializer(void)
                         litehook_hook_function(necp_session_action, necp_session_action_hook);
                 }
 #endif
+
+/******************* roothide (Dopamine2-roothide main.c:427 parity) *******************/
+                // RootHide port: per-executable roothide init. Previously dead
+                // code in this fork. What this restores:
+                //   - sysctl / sysctlbyname hooks for system daemons (NOT for
+                //     removable bundle paths): after hideDeveloperMode() swaps
+                //     the kernel sysctl OIDs, jailbreak daemons still need the
+                //     TRUE security.mac.amfi.developer_mode_status value (the
+                //     hook returns 1) — stock daemons keep seeing the swapped
+                //     (hidden) value, exactly like upstream.
+                //   - loadPathHook() for the jailbreak app itself (see the
+                //     updated condition in roothider_main.c)
+                //   - /usr/lib/roothidepatch.dylib (RootHide bootstrap) loaded
+                //     into every injected process — the core per-process
+                //     path-translation layer (jbroot()/rootfs()/jbrand()). Its
+                //     absence meant jbroot-based paths only worked for binaries
+                //     that linked libroothide at build time.
+                // The dlopens are best-effort (missing dylib => no-op).
+                roothide_init_with_executable(gExecutablePath);
+/**************************************************************************************/
+
                 // Load tweaks if desired
                 // Resolve the loader through the active jbroot so relocated roots remain supported.
                 

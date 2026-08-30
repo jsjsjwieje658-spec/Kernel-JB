@@ -526,7 +526,15 @@ void roothide_init_with_executable(const char *executable) {
         }
     }
 
-    if (isRemovableBundlePath(executable) && is_relaxin_executable_path(executable)) {
+    // RootHide port: official Dopamine2-roothide checks
+    // string_has_suffix(executable, "/Dopamine.app/Dopamine") here (the
+    // jailbreak app needs the home-dir path hook to find its jbroot-relative
+    // data). The Relaxin port narrowed this to is_relaxin_executable_path()
+    // (Relaxin.app / RelaxinLite.app / App.app), which never matches this
+    // fork's own Dopamine.app bundle — so the jailbreak app itself lost the
+    // path hook. Accept both.
+    if (isRemovableBundlePath(executable)
+        && (is_relaxin_executable_path(executable) || string_has_suffix(executable, "/Dopamine.app/Dopamine"))) {
         loadPathHook(); //requre jit
     }
 

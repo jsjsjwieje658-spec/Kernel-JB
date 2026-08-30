@@ -40,10 +40,10 @@ extern void systemwide_domain_set_enabled(bool enabled);
 // If we don't do this and it does the initialization, we will cause an assert in _os_log_simple_reinit_4launchd later
 void exec_with_asl_disabled(void (^block)(void))
 {
-	struct asl_context *aslCtx = os_alloc_once(OS_ALLOC_ONCE_KEY_LIBSYSTEM_PLATFORM_ASL, sizeof(struct asl_context), NULL);
-	aslCtx->asl_enabled = false;
-	block();
-	aslCtx->asl_enabled = true;
+        struct asl_context *aslCtx = os_alloc_once(OS_ALLOC_ONCE_KEY_LIBSYSTEM_PLATFORM_ASL, sizeof(struct asl_context), NULL);
+        aslCtx->asl_enabled = false;
+        block();
+        aslCtx->asl_enabled = true;
 }
 
 struct drawctx *gBootLogoDrawCtx = NULL;
@@ -51,154 +51,190 @@ bool gFreeBootLogoBeforeBackboardd = NO;
 
 void draw_boot_logo(const char *bootLogoPath)
 {
-	exec_with_asl_disabled(^{
-		if (!gBootLogoDrawCtx) {
-			gBootLogoDrawCtx = drawctx_init();
-		}
+        exec_with_asl_disabled(^{
+                if (!gBootLogoDrawCtx) {
+                        gBootLogoDrawCtx = drawctx_init();
+                }
 
-		if (bootLogoPath) {
-			if (!access(bootLogoPath, R_OK)) {
-				// When launchd tears down the userspace, it will do so in no particular order
-				// If SpringBoard gets unloaded before backboardd, backboardd will draw a spinning wheel to the framebuffer
-				// If this happens after we wrote the boot logo to the framebuffer, it will be replaced by that
-				// Therefore, we kill backboardd early so that this race does not happen
-				killall("/usr/libexec/backboardd", SIGTERM);
-				drawctx_draw_image_path(gBootLogoDrawCtx, bootLogoPath);
-			}
-		}
-	});
+                if (bootLogoPath) {
+                        if (!access(bootLogoPath, R_OK)) {
+                                // When launchd tears down the userspace, it will do so in no particular order
+                                // If SpringBoard gets unloaded before backboardd, backboardd will draw a spinning wheel to the framebuffer
+                                // If this happens after we wrote the boot logo to the framebuffer, it will be replaced by that
+                                // Therefore, we kill backboardd early so that this race does not happen
+                                killall("/usr/libexec/backboardd", SIGTERM);
+                                drawctx_draw_image_path(gBootLogoDrawCtx, bootLogoPath);
+                        }
+                }
+        });
 }
 
 void free_boot_logo(void)
 {
-	drawctx_free(gBootLogoDrawCtx);
-	gBootLogoDrawCtx = NULL;
+        drawctx_free(gBootLogoDrawCtx);
+        gBootLogoDrawCtx = NULL;
 }
 
 int (*sysctlbyname_orig)(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen) = NULL;
 int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp, size_t newlen)
 {
-	int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
-	if (!strcmp(name, "kern.willuserspacereboot")) {
-		draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
-	}
-	return r;
+/*********************** roothide specific ********************/
+// RootHide port (Dopamine2-roothide parity): on iOS 15 arm64e devices,
+// answering the vm.shared_region_pivot sysctl query truthfully leads to a
+// spinlock panic in the shared cache pivot path. Returning 0 here is the
+// upstream mitigation. On iOS 16+ this branch never executes.
+#ifdef __arm64e__
+        if (!__builtin_available(iOS 16.0, *))
+        {
+                if (strcmp(name, "vm.shared_region_pivot") == 0) {
+                        return 0;
+                }
+        }
+#endif
+/*************************************************************/
+
+        int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
+        if (!strcmp(name, "kern.willuserspacereboot")) {
+                draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
+        }
+        return r;
 }
 
 __attribute__((constructor)) static void initializer(void)
 {
-	crashreporter_start();
+        crashreporter_start();
 
-	// Retrieve jbroot path early based on our dylib path (<JBROOT>/basebin/launchd) so we can use JBROOT_PATH before boomerang_recoverPrimitives
-	@autoreleasepool {
-		Dl_info selfInfo;
-		if (dladdr(&initializer, &selfInfo) != 0) {
-			NSString *selfPath = [NSString stringWithUTF8String:selfInfo.dli_fname];
-			gSystemInfo.jailbreakInfo.rootPath = strdup(selfPath.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent.fileSystemRepresentation);
-		}
-	}
+        // Retrieve jbroot path early based on our dylib path (<JBROOT>/basebin/launchd) so we can use JBROOT_PATH before boomerang_recoverPrimitives
+        @autoreleasepool {
+                Dl_info selfInfo;
+                if (dladdr(&initializer, &selfInfo) != 0) {
+                        NSString *selfPath = [NSString stringWithUTF8String:selfInfo.dli_fname];
+                        gSystemInfo.jailbreakInfo.rootPath = strdup(selfPath.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent.fileSystemRepresentation);
+                }
+        }
 
-	// RootHide port Build 3: resolve the published systemhook injection path
-	// (see roothider.m). Pure file I/O - safe before primitives recovery.
-	// NULL result (not published yet / interrupted bootstrap) simply disables
-	// injection for this launchd instance; spawns then run clean, never crash.
-	{
-		extern void roothide_launchd_resolve_hook_path(void);
-		roothide_launchd_resolve_hook_path();
-	}
+        // RootHide port Build 3: resolve the published systemhook injection path
+        // (see roothider.m). Pure file I/O - safe before primitives recovery.
+        // NULL result (not published yet / interrupted bootstrap) simply disables
+        // injection for this launchd instance; spawns then run clean, never crash.
+        {
+                extern void roothide_launchd_resolve_hook_path(void);
+                roothide_launchd_resolve_hook_path();
+        }
 
-	// If we performed a jbupdate before the userspace reboot, these vars will be set
-	// In that case, we want to run finalizers
-	const char *jbupdatePrevVersion = getenv("JBUPDATE_PREV_VERSION");
-	const char *jbupdateNewVersion = getenv("JBUPDATE_NEW_VERSION");
-	if (jbupdatePrevVersion && jbupdateNewVersion) {
-		jbupdate_finalize_stage1(jbupdatePrevVersion, jbupdateNewVersion);
-	}
+        // If we performed a jbupdate before the userspace reboot, these vars will be set
+        // In that case, we want to run finalizers
+        const char *jbupdatePrevVersion = getenv("JBUPDATE_PREV_VERSION");
+        const char *jbupdateNewVersion = getenv("JBUPDATE_NEW_VERSION");
+        if (jbupdatePrevVersion && jbupdateNewVersion) {
+                jbupdate_finalize_stage1(jbupdatePrevVersion, jbupdateNewVersion);
+        }
 
-	bool firstLoad = false;
-	if (getenv("DOPAMINE_INITIALIZED") != 0) {
-		// If Dopamine was initialized before, we assume we're coming from a userspace reboot
+        bool firstLoad = false;
+        if (getenv("DOPAMINE_INITIALIZED") != 0) {
+                // If Dopamine was initialized before, we assume we're coming from a userspace reboot
 
-		// Stock bug: These prefs wipe themselves after a reboot (they contain a boot time and this is matched when they're loaded)
-		// But on userspace reboots, they apparently do not get wiped as the boot time doesn't change
-		// We could try to change the boot time ourselves, but I'm worried of potential side effects
-		// So we just wipe the offending preferences ourselves
-		// In practice this fixes nano launch daemons not being loaded after the userspace reboot, resulting in certain apple watch features breaking
-		if (!access("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRRootCommander.volatile.plist", W_OK)) {
-			remove("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRRootCommander.volatile.plist");
-		}
-		if (!access("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRLaunchNotificationController.volatile.plist", W_OK)) {
-			remove("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRLaunchNotificationController.volatile.plist");
-		}
+                // Stock bug: These prefs wipe themselves after a reboot (they contain a boot time and this is matched when they're loaded)
+                // But on userspace reboots, they apparently do not get wiped as the boot time doesn't change
+                // We could try to change the boot time ourselves, but I'm worried of potential side effects
+                // So we just wipe the offending preferences ourselves
+                // In practice this fixes nano launch daemons not being loaded after the userspace reboot, resulting in certain apple watch features breaking
+                if (!access("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRRootCommander.volatile.plist", W_OK)) {
+                        remove("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRRootCommander.volatile.plist");
+                }
+                if (!access("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRLaunchNotificationController.volatile.plist", W_OK)) {
+                        remove("/var/mobile/Library/Preferences/com.apple.NanoRegistry.NRLaunchNotificationController.volatile.plist");
+                }
 
-		draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
-		gFreeBootLogoBeforeBackboardd = YES;
-	}
-	else {
-		// Here we should have been injected into a live launchd on the fly
-		// In this case, we are not in early boot...
-		gInEarlyBoot = false;
-		firstLoad = true;
-	}
+                draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
+                gFreeBootLogoBeforeBackboardd = YES;
+        }
+        else {
+                // Here we should have been injected into a live launchd on the fly
+                // In this case, we are not in early boot...
+                gInEarlyBoot = false;
+                firstLoad = true;
+        }
 
-	int err = boomerang_recoverPrimitives(firstLoad, true);
-	if (err != 0) {
-		char msg[1000];
-		snprintf(msg, 1000, "Dopamine: Failed to recover primitives (error %d), cannot continue.", err);
-		abort_with_reason(7, 1, msg, 0);
-		return;
-	}
+        int err = boomerang_recoverPrimitives(firstLoad, true);
+        if (err != 0) {
+                char msg[1000];
+                snprintf(msg, 1000, "Dopamine: Failed to recover primitives (error %d), cannot continue.", err);
+                abort_with_reason(7, 1, msg, 0);
+                return;
+        }
 
-	if (jbupdatePrevVersion && jbupdateNewVersion) {
-		jbupdate_finalize_stage2(jbupdatePrevVersion, jbupdateNewVersion);
-		unsetenv("JBUPDATE_PREV_VERSION");
-		unsetenv("JBUPDATE_NEW_VERSION");
-	}
+        if (jbupdatePrevVersion && jbupdateNewVersion) {
+                jbupdate_finalize_stage2(jbupdatePrevVersion, jbupdateNewVersion);
+                unsetenv("JBUPDATE_PREV_VERSION");
+                unsetenv("JBUPDATE_NEW_VERSION");
+        }
 
-	cs_allow_invalid(proc_self(), false);
+        cs_allow_invalid(proc_self(), false);
 
-	if (__builtin_available(iOS 19.0, *)) {
-		// On iOS 26+, hooks have to be applied through hookd
-		hookd_provider_init();
-		litehook_hook_memory = litehook_hook_memory_hookd;
-		litehook_hook_function(mach_vm_protect, mach_vm_protect_fixed);
-		init_hookd_external_support();
-	}
+        if (__builtin_available(iOS 19.0, *)) {
+                // On iOS 26+, hooks have to be applied through hookd
+                hookd_provider_init();
+                litehook_hook_memory = litehook_hook_memory_hookd;
+                litehook_hook_function(mach_vm_protect, mach_vm_protect_fixed);
+                init_hookd_external_support();
+        }
 
-	initXPCHooks();
-	initDaemonHooks();
-	initSpawnHooks();
-	initIPCHooks();
-	initJetsamHook();
+        initXPCHooks();
+        initDaemonHooks();
+        initSpawnHooks();
+        initIPCHooks();
+        initJetsamHook();
 
-	sysctlbyname_orig = sysctlbyname;
-	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)sysctlbyname, (void *)sysctlbyname_hook, NULL);
+        sysctlbyname_orig = sysctlbyname;
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, (void *)sysctlbyname, (void *)sysctlbyname_hook, NULL);
 
-	if (getenv("DOPAMINE_IS_HIDDEN") != 0) {
-		// If the jailbreak is currently hidden, fakelib had to be mounted again before the userspace reboot
-		// Now that the userspace reboot is over, we can unmount it again
+        if (getenv("DOPAMINE_IS_HIDDEN") != 0) {
+                // If the jailbreak is currently hidden, fakelib had to be mounted again before the userspace reboot
+                // Now that the userspace reboot is over, we can unmount it again
 
-		// Just like when we mount it inside the posix_spawn hook, the jbserver is not up at this point in time
-		// So we need to host our own here again, just so that jbctl can talk to it
-		mach_port_t serverPort = jbserver_local_start();
-		jbctl_earlyboot(serverPort, "internal", "fakelib", "unmount", NULL);
-		jbserver_local_stop();
+                // Just like when we mount it inside the posix_spawn hook, the jbserver is not up at this point in time
+                // So we need to host our own here again, just so that jbctl can talk to it
+                mach_port_t serverPort = jbserver_local_start();
+                jbctl_earlyboot(serverPort, "internal", "fakelib", "unmount", NULL);
+                jbserver_local_stop();
 
-		// Also disable the systemwide domain again
-		systemwide_domain_set_enabled(false);
+                // Also disable the systemwide domain again
+                systemwide_domain_set_enabled(false);
 
-		// No need to keep this around
-		unsetenv("DOPAMINE_IS_HIDDEN");
-	}
+                // No need to keep this around
+                unsetenv("DOPAMINE_IS_HIDDEN");
+        }
 
-	// This will ensure launchdhook is always reinjected after userspace reboots
-	// As this launchd will pass environ to the next launchd...
-	setenv("DYLD_INSERT_LIBRARIES", JBROOT_PATH("/basebin/launchdhook.dylib"), 1);
+        // This will ensure launchdhook is always reinjected after userspace reboots
+        // As this launchd will pass environ to the next launchd...
+        setenv("DYLD_INSERT_LIBRARIES", JBROOT_PATH("/basebin/launchdhook.dylib"), 1);
 
-	// Mark Dopamine as having been initialized before
-	setenv("DOPAMINE_INITIALIZED", "1", 1);
+        // Mark Dopamine as having been initialized before
+        setenv("DOPAMINE_INITIALIZED", "1", 1);
 
-	// Set an identifier that uniquely identifies this userspace boot
-	// Part of rootless v2 spec
-	setenv("LAUNCHD_UUID", [NSUUID UUID].UUIDString.UTF8String, 1);
+        // Set an identifier that uniquely identifies this userspace boot
+        // Part of rootless v2 spec
+        setenv("LAUNCHD_UUID", [NSUUID UUID].UUIDString.UTF8String, 1);
+
+/********** roothide specific (Relaxin main.m:222 parity) **********/
+        // RootHide port: late roothide initialization. Runs at the very end of
+        // the constructor (same position as Relaxin's roothide_launchd_postinit):
+        //   - loadAppStoredIdentifiers()  — required before any XPC filtering
+        //     (is_safe_bundle_identifier asserts on a nil list; roothide_handle_xpc_msg
+        //     is now invoked from jbserver.c for every XPC message launchd receives)
+        //   - hideDeveloperMode()  — kernel sysctl OID swap so
+        //     security.mac.amfi.developer_mode_status stops reporting 1 to
+        //     every banking app (the #1 jailbreak detection vector left in the fork)
+        //   - XPC reply hooks — strip jailbreak service endpoints from replies
+        //     sent to blacklisted processes
+        // See roothider.m::roothide_launchd_late_init for why initJailbreakd is
+        // NOT called here (it would abort launchd — this fork has no jailbreakd binary).
+        // RootHide port: late roothide init (see roothider.m) — populated app
+        // identifier cache, hides Developer Mode via kernel sysctl OID swap and
+        // installs the XPC reply hooks that hide jailbreak services from
+        // blacklisted processes. Declared here; defined in roothider.m.
+        extern void roothide_launchd_late_init(bool firstLoad);
+        roothide_launchd_late_init(firstLoad);
+/*******************************************************************/
 }

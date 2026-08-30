@@ -16,6 +16,16 @@
 // FIX LỖI 1: query blacklist động
 #include <libjailbreak/jbclient_xpc.h>
 
+// RootHide port: blacklist process registry (implemented in
+// libjailbreak/src/roothider/blacklist.cpp, linked via libjailbreak.dylib).
+// Used to register clean-spawned blacklisted apps so pid/token-based
+// blacklist checks (isBlacklistedPid / isBlacklistedToken, used by the
+// launchd XPC filter and the lsd/SpringBoard hooks) match them.
+// Declared here directly to avoid pulling the full roothider/common.h
+// (which drags in declarations this TU does not provide).
+extern pid_t *allocBlacklistProcessId(void);
+extern void commitBlacklistProcessId(pid_t *pidp);
+
 extern char **environ;
 
 void abort_with_reason(uint32_t reason_namespace, uint64_t reason_code, const char *reason_string, uint64_t reason_flags);
@@ -298,7 +308,32 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
                 // Children spawned by the clean app are naturally clean as well
                 // (the app itself has no systemhook, so nothing hooks its
                 // posix_spawn calls).
-                return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+                //
+                // RootHide port (official roothider.m:409-425 parity): register the
+                // clean-spawned child in the blacklist process registry
+                // (blacklist.cpp) so that pid-based lookups work for it:
+                //   - isBlacklistedPid()/isBlacklistedToken() → used by
+                //     roothide_handle_xpc_msg() to filter launchd XPC queries
+                //     (service lookups, process info) coming from this app
+                //   - jbclient_blacklist_check_pid() → used by the lsd.m /
+                //     springboard.m hooks to hide jailbreak URL schemes and
+                //     bundle info from this app
+                // Without registration the registry stayed empty and every one
+                // of those pid checks silently returned "not blacklisted".
+                // allocBlacklistProcessId() gives us a pid slot the kernel fills
+                // in even when the caller passed pidp=NULL; commit moves it into
+                // the pid+pidversion-keyed cache. This runs entirely inside
+                // launchd (no XPC, no jailbreakd) — it cannot hang or fail boot.
+                {
+                        volatile pid_t *blacklistedPidp = allocBlacklistProcessId();
+                        int ret = __posix_spawn_orig_wrapper((pid_t *)blacklistedPidp, path, desc, argv, envp);
+                        pid_t blacklistedPid = *blacklistedPidp;
+                        if (pidp)
+                                *pidp = blacklistedPid;
+                        commitBlacklistProcessId((pid_t *)blacklistedPidp);
+                        blacklistedPidp = NULL;
+                        return ret;
+                }
         }
 
         return posix_spawn_hook_shared(pid, path, desc, argv, envp,

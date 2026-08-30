@@ -200,6 +200,71 @@ void roothide_launchd_postinit(bool firstLoad) {
     JBLogDebug("launchd postinit status=complete first-load=%u policy=stock-dyld", firstLoad);
 }
 
+// RootHide port: late roothide initialization for launchd.
+//
+// WHY THIS EXISTS: the upstream Relaxin flow calls roothide_launchd_postinit()
+// at the end of the launchdhook constructor. Kernel-JB cannot call postinit
+// as-is because it ends with `assert(initJailbreakd(firstLoad) == 0)` and this
+// fork does not build a standalone jailbreakd binary (the jbserver lives
+// inside launchd via xpc_hook.c) — the assert would abort launchd and
+// bootloop the device. This function therefore runs only the parts of
+// postinit that matter for hiding, in dependency order:
+//
+//   1. loadAppStoredIdentifiers()  — MUST run before anything touches
+//      is_safe_bundle_identifier(), which asserts StoredAppIdentifiers != nil.
+//      It is required by:
+//        - roothide_handle_xpc_msg() (now called from jbserver.c for every
+//          XPC message launchd receives)
+//        - new_xpc_dictionary_create_reply / new_xpc_pipe_routine_reply below
+//      Plain file I/O over /private/var/containers/Bundle/Application — the
+//      same scan the official Dopamine2-roothide performs on every boot.
+//
+//   2. hideDeveloperMode()  — kernel sysctl OID swap so that
+//      "security.mac.amfi.developer_mode_status" reports the (harmless)
+//      launch_env_logging value for EVERY process on the system. This is the
+//      single most common jailbreak check in banking apps: without it the
+//      sysctl returns 1 (developer mode had to be enabled to jailbreak) even
+//      for completely clean-spawned blacklisted apps. First-load only: the
+//      swap lives in kernel memory and survives userspace reboots.
+//      Guarded on both kernel symbols resolving — if XPF could not find them
+//      (unknown iOS version) we skip instead of kreading from address 0.
+//
+//   3. XPC reply hooks — strip the connection endpoint ("cid") from
+//      domain-creation replies (subsystem 3 / routine 829) sent to
+//      blacklisted processes, so they cannot talk to jailbreak XPC services.
+//      Implemented in libjailbreak/src/roothider/xpc_hook.m; hooking with
+//      MSHookFunction exactly like upstream postinit does.
+//
+// Deliberately NOT done here (kept from the existing stable structure):
+//   - initJailbreakd / exec_set_patch / systemhook publication — the fork's
+//     equivalent flows already run elsewhere (publication happens app-side
+//     via publishFakeLibNoMount, resolution via roothide_launchd_resolve_hook_path).
+void roothide_launchd_late_init(bool firstLoad) {
+    // 1) Populate StoredAppIdentifiers before any XPC filtering can run
+    loadAppStoredIdentifiers();
+
+    // 2) Hide Developer Mode (first load only; kernel state persists)
+    if (firstLoad) {
+        if (__builtin_available(iOS 16.0, *)) {
+            if (ksymbol(developer_mode_status) != 0 && ksymbol(launch_env_logging) != 0) {
+                hideDeveloperMode();
+                JBLogDebug("roothide: developer mode hidden (sysctl OID swap)");
+            }
+            else {
+                JBLogError("roothide: developer mode symbols unavailable, skipping hide");
+            }
+        }
+    }
+
+    // 3) Install XPC reply hooks (hide jailbreak XPC services from blacklisted apps)
+    MSHookFunction(&xpc_dictionary_create_reply,
+                   (void *)new_xpc_dictionary_create_reply,
+                   &orig_xpc_dictionary_create_reply);
+    MSHookFunction(&xpc_pipe_routine_reply, (void *)new_xpc_pipe_routine_reply, &orig_xpc_pipe_routine_reply);
+
+    JBLogDebug("roothide late init status=complete first-load=%u", firstLoad);
+}
+
 #include <dlfcn.h>
 #include <IOKit/IOKitLib.h>
 void fix__iosConnect() {
