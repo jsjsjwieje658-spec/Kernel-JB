@@ -15,6 +15,8 @@
 #include <libjailbreak/libjailbreak.h>
 // FIX LỖI 1: query blacklist động
 #include <libjailbreak/jbclient_xpc.h>
+// Env buffer manipulation (strip jailbreak env vars from blacklisted apps)
+#include "../systemhook/src/envbuf.h"
 
 // RootHide port: blacklist process registry (implemented in
 // libjailbreak/src/roothider/blacklist.cpp, linked via libjailbreak.dylib).
@@ -293,21 +295,22 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
                 fprintf(f, "RootHide: Spawning clean (no injection): %s\n", path);
                 fclose(f);
 #endif
-                // Spawn completely clean, mirroring the official Dopamine2-roothide
-                // behaviour (roothider.m prehook calls __posix_spawn_orig_wrapper for
-                // blacklisted apps). The old implementation only set a "clean mode"
-                // env var and STILL injected systemhook.dylib into the child —
-                // detectable by any app enumerating its dyld image list — and it
-                // polluted launchd's environ with ROOTHIDE_CLEAN_MODE_ENV forever
-                // after the first blacklisted launch, disabling tweaks system-wide.
+                // Spawn completely clean: strip ALL jailbreak env vars so the
+                // banking app sees a fully stock environment.  Without this,
+                // launchd's persistently set env vars (DYLD_INSERT_LIBRARIES,
+                // DOPAMINE_INITIALIZED, LAUNCHD_UUID) leak into the child,
+                // enabling detection via getenv() and _dyld_image_count().
                 //
-                // Going through the original wrapper here means:
-                //   - no DYLD_INSERT_LIBRARIES injection
-                //   - no trustcache upload / CS_DEBUGGED marking for the child
-                //   - the caller's envp is passed through untouched
-                // Children spawned by the clean app are naturally clean as well
-                // (the app itself has no systemhook, so nothing hooks its
-                // posix_spawn calls).
+                // Parity with Dopamine2-roothide (roothider.m:395-399) which
+                // creates envc = envbuf_mutcopy(envp) and strips _SafeMode /
+                // _MSSafeMode.  We extend that to also strip the variables
+                // Kernel-JB sets at launchd init (main.m:211-218).
+                //
+                // CRITICAL: stripping DYLD_INSERT_LIBRARIES means dyld will
+                // NOT inject systemhook into the child — the app runs truly
+                // clean with no jailbreak dylibs loaded.  Children spawned
+                // by the clean app are also clean (no systemhook hooks to
+                // intercept their posix_spawn).
                 //
                 // RootHide port (official roothider.m:409-425 parity): register the
                 // clean-spawned child in the blacklist process registry
@@ -318,23 +321,32 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
                 //   - jbclient_blacklist_check_pid() → used by the lsd.m /
                 //     springboard.m hooks to hide jailbreak URL schemes and
                 //     bundle info from this app
-                // Without registration the registry stayed empty and every one
-                // of those pid checks silently returned "not blacklisted".
                 // allocBlacklistProcessId() gives us a pid slot the kernel fills
                 // in even when the caller passed pidp=NULL; commit moves it into
                 // the pid+pidversion-keyed cache. This runs entirely inside
                 // launchd (no XPC, no jailbreakd) — it cannot hang or fail boot.
                 {
+                        // Create a clean copy of envp with all jailbreak vars stripped
+                        char **envc = envbuf_mutcopy((const char **)envp);
+                        envbuf_unsetenv(&envc, "DYLD_INSERT_LIBRARIES");
+                        envbuf_unsetenv(&envc, "DOPAMINE_INITIALIZED");
+                        envbuf_unsetenv(&envc, "LAUNCHD_UUID");
+                        envbuf_unsetenv(&envc, "DOPAMINE_IS_HIDDEN");
+                        envbuf_unsetenv(&envc, "_SafeMode");
+                        envbuf_unsetenv(&envc, "_MSSafeMode");
+                        envbuf_unsetenv(&envc, "STAGED_JAILBREAK_UPDATE");
+                        envbuf_unsetenv(&envc, "BOOMERANG_PID");
+                        envbuf_unsetenv(&envc, "WATCHDOG_PANIC_MESSAGE");
+
                         volatile pid_t *blacklistedPidp = allocBlacklistProcessId();
-                        int ret = __posix_spawn_orig_wrapper((pid_t *)blacklistedPidp, path, desc, argv, envp);
+                        int ret = __posix_spawn_orig_wrapper((pid_t *)blacklistedPidp, path, desc, argv, envc);
                         pid_t blacklistedPid = *blacklistedPidp;
-                        // The hook's parameter is named `pid` in this fork
-                        // (upstream calls it pidp) — write the spawned pid back
-                        // so callers that passed a non-NULL pointer see it.
                         if (pid)
                                 *pid = blacklistedPid;
                         commitBlacklistProcessId((pid_t *)blacklistedPidp);
                         blacklistedPidp = NULL;
+
+                        envbuf_free(envc);
                         return ret;
                 }
         }
