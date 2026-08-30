@@ -21,8 +21,8 @@
 #include <libjailbreak/log.h>
 #include <libjailbreak/roothider.h>
 
-#include "../roothider/exec_patch.h"
-#include "../roothider/jailbreakd.h"
+#include "../../libjailbreak/src/roothider/exec_patch.h"
+#include "../../libjailbreak/src/roothider/jailbreakd.h"
 
 void jailbreakd_reply_message(xpc_object_t reply) {
     int err = xpc_pipe_routine_reply(reply);
