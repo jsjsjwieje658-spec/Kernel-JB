@@ -995,7 +995,7 @@ static NSString *roothideJbrandString(void)
         return;
     }
     
-    [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Applying Bind Mount") debug:NO];
+    [[DOUIManager sharedInstance] sendLog:@"Publishing FakeLib (namecache)" debug:NO];
     *errOut = [self createFakeLib];
     if (*errOut) {
         [self cleanUpPostExploitation];
