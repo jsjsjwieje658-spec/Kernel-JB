@@ -71,7 +71,8 @@ int __execve_orig(const char *path, char *const argv[], char *const envp[]) {
 
 // ── User-config ProcessBlacklist reader (ported from Dopamine2-roothide) ──────
 //
-// Reads <jbroot>/basebin/config.plist which is written by the jailbreak app
+// Reads <jbroot>/var/mobile/Library/RootHide/RootHideConfig.plist which is
+// written by RootHideManager.m (the Dopamine Settings page).
 // (DOBootstrapper / Relaxin bootstrap) and contains a "ProcessBlacklist" array
 // of executable paths the user chose to blacklist from tweak injection.
 //
@@ -89,7 +90,7 @@ static xpc_object_t _userconfig_get_value(const char *key) {
     // systemhook.dylib is self-contained (no libroothide link), but the jbroot.h
     // header provides an inline JBROOT_PATH macro that calls get_jbroot().
     char configPathBuf[PATH_MAX] = {0};
-    const char *configPath = JBROOT_PATH("/basebin/config.plist");
+    const char *configPath = JBROOT_PATH("/var/mobile/Library/RootHide/RootHideConfig.plist");
     if (configPath) {
         strlcpy(configPathBuf, configPath, sizeof(configPathBuf));
         configPath = configPathBuf;
@@ -135,7 +136,8 @@ static xpc_object_t _userconfig_get_value(const char *key) {
 // this was a stub that returned inject+trust+patch for ALL non-hardcoded
 // processes, which meant user-blacklisted banking apps STILL received tweak
 // injection and were still patched — detectable by the app. Now reads the
-// "ProcessBlacklist" array from <jbroot>/basebin/config.plist (written by
+// "ProcessBlacklist" array from <jbroot>/var/mobile/Library/RootHide/RootHideConfig.plist
+// (written by RootHideManager.m, read by blacklist.m)
 // the JB app's DOBootstrapper) and returns 0 (no inject/trust/patch) for
 // any path found in that array.
 //
