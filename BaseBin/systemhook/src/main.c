@@ -555,9 +555,15 @@ __attribute__((constructor)) static void initializer(void)
                 // into these exact three daemons (roothidehooks' constructor
                 // self-checks the process name, so loading it elsewhere is a
                 // harmless no-op).
+                // RootHide port (Relaxin parity): Relaxin additionally loads
+                // roothidehooks into /usr/libexec/runningboardd (its
+                // runningboardd.m hooks -[RBProcess _allowedLockedFilePaths]
+                // so jailbreak processes may lock files in the jbroot).
+                // Without this entry the hook file was dead code.
                 if (!strcmp(gExecutablePath, "/usr/sbin/cfprefsd") ||
                         !strcmp(gExecutablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ||
-                        !strcmp(gExecutablePath, "/usr/libexec/lsd")) {
+                        !strcmp(gExecutablePath, "/usr/libexec/lsd") ||
+                        !strcmp(gExecutablePath, "/usr/libexec/runningboardd")) {
                         dlopen(JBROOT_PATH("/basebin/roothidehooks.dylib"), RTLD_NOW);
                 }
                 else if (!strcmp(gExecutablePath, "/usr/libexec/watchdogd")) {

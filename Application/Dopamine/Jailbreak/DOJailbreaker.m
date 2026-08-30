@@ -101,6 +101,13 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
             NULL,
             NULL,
             NULL,
+            // RootHide port: 2 spare slots. With amfi_oids added below, the
+            // worst case is 7 base + 6 optional (devmode, badRecovery,
+            // arm64kcall, perfkrw, namecache, amfi_oids) = 13 entries +
+            // the explicit sets[idx] = NULL terminator = 14; without these
+            // spares the terminator write would land one past the end.
+            NULL,
+            NULL,
         };
 
         uint32_t idx = 0;
@@ -126,6 +133,24 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
         // and fails fast with the exact failing metric if the patterns do
         // not match this kernel.
         sets[idx++] = "namecache";
+
+        // RootHide port (CRITICAL, Dopamine2-roothide parity): request the
+        // AMFI sysctl OID offsets (kernelSymbol.launch_env_logging +
+        // kernelSymbol.developer_mode_status). Without this set,
+        // hideDeveloperMode() (called from roothide_launchd_late_init in
+        // launchdhook after the userspace reboot) cannot find the two OIDs
+        // it needs to swap, security.mac.amfi.developer_mode_status keeps
+        // reporting 1 to every process, and banking apps detect the
+        // jailbreak through the single most common detection vector.
+        // The fork's XPF submodule registers this set as gAMFIOidsSet
+        // (supported iOS 16+, exactly like upstream Dopamine2-roothide).
+        if (xpf_set_is_supported("amfi_oids")) {
+            sets[idx++] = "amfi_oids";
+        }
+        else {
+            NSLog(@"[RootHide] WARNING: XPF does not support amfi_oids — hideDeveloperMode will be unavailable");
+        }
+        sets[idx] = NULL;
 
         _systemInfoXdict = xpf_construct_offset_dictionary((const char **)sets);
         if (_systemInfoXdict) {
@@ -920,7 +945,29 @@ static NSString *roothideJbrandString(void)
     // survive re-jailbreak. At this point the app is unsandboxed with kernel
     // primitives live (same state as the .safe_mode write above).
     [self seedRootHideConfigIfAbsent];
-    
+
+    // RootHide port (Relaxin RLXBaseBinInstaller parity): publish this app's
+    // bundle identifier to <jbroot>/basebin/.AppIdentifier. libjailbreak
+    // reads it in builtinApps() (roothider/blacklist.m — the jailbreak app
+    // can never be blacklisted, otherwise the user could lock themselves out
+    // of the manager) and in SensitiveAppIdentifiers() (roothider/common.m —
+    // springboard.m denies FBSApplicationLibrary queries about this bundle
+    // id from blacklisted apps once they are deny-tagged, closing the "I can
+    // see the jailbreak app through SpringBoard" info leak). Relaxin writes
+    // this file at bootstrap install time; this is the equivalent spot in
+    // the Kernel-JB flow. Unconditional + idempotent (plain string write).
+    {
+        NSString *appIdentifierFile = JBROOT_PATH(@"/basebin/.AppIdentifier");
+        NSString *selfIdentifier = NSBundle.mainBundle.bundleIdentifier;
+        if (selfIdentifier.length > 0) {
+            [selfIdentifier writeToFile:appIdentifierFile
+                              atomically:YES
+                                encoding:NSUTF8StringEncoding
+                                   error:nil];
+            NSLog(@"[RootHide] published .AppIdentifier = %@ (self-protection for the jailbreak app)", selfIdentifier);
+        }
+    }
+
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Loading BaseBin TrustCache") debug:NO];
     *errOut = [self loadBasebinTrustcache];
     if (*errOut) {

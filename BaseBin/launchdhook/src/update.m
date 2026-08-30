@@ -128,6 +128,10 @@ void jbupdate_update_system_info(void)
 				NULL,
 				NULL,
 				NULL,
+				// RootHide port: spare slots so the worst case
+				// (6 optional sets + terminator) always fits.
+				NULL,
+				NULL,
 			};
 
 			uint32_t idx = 0;
@@ -149,6 +153,16 @@ void jbupdate_update_system_info(void)
 			// RootHide port (Relaxin structure): keep the namecache hash globals
 			// in the refreshed system info (kernelSymbol.nchashtbl/nchashmask).
 			sets[idx++] = "namecache";
+
+			// RootHide port (CRITICAL, Dopamine2-roothide parity): keep the AMFI
+			// sysctl OID offsets in the refreshed system info. Without them an
+			// in-place update would silently drop hideDeveloperMode()'s symbols
+			// (ksymbol() back to 0) and developer_mode_status would report 1
+			// again after updating.
+			if (xpf_set_is_supported("amfi_oids")) {
+				sets[idx++] = "amfi_oids";
+			}
+			sets[idx] = NULL;
 
 			newSystemInfoXdict = xpf_construct_offset_dictionary((const char **)sets);
 			if (!newSystemInfoXdict) {

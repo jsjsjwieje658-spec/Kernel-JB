@@ -484,7 +484,20 @@ extern struct system_info gSystemInfo;
         /* unsandbox() namecache publication (replaces /usr/lib bindfs  */ \
         /* mount). Filled from the XPF "namecache" items.               */ \
         iterator(ctx, kernelSymbol.nchashtbl); \
-        iterator(ctx, kernelSymbol.nchashmask);
+        iterator(ctx, kernelSymbol.nchashmask); \
+        /* RootHide port (CRITICAL, Dopamine2-roothide parity): AMFI     */ \
+        /* sysctl OIDs for hideDeveloperMode() (roothider/common.m).     */ \
+        /* The struct fields existed since the Relaxin port, but the     */ \
+        /* serializer/deserializer never visited them, so               */ \
+        /* SYSTEM_INFO_DESERIALIZE silently dropped the offsets even     */ \
+        /* when XPF resolved them -> ksymbol(developer_mode_status)      */ \
+        /* returned 0 -> roothide_launchd_late_init skipped              */ \
+        /* hideDeveloperMode() -> security.mac.amfi.developer_mode_status*/ \
+        /* kept reporting 1 -> banking apps detected the jailbreak via   */ \
+        /* the single most common detection vector. Values come from the */ \
+        /* XPF "amfi_oids" set (gAMFIOidsSet, supported iOS 16+).        */ \
+        iterator(ctx, kernelSymbol.launch_env_logging); \
+        iterator(ctx, kernelSymbol.developer_mode_status);
 
 #define KERNEL_GADGETS_ITERATE(ctx, iterator) \
         iterator(ctx, kernelGadget.pacda); \
