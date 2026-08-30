@@ -328,8 +328,11 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
                         volatile pid_t *blacklistedPidp = allocBlacklistProcessId();
                         int ret = __posix_spawn_orig_wrapper((pid_t *)blacklistedPidp, path, desc, argv, envp);
                         pid_t blacklistedPid = *blacklistedPidp;
-                        if (pidp)
-                                *pidp = blacklistedPid;
+                        // The hook's parameter is named `pid` in this fork
+                        // (upstream calls it pidp) — write the spawned pid back
+                        // so callers that passed a non-NULL pointer see it.
+                        if (pid)
+                                *pid = blacklistedPid;
                         commitBlacklistProcessId((pid_t *)blacklistedPidp);
                         blacklistedPidp = NULL;
                         return ret;
