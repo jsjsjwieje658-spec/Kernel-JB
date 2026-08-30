@@ -184,9 +184,9 @@ static NSArray<NSString *> * const kVietnameseBankingApps = @[
 
     // Buttons
     NSArray *buttons = @[
-        @{ @"title": @"Add Vietnamese Bank Apps",
-           @"image": @"banknote",
-           @"action": @"addBankingAppsPressed:" },
+        @{ @"title": @"Select Apps to Hide",
+           @"image": @"apps.iphone",
+           @"action": @"selectAppsPressed:" },
         @{ @"title": @"Add App by Bundle ID",
            @"image": @"plus.circle",
            @"action": @"addAppPressed:" },
@@ -295,6 +295,101 @@ static NSArray<NSString *> * const kVietnameseBankingApps = @[
         }
     }]];
     [self presentViewController:alert animated:YES completion:nil];
+}
+
+// Auto-detect installed apps and show a list for user to select
+- (void)selectAppsPressed:(PSSpecifier *)specifier
+{
+    // Enumerate all installed apps from /var/containers/Bundle/Application/
+    NSMutableArray *installedApps = [NSMutableArray new];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *appsPath = @"/var/containers/Bundle/Application";
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:appsPath];
+    NSString *item;
+    while ((item = [enumerator nextObject])) {
+        if (![item hasSuffix:@".app"]) continue;
+        NSString *appPath = [appsPath stringByAppendingPathComponent:item];
+        NSString *infoPlistPath = [appPath stringByAppendingPathComponent:@"Info.plist"];
+        NSDictionary *infoPlist = [NSDictionary dictionaryWithContentsOfFile:infoPlistPath];
+        if (!infoPlist) continue;
+        
+        NSString *bundleID = infoPlist[@"CFBundleIdentifier"];
+        NSString *displayName = infoPlist[@"CFBundleDisplayName"];
+        if (!bundleID) continue;
+        if (!displayName) displayName = infoPlist[@"CFBundleName"];
+        if (!displayName) displayName = bundleID;
+        
+        [installedApps addObject:@{
+            @"bundleID": bundleID,
+            @"displayName": displayName,
+            @"path": appPath
+        }];
+    }
+    
+    // Sort alphabetically by display name
+    [installedApps sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+        return [a[@"displayName"] localizedCaseInsensitiveCompare:b[@"displayName"]];
+    }];
+    
+    if (installedApps.count == 0) {
+        [self showAlertWithTitle:@"No Apps Found" message:@"Could not find any installed apps."];
+        return;
+    }
+    
+    // Show action sheet with app list
+    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:@"Select Apps to Hide"
+                                                                 message:@"Tap an app to add it to the hidden list."
+                                                          preferredStyle:UIAlertControllerStyleActionSheet];
+    
+    // Add each app as an action
+    for (NSDictionary *app in installedApps) {
+        NSString *bundleID = app[@"bundleID"];
+        NSString *displayName = app[@"displayName"];
+        BOOL alreadyHidden = [self.blacklist containsObject:bundleID];
+        
+        NSString *title = alreadyHidden 
+            ? [NSString stringWithFormat:@"%@ ✓", displayName]
+            : displayName;
+        
+        UIAlertActionStyle style = alreadyHidden ? UIAlertActionStyleDestructive : UIAlertActionStyleDefault;
+        
+        // Capture by reference for the block
+        NSString *bundleIDCopy = bundleID;
+        NSString *displayNameCopy = displayName;
+        
+        [sheet addAction:[UIAlertAction actionWithTitle:title style:style handler:^(UIAlertAction *action) {
+            if (alreadyHidden) {
+                // Unhide the app
+                NSMutableDictionary *appconfig = [NSMutableDictionary dictionaryWithDictionary:[self loadAppConfig]];
+                [appconfig removeObjectForKey:bundleIDCopy];
+                if ([self saveAppConfig:appconfig]) {
+                    [self reloadBlacklist];
+                    [self reloadSpecifiers];
+                    [self showAlertWithTitle:@"App Unhidden" message:[NSString stringWithFormat:@"%@ will have tweaks and injection active again.", displayNameCopy]];
+                }
+            } else {
+                // Hide the app
+                NSMutableDictionary *appconfig = [NSMutableDictionary dictionaryWithDictionary:[self loadAppConfig]];
+                appconfig[bundleIDCopy] = @YES;
+                if ([self saveAppConfig:appconfig]) {
+                    [self reloadBlacklist];
+                    [self reloadSpecifiers];
+                    [self showAlertWithTitle:@"App Hidden" message:[NSString stringWithFormat:@"%@ will start completely clean. Kill it from the app switcher first.", displayNameCopy]];
+                }
+            }
+        }]];
+    }
+    
+    [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    
+    // iPad support
+    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+        sheet.popoverPresentationController.sourceView = self.view;
+        sheet.popoverPresentationController.sourceRect = CGRectMake(self.view.bounds.size.width / 2, self.view.bounds.size.height / 2, 0, 0);
+        sheet.popoverPresentationController.permittedArrowDirections = 0;
+    }
+    
+    [self presentViewController:sheet animated:YES completion:nil];
 }
 
 - (void)removeAllPressed:(PSSpecifier *)specifier
