@@ -39,8 +39,9 @@
 // resolve the config.plist path at runtime.
 #include <libjailbreak/jbroot.h>
 
-// kSpawnConfig values (must match common/common.h's enum).
+// kSpawnConfig type and values (must match common/common.h's enum).
 // Defined here as macros so the shim compiles independently of common.h.
+// The type is typedef'd to int since the enum is just integer flags.
 #ifndef kSpawnConfigInject
 #define kSpawnConfigInject        (1 << 0)
 #endif
@@ -50,6 +51,7 @@
 #ifndef kSpawnConfigPatchProcess
 #define kSpawnConfigPatchProcess  (1 << 2)
 #endif
+typedef int kSpawnConfig;
 
 // Shim: __posix_spawn_orig — invoke the underlying posix_spawn syscall directly.
 // This is what Relaxin's common.c:84-90 does.
@@ -143,7 +145,7 @@ static xpc_object_t _userconfig_get_value(const char *key) {
 // FAIL-SAFE: If config.plist is missing or unparseable, falls through to
 // the default (inject + trust + patch) — same behavior as before. This
 // can never cause a hang or boot failure.
-int spawn_config_for_executable(const char *path, char *const argv[restrict]) {
+kSpawnConfig spawn_config_for_executable(const char *path, char *const argv[restrict]) {
     (void)argv;
     if (!path) return 0;
 
