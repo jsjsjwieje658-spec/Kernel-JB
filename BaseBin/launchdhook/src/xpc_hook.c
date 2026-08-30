@@ -1,4 +1,5 @@
 #include <libjailbreak/libjailbreak.h>
+#include <libjailbreak/roothider.h>
 #include <mach-o/dyld.h>
 #include <xpc/xpc.h>
 #include <bsm/libbsm.h>
@@ -16,53 +17,72 @@ int xpc_receive_mach_msg(void *msg, void *a2, void *a3, void *a4, xpc_object_t *
 int (*xpc_receive_mach_msg_orig)(void *msg, void *a2, void *a3, void *a4, xpc_object_t *xOut);
 int xpc_receive_mach_msg_hook(void *msg, void *a2, void *a3, void *a4, xpc_object_t *xOut)
 {
-	size_t msgBufSize = 0;
+        size_t msgBufSize = 0;
     struct jbserver_mach_msg *jbsMachMsg = (struct jbserver_mach_msg *)dispatch_mach_msg_get_msg(msg, &msgBufSize);
-	bool wasProcessed = false;
+        bool wasProcessed = false;
     if (jbsMachMsg != NULL && msgBufSize >= sizeof(mach_msg_header_t)) {
         size_t msgSize = jbsMachMsg->hdr.msgh_size;
         if (msgSize <= msgBufSize && msgSize >= sizeof(struct jbserver_mach_msg) && jbsMachMsg->magic == JBSERVER_MACH_MAGIC) {
-			mach_msg_context_trailer_t *trailer = (mach_msg_context_trailer_t *)((uint8_t *)jbsMachMsg + round_msg(jbsMachMsg->hdr.msgh_size));
+                        mach_msg_context_trailer_t *trailer = (mach_msg_context_trailer_t *)((uint8_t *)jbsMachMsg + round_msg(jbsMachMsg->hdr.msgh_size));
             jbserver_received_mach_message(&trailer->msgh_audit, jbsMachMsg);
-			wasProcessed = true;
+                        wasProcessed = true;
             // Pass the message to xpc_receive_mach_msg anyway, it will get rid of it for us
         }
     }
-	// Not needed, since we don't have any complex messages at the moment
-	/*struct jbserver_mach_complex_msg *jbsComplexMachMsg = (struct jbserver_mach_complex_msg *)jbsMachMsg;
-	if (!wasProcessed && jbsComplexMachMsg != NULL && msgBufSize >= sizeof(struct jbserver_mach_complex_msg)) {
-		// Warning: Witchcraft incoming
-		size_t msgSize = jbsComplexMachMsg->hdr.msgh_size;
-		if (jbsComplexMachMsg->hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX) {
-			uintptr_t magicOff = sizeof(struct jbserver_mach_complex_msg) + (jbsComplexMachMsg->body.msgh_descriptor_count * sizeof(mach_msg_port_descriptor_t));
-			uintptr_t actionOff = magicOff + sizeof(uint64_t);
-			if (msgSize >= (actionOff + sizeof(uint64_t))) {
-				uint64_t magic = *(uint64_t *)(((uintptr_t)jbsComplexMachMsg) + magicOff);
-				if (magic == JBSERVER_MACH_MAGIC) {
-					uint64_t action = *(uint64_t *)(((uintptr_t)jbsComplexMachMsg) + actionOff);
-					mach_msg_context_trailer_t *trailer = (mach_msg_context_trailer_t *)((uint8_t *)jbsComplexMachMsg + round_msg(jbsComplexMachMsg->hdr.msgh_size));
-					jbserver_received_complex_mach_message(&trailer->msgh_audit, action, jbsComplexMachMsg);
-					wasProcessed = true;
-            		// Pass the message to xpc_receive_mach_msg anyway, it will get rid of it for us
-				}
-			}
-		}
-	}*/
+        // Not needed, since we don't have any complex messages at the moment
+        /*struct jbserver_mach_complex_msg *jbsComplexMachMsg = (struct jbserver_mach_complex_msg *)jbsMachMsg;
+        if (!wasProcessed && jbsComplexMachMsg != NULL && msgBufSize >= sizeof(struct jbserver_mach_complex_msg)) {
+                // Warning: Witchcraft incoming
+                size_t msgSize = jbsComplexMachMsg->hdr.msgh_size;
+                if (jbsComplexMachMsg->hdr.msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+                        uintptr_t magicOff = sizeof(struct jbserver_mach_complex_msg) + (jbsComplexMachMsg->body.msgh_descriptor_count * sizeof(mach_msg_port_descriptor_t));
+                        uintptr_t actionOff = magicOff + sizeof(uint64_t);
+                        if (msgSize >= (actionOff + sizeof(uint64_t))) {
+                                uint64_t magic = *(uint64_t *)(((uintptr_t)jbsComplexMachMsg) + magicOff);
+                                if (magic == JBSERVER_MACH_MAGIC) {
+                                        uint64_t action = *(uint64_t *)(((uintptr_t)jbsComplexMachMsg) + actionOff);
+                                        mach_msg_context_trailer_t *trailer = (mach_msg_context_trailer_t *)((uint8_t *)jbsComplexMachMsg + round_msg(jbsComplexMachMsg->hdr.msgh_size));
+                                        jbserver_received_complex_mach_message(&trailer->msgh_audit, action, jbsComplexMachMsg);
+                                        wasProcessed = true;
+                        // Pass the message to xpc_receive_mach_msg anyway, it will get rid of it for us
+                                }
+                        }
+                }
+        }*/
 
-	int r = xpc_receive_mach_msg_orig(msg, a2, a3, a4, xOut);
-	if (!wasProcessed && r == 0 && xOut && *xOut) {
-		if (jbserver_received_xpc_message(&gGlobalServer, *xOut) == 0) {
-			// Returning non null here makes launchd disregard this message
-			// For jailbreak messages we have the logic to handle them
-			xpc_release(*xOut);
-			return 22;
-		}
-	}
-	return r;
+        int r = xpc_receive_mach_msg_orig(msg, a2, a3, a4, xOut);
+        if (!wasProcessed && r == 0 && xOut && *xOut) {
+                // RootHide port (Dopamine2-roothide jbserver.c:11 parity): sanitize
+                // launchd XPC queries coming FROM blacklisted processes BEFORE the
+                // message reaches launchd's own handlers:
+                //   - subsystem 2 / routine 708 (service lookup by name): blank the
+                //     name when a blacklisted app asks for a jailbreak app's service
+                //   - subsystem 6 / routine 301 (process info by pid): replace the
+                //     pid with INT_MAX so jailbreak processes stay invisible
+                // Upstream calls this at the top of jbserver_received_xpc_message();
+                // it is invoked here instead so the filter also covers non-jb
+                // messages, and so that the shared libjailbreak source (also compiled
+                // into the standalone `dopamine` CLI, which must not gain a
+                // dependency on roothider/xpc_hook.m) stays untouched.
+                // Requires loadAppStoredIdentifiers() to have run (it does —
+                // roothide_launchd_late_init runs at the end of the launchdhook
+                // constructor, before launchd services any XPC message); the registry
+                // is empty until the first blacklisted app spawns, so the rare
+                // local-server messages during the constructor are safe too.
+                roothide_handle_xpc_msg(*xOut);
+
+                if (jbserver_received_xpc_message(&gGlobalServer, *xOut) == 0) {
+                        // Returning non null here makes launchd disregard this message
+                        // For jailbreak messages we have the logic to handle them
+                        xpc_release(*xOut);
+                        return 22;
+                }
+        }
+        return r;
 }
 
 void initXPCHooks(void)
 {
-	xpc_receive_mach_msg_orig = xpc_receive_mach_msg;
-	litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, xpc_receive_mach_msg, xpc_receive_mach_msg_hook, NULL);
+        xpc_receive_mach_msg_orig = xpc_receive_mach_msg;
+        litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, xpc_receive_mach_msg, xpc_receive_mach_msg_hook, NULL);
 }
