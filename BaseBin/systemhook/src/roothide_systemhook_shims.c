@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <time.h>
 #include <xpc/xpc.h>
 #include <xpc_private.h>
 
