@@ -45,20 +45,23 @@
 #import <Preferences/PSSpecifier.h>
 #import <libjailbreak/jbroot.h>
 
-// Vietnamese banking / e-wallet apps (preset). Bundle IDs verified against
-// App Store metadata. Users can add more manually.
+// PRESET REMOVED — hardcoded bundle IDs may be incorrect, causing silent
+// blacklist match failures (isBlacklistedApp returns false for wrong bundle ID).
+// Users should add banking apps MANUALLY via "Add App by Bundle ID".
+// To re-enable presets, verify each CFBundleIdentifier against the actual
+// installed app's Info.plist: /var/containers/Bundle/Application/<UUID>/<App>.app/Info.plist
 static NSArray<NSString *> * const kVietnameseBankingApps = @[
-    @"com.vietinbank.iBank",             // VietinBank iBank
-    @"com.vcb.IB",                       // Vietcombank Digibank
-    @"com.techcombank.business",         // Techcombank Mobile
-    @"com.mbmobile",                     // MB Bank
-    @"com.acb.ACBMobileBanking",         // ACB ONE
-    @"com.vib.VIBMobileBanking",         // VIB Digibank (MyVIB)
-    @"com.babk.BABMobileBanking",        // BaoViet Bank
-    @"com.agribank.DigiBank",            // Agribank E-mobile
-    @"vnpay.NapAsVnPay",                 // VNPAY
-    @"com.viettel.wallet.viettelpay",    // Viettel Money
-    @"com.mservice.SmartPay",            // MoMo
+    // @"com.vietinbank.iBank",
+    // @"com.vcb.IB",
+    // @"com.techcombank.business",      // WRONG: .business = enterprise app, not mobile
+    // @"com.mbmobile",
+    // @"com.acb.ACBMobileBanking",
+    // @"com.vib.VIBMobileBanking",
+    // @"com.babk.BABMobileBanking",
+    // @"com.agribank.DigiBank",
+    // @"vnpay.NapAsVnPay",             // WRONG: not reverse-DNS format
+    // @"com.viettel.wallet.viettelpay",
+    // @"com.mservice.SmartPay",         // WRONG: SmartPay != MoMo
 ];
 
 @interface DORootHideManager ()

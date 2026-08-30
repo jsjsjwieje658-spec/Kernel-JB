@@ -520,20 +520,14 @@ void *boomerang_server(struct boomerang_info *info)
         return;
     }
 
+    // PRESET REMOVED — hardcoded bundle IDs were incorrect, causing silent
+    // blacklist match failures. isBlacklistedApp() returns false for wrong IDs
+    // → banking apps NOT spawned clean → JB detected despite blacklist.
+    // Users must add apps MANUALLY via Settings → Hide Apps (RootHide).
+    //
+    // Correct bundle IDs: /var/containers/Bundle/Application/<UUID>/<App>.app/Info.plist
     NSDictionary *preset = @{
-        @"appconfig": @{
-            @"com.vietinbank.iBank":          @YES, // VietinBank iBank
-            @"com.vcb.IB":                    @YES, // Vietcombank Digibank
-            @"com.techcombank.business":      @YES, // Techcombank Mobile
-            @"com.mbmobile":                  @YES, // MB Bank
-            @"com.acb.ACBMobileBanking":      @YES, // ACB ONE
-            @"com.vib.VIBMobileBanking":      @YES, // VIB Digibank
-            @"com.babk.BABMobileBanking":     @YES, // BaoViet Bank
-            @"com.agribank.DigiBank":         @YES, // Agribank E-mobile
-            @"vnpay.NapAsVnPay":              @YES, // VNPAY
-            @"com.viettel.wallet.viettelpay": @YES, // Viettel Money
-            @"com.mservice.SmartPay":         @YES, // MoMo
-        }
+        @"appconfig": @{}
     };
 
     NSError *error = nil;
@@ -546,9 +540,7 @@ void *boomerang_server(struct boomerang_info *info)
         return;
     }
     if ([preset writeToFile:configPath atomically:YES]) {
-        NSDictionary *seededAppConfig = preset[@"appconfig"];
-        NSLog(@"[RootHide] Seeded RootHideConfig.plist with %lu bank app preset",
-              (unsigned long)seededAppConfig.count);
+        NSLog(@"[RootHide] Seeded empty RootHideConfig.plist — preset DISABLED (add apps manually via Settings → Hide Apps)");
     }
     else {
         NSLog(@"[RootHide] Failed to write RootHideConfig.plist preset");
