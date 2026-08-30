@@ -70,7 +70,7 @@ boomerang: .build .include libjailbreak
 
 jbctl: .build .include libjailbreak
 	$(MAKE) -C jbctl
-	@cp jbctl/jbctl .build
+	@cp jbctl/uptime_helper .build
 
 idownloadd: .build .include libjailbreak
 	$(MAKE) -C idownloadd

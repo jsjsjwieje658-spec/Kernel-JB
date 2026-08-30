@@ -1,4 +1,4 @@
-TARGET = jbctl
+TARGET = uptime_helper
 
 CC = clang
 
