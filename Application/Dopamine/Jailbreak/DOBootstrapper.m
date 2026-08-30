@@ -166,29 +166,6 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     return nil;
 }
 
-- (void)fixupPathPermissions
-{
-    // Ensure the following paths are owned by root:wheel and have permissions of 755:
-    // /private
-    // /private/preboot
-    // /private/preboot/UUID
-    // /private/preboot/UUID/dopamine-<UUID>
-    // /private/preboot/UUID/dopamine-<UUID>/procursus
-
-    NSString *tmpPath = JBROOT_PATH(@"/");
-    while (![tmpPath isEqualToString:@"/"]) {
-        struct stat s;
-        stat(tmpPath.fileSystemRepresentation, &s);
-        if (s.st_uid != 0 || s.st_gid != 0) {
-            chown(tmpPath.fileSystemRepresentation, 0, 0);
-        }
-        if ((s.st_mode & S_IRWXU) != 0755) {
-            chmod(tmpPath.fileSystemRepresentation, 0755);
-        }
-        tmpPath = [tmpPath stringByDeletingLastPathComponent];
-    }
-}
-
 - (void)patchBasebinDaemonPlist:(NSString *)plistPath
 {
     NSMutableDictionary *plistDict = [NSMutableDictionary dictionaryWithContentsOfFile:plistPath];
@@ -997,8 +974,6 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         completion(error);
         return;
     }
-    
-    [self fixupPathPermissions];
     
     // Clean up xinaA15 v1 leftovers if desired
     if (![[NSFileManager defaultManager] fileExistsAtPath:@"/var/.keep_symlinks"]) {
