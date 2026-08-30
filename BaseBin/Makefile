@@ -16,7 +16,7 @@ all: basebin.tar
 # several more, and uses the same RootHide infrastructure as the rest of
 # the ported code. Keeping both would cause runtime conflicts (two hooks
 # on the same cfprefsd functions).
-subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook dopamine roothidehooks jailbreakd
+subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook dopamine roothidehooks
 
 ChOma: .build .include
 	@$(MAKE) -C ChOma TARGET=ios DISABLE_SIGNING=1 DISABLE_TESTS=1 DYLIB_LDFLAGS="-install_name @loader_path/libchoma.dylib"
@@ -97,12 +97,6 @@ dopamine: .build .include libjailbreak XPF ChOma
 roothidehooks: .build .include libjailbreak
 	$(MAKE) -C roothidehooks
 
-# Kernel-JB: Added jailbreakd binary (matches Dopamine2-roothide structure)
-# jailbreakd handles process trust patching for child processes (tree trust)
-jailbreakd: .build .include libjailbreak
-	$(MAKE) -C jailbreakd
-	@cp jailbreakd/jailbreakd .build
-
 .build:
 	rm -rf .build
 	mkdir -p .build
@@ -160,4 +154,4 @@ clean:
 	@rm -rf basebin.tar
 	@rm -rf basebin.tc
 
-.PHONY: clean .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook basebin.tc dyldhook basebin.tar roothidehooks jailbreakd
+.PHONY: clean .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook basebin.tc dyldhook basebin.tar roothidehooks
