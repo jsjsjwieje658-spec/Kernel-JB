@@ -1,7 +1,19 @@
 #include "jbserver.h"
 #include "util.h"
 
-#include "roothider.h"
+// RootHide port: roothide_handle_xpc_msg() sanitizes launchd XPC queries
+// coming FROM blacklisted processes (blanks jailbreak service names for
+// routine 708, hides jailbreak processes for routine 301). It is implemented
+// in roothider/xpc_hook.m, which is part of libjailbreak.dylib.
+//
+// Declared WEAK on purpose: the standalone `dopamine` CLI target compiles
+// libjailbreak/src/*.c directly (Makefile wildcard) but does NOT compile
+// roothider/*.m — there the reference resolves to NULL and the guarded call
+// below is skipped (the CLI never hosts the launchd XPC server anyway, so no
+// filtering is needed). Every dylib target (launchdhook, systemhook, ...)
+// links libjailbreak.dylib, where the real symbol exists, so the filter is
+// active exactly where it matters — inside launchd.
+extern void roothide_handle_xpc_msg(xpc_object_t xmsg) __attribute__((weak));
 
 int jbserver_received_xpc_message(struct jbserver_impl *server, xpc_object_t xmsg)
 {
@@ -10,18 +22,16 @@ int jbserver_received_xpc_message(struct jbserver_impl *server, xpc_object_t xms
 /**********************************************/
         // RootHide port (Dopamine2-roothide parity, jbserver.c:11): sanitize
         // launchd XPC queries coming FROM blacklisted processes BEFORE any
-        // early return, so the filtering also applies to non-jb messages:
-        //   - subsystem 2 / routine 708 (service lookup by name): blank the
-        //     name when a blacklisted app asks for a jailbreak app's service
-        //   - subsystem 6 / routine 301 (process info by pid): replace the
-        //     pid with INT_MAX so jailbreak processes stay invisible
-        // Without this call the implementation in roothider/xpc_hook.m was
-        // dead code and banking apps could enumerate jailbreak services and
-        // processes straight through launchd.
+        // early return, so the filtering also applies to non-jb messages.
         // NOTE: requires loadAppStoredIdentifiers() to have run (see
         // roothide_launchd_late_init in launchdhook) because
         // is_safe_bundle_identifier() asserts StoredAppIdentifiers != nil.
-        roothide_handle_xpc_msg(xmsg);
+        // The registry is empty until the first blacklisted app spawns, so
+        // this is safe even for the rare local-server messages that arrive
+        // during the launchdhook constructor (before the identifier scan).
+        if (roothide_handle_xpc_msg) {
+                roothide_handle_xpc_msg(xmsg);
+        }
 /*********************************************/
 
         if (!xpc_dictionary_get_value(xmsg, "jb-domain")) return -1;
