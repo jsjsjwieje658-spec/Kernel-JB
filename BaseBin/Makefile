@@ -112,7 +112,13 @@ ifneq (,$(wildcard $(shell xcrun --sdk iphoneos --show-sdk-path)/usr/include/xpc
 	rm -rf .include/xpc
 endif
 
+# RootHide port: fail-fast signature check. Every Mach-O in .build MUST be
+# signed before it goes into basebin.tc / basebin.tar. Build cf1e9ff shipped
+# an unsigned roothidehooks.dylib which silently dropped out of the
+# trustcache and broke bootstrap finalization on device (ASSERT in
+# systemhook/src/roothider_main.c:68, exit code 6 for every root binary).
 basebin.tc: subprojects
+	@python3 verify-signed.py .build
 	trustcache create .build/basebin.tc .build
 	cp .build/basebin.tc basebin.tc
 

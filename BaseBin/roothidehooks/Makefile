@@ -66,6 +66,22 @@ all: $(OUTPUT)
 $(OUTPUT): $(OBJECTS) $(LINK_INPUTS)
 	@mkdir -p $(OUTPUT_DIR)
 	$(CC) $(LDFLAGS) $(OBJECTS) -o $@
+# RootHide port (CRITICAL, upstream parity): sign the dylib with ldid.
+# Dopamine2-roothide runs `ldid -S roothidehooks.dylib` in its after-all
+# hook. Without an adhoc code signature:
+#   1. `trustcache create` cannot compute a cdhash -> roothidehooks.dylib
+#      is silently LEFT OUT of basebin.tc.
+#   2. The patched dyld's fcntl LV-bypass (dyldhook/src/lv_bypass.c) only
+#      fires when dyld attaches a signature (F_ADDFILESIGS) - an unsigned
+#      dylib never gets one, so it cannot be dynamically trusted either.
+#   => dlopen("<jbroot>/basebin/roothidehooks.dylib") returns NULL
+#   => ASSERT(roothidehooks != NULL) in systemhook/src/roothider_main.c:68
+#   => EVERY root jailbreak binary spawned after publish dies with exit 6
+#      (killall, /bin/sh prep_bootstrap.sh, dpkg -i, ...)
+#   => bootstrap finalization completely broken.
+# Verified against CI artifact of build cf1e9ff: this was the ONLY
+# unsigned Mach-O in basebin.tar.
+	@ldid -Cadhoc -S $@
 
 # RootHide port: pattern rule uses bare '%.m' (not '$(CURDIR)/%.m') so make's
 # stem extraction works correctly. The OBJECTS list also uses bare '%.m' so
