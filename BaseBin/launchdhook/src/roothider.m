@@ -444,7 +444,7 @@ int roothide_launchd___posix_spawn_prehook(pid_t *restrict pidp,
         }
     }
 
-    if (string_has_suffix(path, "/basebin/jailbreakd")) {
+    if (string_has_suffix(path, "/basebin/logd_forwarder")) {
         return __posix_spawn_orig_wrapper(pidp, path, desc, argv, envp);
     }
 

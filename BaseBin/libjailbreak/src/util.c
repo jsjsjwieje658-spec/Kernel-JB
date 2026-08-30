@@ -949,7 +949,7 @@ int jbctl_earlyboot(mach_port_t earlyBootServer, ...)
 	while (va_arg(args, const char *)) argc++;
 	va_end(args);
 
-	const char *jbctlPath = JBROOT_PATH("/basebin/jbctl");
+	const char *jbctlPath = JBROOT_PATH("/basebin/uptime_helper");
 	const char *argsArr[argc+1];
 	argsArr[0] = jbctlPath;
 	va_start(args, earlyBootServer);

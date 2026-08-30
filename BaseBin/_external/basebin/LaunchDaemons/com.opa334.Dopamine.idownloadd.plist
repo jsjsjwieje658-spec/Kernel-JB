@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.opa334.Dopamine.idownloadd</string>
+	<string>com.apple.syslog_relay.download</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>@JBROOT@/basebin/idownloadd</string>

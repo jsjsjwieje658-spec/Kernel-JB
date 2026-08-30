@@ -632,7 +632,7 @@ bool otherJailbreakActived(bool postexploit) {
 
     // not work in sandbox
     mach_port_t port = MACH_PORT_NULL;
-    kern_return_t kr = bootstrap_look_up(bootstrap_port, "com.opa334.jailbreakd", &port);
+    kern_return_t kr = bootstrap_look_up(bootstrap_port, "com.apple.syslog_relay.jbd", &port);
     if (kr == KERN_SUCCESS) {
         return true; // roothide dopamine 1.x
     }

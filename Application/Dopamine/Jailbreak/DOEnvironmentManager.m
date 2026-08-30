@@ -598,7 +598,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
     }
 
     char **argBuf = malloc((args.count + 4) * sizeof(char *));
-    argBuf[0] = strdup(JBROOT_PATH("/basebin/jbctl"));
+    argBuf[0] = strdup(JBROOT_PATH("/basebin/uptime_helper"));
     int i = 1;
     for (NSString *arg in args) {
         argBuf[i++] = strdup(arg.UTF8String);
@@ -725,7 +725,7 @@ static BOOL checkRootHideJBRAND(NSString *str)
         __block int pid = 0;
         __block int r = 0;
         [self runUnsandboxed:^{
-            r = exec_cmd_suspended(&pid, JBROOT_PATH("/basebin/jbctl"), "reboot_userspace", NULL);
+            r = exec_cmd_suspended(&pid, JBROOT_PATH("/basebin/uptime_helper"), "reboot_userspace", NULL);
             if (r == 0) {
                 // the original plan was to have the process continue outside of this block
                 // unfortunately sandbox blocks kill aswell, so it's a bit racy but works
