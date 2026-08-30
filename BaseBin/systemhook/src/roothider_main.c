@@ -519,11 +519,31 @@ void roothide_init_with_checkin(const char *rootdir) {
 }
 
 void roothide_init_with_executable(const char *executable) {
+    // ── sysctl hooks: hide developer_mode_status from banking apps ────────
+    //
+    // iOS 16+: hideDeveloperMode() in launchdhook swaps kernel sysctl OIDs
+    //   globally, so ALL processes (including banking apps) see the spoofed
+    //   developer_mode_status=0 without needing per-process hooks. We still
+    //   install the sysctl hooks for non-removable bundles (system daemons)
+    //   so they see the REAL value (needed for jailbreak daemon operation).
+    //
+    // iOS 15: There is NO kernel OID swap (hideDeveloperMode() is skipped).
+    //   Without per-process sysctl hooks, banking apps (removable bundles)
+    //   can call sysctlbyname("security.mac.amfi.developer_mode_status")
+    //   and see the TRUE value=1 → jailbreak detected.
+    //   FIX: Install sysctl hooks for ALL processes on iOS 15, so both
+    //   system daemons and banking apps see developer_mode_status=0.
+    //   Jailbreak daemons that need the real value read it directly from
+    //   kernel memory (kread), not from sysctl.
     if (__builtin_available(iOS 16.0, *)) {
         if (!isRemovableBundlePath(executable)) {
             litehook_hook_function(__sysctl, __sysctl_hook);
             litehook_hook_function(__sysctlbyname, __sysctlbyname_hook);
         }
+    } else {
+        // iOS 15: hook sysctl for ALL processes (no kernel OID swap available)
+        litehook_hook_function(__sysctl, __sysctl_hook);
+        litehook_hook_function(__sysctlbyname, __sysctlbyname_hook);
     }
 
     // RootHide port: official Dopamine2-roothide checks

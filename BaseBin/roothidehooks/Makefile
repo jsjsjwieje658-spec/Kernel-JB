@@ -47,6 +47,8 @@ LDFLAGS := \
 	$(ARCH_FLAGS) \
 	-miphoneos-version-min=$(MIN_IOS_VERSION) \
 	-dynamiclib \
+	-Wl,-S \
+	-Wl,-x \
 	-Wl,-install_name,/basebin/roothidehooks.dylib \
 	-Wl,-rpath,@loader_path/.jbroot/Library/Frameworks \
 	-Wl,-rpath,@loader_path/fallback \

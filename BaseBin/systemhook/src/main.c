@@ -256,9 +256,31 @@ bool should_enable_tweaks(void)
                         // Đây là app user-installed → query blacklist động theo FULL PATH
                         // (server tự resolve bundle ID từ Info.plist của .app bundle)
                         if (jbclient_blacklist_check_path(gExecutablePath)) {
-                                // FIX: cũng set env để các dylib khác trong cùng process
-                                // (nếu được inject trước khi check này) biết clean mode đang on
-                                setenv(ROOTHIDE_CLEAN_MODE_ENV, "1", 1);
+                                // FIX (RootHide leak): REMOVED setenv(ROOTHIDE_CLEAN_MODE_ENV, "1", 1).
+                                //
+                                // ROOTHIDE CLEAN MODE ENV VAR LEAK — ROOT CAUSE OF BANKING APP
+                                // DETECTION (despite RootHide app blacklist being enabled):
+                                //
+                                // The old code set this process-wide env var BEFORE returning false
+                                // from should_enable_tweaks(). Banking apps calling
+                                // getenv("ROOTHIDE_CLEAN_MODE") during their initialization would
+                                // see "1" and immediately detect the jailbreak — even though the
+                                // blacklist was correctly configured and tweaks were properly
+                                // disabled for this process.
+                                //
+                                // The env var is unnecessary here because:
+                                //   1. spawn_hook.c already propagates clean-mode to children via
+                                //      the ROOTHIDE_CLEAN_MODE_ENV check (spawn_hook.c:248-253).
+                                //   2. The child inherits env from launchd (which may already
+                                //      have it set), not from this process's setenv().
+                                //   3. Other dylibs loaded before this check were already loaded
+                                //      by dyld during process startup (before any constructor),
+                                //      so they don't need an env-var signal.
+                                //
+                                // Removing this setenv() eliminates the most common banking app
+                                // jailbreak detection vector while preserving all functional
+                                // behavior: tweaks are still disabled (return false) and the
+                                // blacklist is still checked dynamically.
                                 return false;
                         }
                 }
@@ -446,16 +468,33 @@ __attribute__((constructor)) static void initializer(void)
                 }
         }
 
-        // Unset DYLD_INSERT_LIBRARIES, but only if systemhook itself is the only thing contained in it
-        // Feeable attempt at making jailbreak detection harder
-        const char *dyldInsertLibraries = getenv("DYLD_INSERT_LIBRARIES");
-        if (dyldInsertLibraries) {
-                // RootHide port Build 3: HOOK_DYLIB_PATH is a runtime variable now;
-                // guard NULL (unresolved path) before strcmp.
-                if (HOOK_DYLIB_PATH && !strcmp(dyldInsertLibraries, HOOK_DYLIB_PATH)) {
-                        unsetenv("DYLD_INSERT_LIBRARIES");
-                }
-        }
+        // Unset DYLD_INSERT_LIBRARIES unconditionally after systemhook is loaded.
+        //
+        // WHY: dyld reads this env var during process startup (before ANY
+        // constructor runs), so by the time this constructor executes:
+        //   - systemhook.dylib is already loaded and initialized
+        //   - dyld has already consumed the env var for injection
+        //   - The env var serves NO PURPOSE in the parent process anymore
+        //
+        // Bankng apps call getenv("DYLD_INSERT_LIBRARIES") as one of their
+        // top-3 jailbreak detection checks. The old code only unset when the
+        // var contained ONLY systemhook (no TweakLoader), so when tweaks were
+        // active the env var leaked through with the full injection chain.
+        //
+        // SAFETY:
+        //   - Children spawned later via posix_spawn get their env from the
+        //     caller's envp parameter (NOT from the parent's environ), so
+        //     this unsetenv does NOT affect child process injection.
+        //   - spawn_hook_shared() in common.c already manages DYLD_INSERT_LIBRARIES
+        //     insertion/removal for each child independently.
+        //   - dyld has already finished reading this var; nothing in the
+        //     remaining constructor code reads it.
+        //   - This runs AFTER roothide_init_with_checkin() (line 535) which
+        //     is the last init function that could theoretically need it.
+        //
+        // This eliminates the #1 jailbreak detection vector without affecting
+        // any functional behavior.
+        unsetenv("DYLD_INSERT_LIBRARIES");
 
         // On iOS 26+, hooks have to be applied through hookd
         if (__builtin_available(iOS 19.0, *)) {

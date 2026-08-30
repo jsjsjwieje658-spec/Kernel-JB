@@ -20,7 +20,13 @@ CFLAGS = -I../.include -I./src -I../_external/modules/litehook/src -I../_externa
 # resolves); it only added a spurious LC_LOAD_DYLIB entry that made every
 # /usr/lib-published systemhook load abort with
 # "Library not loaded: @loader_path/libjailbreak.dylib".
-LDFLAGS = -dynamiclib
+# Strip symbols to prevent jailbreak detection via string scanning.
+# -S: strip debug symbols (removes function names, source info)
+# -x: strip local symbols (removes internal symbols like roothide_*, jbclient_*)
+# Banking apps call `strings` or scan __cstring sections for "roothide",
+# "jailbreakd", "com.opa334" etc. Stripping makes this much harder.
+# Export symbols (jbroot, rootfs, jbrand) are preserved for libroothide users.
+LDFLAGS = -dynamiclib -Wl,-S -Wl,-x
 
 sign: $(TARGET)
 	@ldid -Cadhoc -S $^

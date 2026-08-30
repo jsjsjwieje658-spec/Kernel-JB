@@ -2,7 +2,8 @@ TARGET = launchdhook.dylib
 CC = clang
 
 CFLAGS = -framework Foundation -framework CoreServices -framework Security -framework IOKit -I../.include -I../_external/modules/litehook/src -I../_external/include -Isrc -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -arch arm64 -arch arm64e -miphoneos-version-min=15.0 -Wno-deprecated-declarations -D BUILD_STANDALONE=$(BUILD_STANDALONE) -fobjc-arc -O2
-LDFLAGS = -dynamiclib -rpath @loader_path/fallback -L../.build -L../_external/lib -ljailbreak -lellekit -lbsm -lchoma -lMobileGestalt
+# Strip symbols to prevent jailbreak detection via string scanning (see systemhook/Makefile).
+LDFLAGS = -dynamiclib -Wl,-S -Wl,-x -rpath @loader_path/fallback -L../.build -L../_external/lib -ljailbreak -lellekit -lbsm -lchoma -lMobileGestalt
 
 sign: $(TARGET)
 	@ldid -Cadhoc -S $^
