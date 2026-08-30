@@ -38,13 +38,17 @@
 // resolve the config.plist path at runtime.
 #include <libjailbreak/jbroot.h>
 
-// Relaxin's kSpawnConfig values (must match common/common.h's enum):
-//   kSpawnConfigInject        = 1 << 0
-//   kSpawnConfigTrust         = 1 << 1
-//   kSpawnConfigPatchProcess  = 1 << 2  (defined as macro in wrapper common.h)
-//
-// We use raw integer arithmetic here to avoid pulling in the kSpawnConfig enum
-// (which might differ between Kernel-JB and Relaxin).
+// kSpawnConfig values (must match common/common.h's enum).
+// Defined here as macros so the shim compiles independently of common.h.
+#ifndef kSpawnConfigInject
+#define kSpawnConfigInject        (1 << 0)
+#endif
+#ifndef kSpawnConfigTrust
+#define kSpawnConfigTrust         (1 << 1)
+#endif
+#ifndef kSpawnConfigPatchProcess
+#define kSpawnConfigPatchProcess  (1 << 2)
+#endif
 
 // Shim: __posix_spawn_orig — invoke the underlying posix_spawn syscall directly.
 // This is what Relaxin's common.c:84-90 does.
