@@ -1,18 +1,18 @@
 TARGET = jailbreakd
+DEBUG ?= 0
 
 CC = clang
+SDK = $(shell xcrun --sdk iphoneos --show-sdk-path)
 
-CFLAGS = -Wno-availability -framework Foundation -framework CoreServices -I../.include -I./src -isysroot $(shell xcrun --sdk iphoneos --show-sdk-path) -arch arm64 -arch arm64e -miphoneos-version-min=15.0 -fobjc-arc -Wno-nullability-completeness-on-arrays -O3
+CFLAGS = -Werror -Wno-availability -framework Foundation -framework CoreServices -I../.include -I./src -isysroot $(SDK) -arch arm64 -arch arm64e -miphoneos-version-min=15.0 -fobjc-arc -Wno-nullability-completeness-on-arrays -O3 -DDEBUG=$(DEBUG)
 LDFLAGS = -L../.build -ljailbreak -lbsm
 
-# Kernel-JB: strip symbols
-LDFLAGS += -Wl,-S -Wl,-x
+all: $(TARGET)
 
-sign: $(TARGET)
-	@ldid -Sentitlements.plist $<
-
-$(TARGET): $(wildcard src/*.m src/*.c)
-	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
+$(TARGET): $(SOURCES)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES)
 
 clean:
 	@rm -f $(TARGET)
+
+.PHONY: all clean
