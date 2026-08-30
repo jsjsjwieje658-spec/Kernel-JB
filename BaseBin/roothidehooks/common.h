@@ -12,10 +12,11 @@
 
 #if DEBUG
 #define RHLogDebug(...) NSLog(__VA_ARGS__)
-#else
-#define RHLogDebug(...) do { } while (0)
-#endif
-
 #define RHLogError(...) NSLog(__VA_ARGS__)
+#else
+// Production: strip ALL log strings (roothide, jailbreak, systemhook etc.)
+#define RHLogDebug(...) do { } while (0)
+#define RHLogError(...) do { } while (0)
+#endif
 
 bool isJailbreakBundlePath(const char *path);
