@@ -60,8 +60,9 @@ void jailbreakd_received_message(mach_port_t port) {
 
         switch (msgId) {
             case JBD_MSG_TEST_CALL: {
-                // Liveness check — just return success
-                xpc_dictionary_set_int64(reply, "result", 0);
+                int64_t value = xpc_dictionary_get_int64(message, "value");
+                xpc_dictionary_set_int64(reply, "result", value * 2);
+                if (clientUid == 0) abort(); // crashreporter test
                 break;
             }
 
@@ -92,36 +93,36 @@ void jailbreakd_received_message(mach_port_t port) {
             }
 
             case JBD_MSG_SPAWN_EXEC_START: {
-                pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
+                // Client request has no pid field. Authenticated XPC sender
+                // is the target, matching upstream RootHide protocol.
                 bool resume = xpc_dictionary_get_bool(message, "resume");
-                // Call the ACTUAL server-side implementation
-                int64_t result = spawnExecPatchAdd(pid, resume);
+                int64_t result = spawnExecPatchAdd(clientPid, resume);
                 xpc_dictionary_set_int64(reply, "result", result);
                 break;
             }
 
-            case JBD_MSG_SPAWN_EXEC_CANCEL: {
-                pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
-                // Call the ACTUAL server-side implementation
-                spawnExecPatchDel(pid);
+            case JBD_MSG_SPAWN_EXEC_CANCEL:
+                spawnExecPatchDel(clientPid);
                 xpc_dictionary_set_int64(reply, "result", 0);
                 break;
-            }
 
             case JBD_MSG_EXEC_TRACE_START: {
-                pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
                 uint64_t traced = xpc_dictionary_get_uint64(message, "traced");
-                // Call the ACTUAL server-side implementation
-                int64_t result = execTraceProcess(pid, traced);
-                xpc_dictionary_set_int64(reply, "result", result);
-                break;
+                xpc_retain(reply);
+                dispatch_async(dispatch_get_global_queue(0, 0), ^{
+                    int64_t result = execTraceProcess(clientPid, traced);
+                    xpc_dictionary_set_int64(reply, "result", result);
+                    jailbreakd_reply_message(reply);
+                    ((void (*)(xpc_object_t))xpc_release)(reply);
+                });
+                ((void (*)(xpc_object_t))xpc_release)(message);
+                ((void (*)(xpc_object_t))xpc_release)(reply);
+                return;
             }
 
             case JBD_MSG_EXEC_TRACE_CANCEL: {
-                pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
                 uint64_t detached = xpc_dictionary_get_uint64(message, "detached");
-                // Call the ACTUAL server-side implementation
-                int64_t result = execTraceCancel(pid, detached);
+                int64_t result = execTraceCancel(clientPid, detached);
                 xpc_dictionary_set_int64(reply, "result", result);
                 break;
             }
