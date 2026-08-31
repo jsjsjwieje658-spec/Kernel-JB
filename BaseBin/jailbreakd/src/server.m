@@ -108,7 +108,7 @@ void jailbreakd_received_message(mach_port_t port) {
 
             case JBD_MSG_EXEC_TRACE_START: {
                 uint64_t traced = xpc_dictionary_get_uint64(message, "traced");
-                xpc_retain(reply);
+                ((void (*)(xpc_object_t))xpc_retain)(reply);
                 dispatch_async(dispatch_get_global_queue(0, 0), ^{
                     int64_t result = execTraceProcess(clientPid, traced);
                     xpc_dictionary_set_int64(reply, "result", result);
