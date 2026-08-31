@@ -41,7 +41,7 @@ void jailbreakd_received_message(mach_port_t port) {
         }
 
         if (xpc_get_type(message) != XPC_TYPE_DICTIONARY) {
-            xpc_release(message);
+            ((void (*)(xpc_object_t))xpc_release)(message);
             return;
         }
 
@@ -125,7 +125,7 @@ void jailbreakd_received_message(mach_port_t port) {
         }
 
         jailbreakd_reply_message(reply);
-        xpc_release(message);
-        xpc_release(reply);
+        ((void (*)(xpc_object_t))xpc_release)(message);
+        ((void (*)(xpc_object_t))xpc_release)(reply);
     }
 }
