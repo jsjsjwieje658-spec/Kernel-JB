@@ -45,24 +45,10 @@
 #import <Preferences/PSSpecifier.h>
 #import <libjailbreak/jbroot.h>
 
-// PRESET REMOVED — hardcoded bundle IDs may be incorrect, causing silent
-// blacklist match failures (isBlacklistedApp returns false for wrong bundle ID).
-// Users should add banking apps MANUALLY via "Add App by Bundle ID".
-// To re-enable presets, verify each CFBundleIdentifier against the actual
-// installed app's Info.plist: /var/containers/Bundle/Application/<UUID>/<App>.app/Info.plist
-static NSArray<NSString *> * const kVietnameseBankingApps = @[
-    // @"com.vietinbank.iBank",
-    // @"com.vcb.IB",
-    // @"com.techcombank.business",      // WRONG: .business = enterprise app, not mobile
-    // @"com.mbmobile",
-    // @"com.acb.ACBMobileBanking",
-    // @"com.vib.VIBMobileBanking",
-    // @"com.babk.BABMobileBanking",
-    // @"com.agribank.DigiBank",
-    // @"vnpay.NapAsVnPay",             // WRONG: not reverse-DNS format
-    // @"com.viettel.wallet.viettelpay",
-    // @"com.mservice.SmartPay",         // WRONG: SmartPay != MoMo
-];
+// NOTE: Preset banking app bundle IDs were removed because they were incorrect,
+// causing isBlacklistedApp() to return false (silent failure). Use instead:
+//   - "Select Apps to Hide" button to auto-detect installed apps
+//   - "Add App by Bundle ID" to manually add any app
 
 @interface DORootHideManager ()
 @property (nonatomic, strong) NSMutableArray<NSString *> *blacklist;
@@ -237,30 +223,6 @@ static NSArray<NSString *> * const kVietnameseBankingApps = @[
 }
 
 #pragma mark - Actions
-
-- (void)addBankingAppsPressed:(PSSpecifier *)specifier
-{
-    NSMutableDictionary *appconfig = [NSMutableDictionary dictionaryWithDictionary:[self loadAppConfig]];
-    NSMutableArray *added = [NSMutableArray new];
-    for (NSString *bundleID in kVietnameseBankingApps) {
-        if (![appconfig[bundleID] boolValue]) {
-            appconfig[bundleID] = @YES;
-            [added addObject:bundleID];
-        }
-    }
-    if (added.count == 0) {
-        [self showAlertWithTitle:@"Bank Apps" message:@"All Vietnamese bank apps are already hidden."];
-        return;
-    }
-    if ([self saveAppConfig:appconfig]) {
-        [self reloadBlacklist];
-        [self reloadSpecifiers];
-        [self showAlertWithTitle:@"Bank Apps Added" message:[NSString stringWithFormat:@"Added %lu app(s):\n\n%@\n\nKill each app from the app switcher and reopen it to apply.", (unsigned long)added.count, [added componentsJoinedByString:@"\n"]]];
-    }
-    else {
-        [self showAlertWithTitle:@"Error" message:@"Failed to write RootHideConfig.plist. Make sure the device is jailbroken."];
-    }
-}
 
 - (void)addAppPressed:(PSSpecifier *)specifier
 {
