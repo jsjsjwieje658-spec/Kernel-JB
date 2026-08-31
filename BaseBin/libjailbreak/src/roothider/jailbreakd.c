@@ -105,10 +105,10 @@ int spawnJailbreakd() {
     posix_spawnattr_init(&attr);
     posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){MACH_PORT_NULL, MACH_PORT_NULL, bootstraport}, 3);
     int ret = posix_spawn(&pid,
-                          JBROOT_PATH("/basebin/logd_forwarder"),
+                          JBROOT_PATH("/basebin/jailbreakd"),
                           NULL,
                           &attr,
-                          (char *[]){"logd_forwarder", NULL},
+                          (char *[]){"jailbreakd", NULL},
                           __firstLoad ? NULL : ((char *[]){"RESPAWN_REQUIRED=1", NULL}));
     posix_spawnattr_destroy(&attr);
 
