@@ -8,12 +8,15 @@ CFLAGS = -Werror -Wno-availability -framework Foundation -framework CoreServices
 LDFLAGS = -L../.build -ljailbreak -lbsm
 SOURCES = $(wildcard src/*.m src/*.c)
 
-all: $(TARGET)
+all: $(TARGET) sign
 
 $(TARGET): $(SOURCES)
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(SOURCES)
 
+sign: $(TARGET)
+	@ldid -Cadhoc -Sentitlements.plist $<
+
 clean:
 	@rm -f $(TARGET)
 
-.PHONY: all clean
+.PHONY: all clean sign

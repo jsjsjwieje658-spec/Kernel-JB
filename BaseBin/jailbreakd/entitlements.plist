@@ -10,6 +10,8 @@
 	<true/>
 	<key>com.apple.system-task-ports.control</key>
 	<true/>
+	<key>com.apple.private.set-exception-port</key>
+	<true/>
 	<key>com.apple.private.thread-set-state</key>
 	<true/>
 	<key>com.apple.private.security.no-sandbox</key>
