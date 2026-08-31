@@ -62,11 +62,16 @@ NSSet *builtinApps() {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         apps = [NSSet setWithObjects:@"com.aapl.relaxin", nil];
-        NSString *customBundleId = [NSString stringWithContentsOfFile:JBROOT_PATH(@"/basebin/.AppIdentifier")
-                                                             encoding:NSUTF8StringEncoding
-                                                                error:nil];
-        if (customBundleId && customBundleId.length > 0) {
-            apps = [apps setByAddingObject:customBundleId];
+        // KJB FIX: JBROOT_PATH có thể trả về nil nếu rootPath chưa được set
+        // Kiểm tra trước khi đọc file
+        NSString *appIdPath = JBROOT_PATH(@"/basebin/.AppIdentifier");
+        if (appIdPath) {
+            NSString *customBundleId = [NSString stringWithContentsOfFile:appIdPath
+                                                                 encoding:NSUTF8StringEncoding
+                                                                    error:nil];
+            if (customBundleId && customBundleId.length > 0) {
+                apps = [apps setByAddingObject:customBundleId];
+            }
         }
         JBLogDebug("builtin app identifiers status=ready count=%lu", (unsigned long)apps.count);
     });
@@ -80,7 +85,15 @@ bool isBlacklistedApp(const char *identifier) {
     if ([builtinApps() containsObject:@(identifier)])
         return false;
 
+    // KJB FIX: JBROOT_PATH có thể trả về nil nếu rootPath chưa được set
+    // (xảy ra nếu bị gọi quá sớm trước khi initializer chạy)
+    // Thay vì crash, trả về false để app được spawn bình thường
     NSString *configFilePath = JBROOT_PATH(@"/var/mobile/Library/RootHide/RootHideConfig.plist");
+    if (!configFilePath) {
+        JBLogError("isBlacklistedApp: JBROOT_PATH returned nil (rootPath not initialized)");
+        return false;
+    }
+    
     NSDictionary *roothideConfig = [NSDictionary dictionaryWithContentsOfFile:configFilePath];
     if (!roothideConfig)
         return false;
@@ -99,8 +112,15 @@ bool isBlacklistedApp(const char *identifier) {
 bool isBlacklistedPath(const char *path) {
     if (!path)
         return false;
-    NSString *identifier = getAppIdentifierFromPath(path);
-    if (!identifier)
+    
+    // KJB FIX: Wrap trong @try/@catch để tránh crash khi parse Info.plist fail
+    @try {
+        NSString *identifier = getAppIdentifierFromPath(path);
+        if (!identifier)
+            return false;
+        return isBlacklistedApp(identifier.UTF8String);
+    } @catch (NSException *exception) {
+        JBLogError("isBlacklistedPath: exception for path %s: %@", path, exception.reason);
         return false;
-    return isBlacklistedApp(identifier.UTF8String);
+    }
 }

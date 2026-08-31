@@ -43,26 +43,34 @@ int new_xpc_pipe_routine_reply(xpc_object_t reply) {
             uint64_t subsystem = xpc_dictionary_get_uint64(original, "subsystem");
 
             if (subsystem == 3 && routine == 829) {
-                volatile int error = xpc_dictionary_get_int64(reply, "error");
-                volatile const char *name = xpc_dictionary_get_string(reply, "name");
-                volatile const char *bundle_identifier = xpc_dictionary_get_string(reply, "bundle_identifier");
+                // KJB FIX: Thêm NULL check cho XPC dictionary values để tránh crash
+                xpc_object_t error_obj = xpc_dictionary_get_value(reply, "error");
+                xpc_object_t name_obj = xpc_dictionary_get_value(reply, "name");
+                xpc_object_t bundle_id_obj = xpc_dictionary_get_value(reply, "bundle_identifier");
+                
+                // Chỉ tiếp tục nếu các object hợp lệ
+                if (error_obj && name_obj && bundle_id_obj) {
+                    volatile int error = xpc_dictionary_get_int64(reply, "error");
+                    volatile const char *name = xpc_dictionary_get_string(reply, "name");
+                    volatile const char *bundle_identifier = xpc_dictionary_get_string(reply, "bundle_identifier");
 
-                volatile const char *bundle = bundle_identifier ? bundle_identifier : (name ? name : "");
+                    volatile const char *bundle = bundle_identifier ? bundle_identifier : (name ? name : "");
 
-                volatile char client_identifier[255] = {0};
-                proc_get_identifier(audit_token_to_pid(clientToken), client_identifier);
+                    volatile char client_identifier[255] = {0};
+                    proc_get_identifier(audit_token_to_pid(clientToken), client_identifier);
 
-                volatile bool isSafeBundleIdentifier = is_safe_bundle_identifier(bundle);
-                volatile bool isSelfBundleIdentifier = client_identifier[0]
-                    && string_has_prefix(bundle, client_identifier);
+                    volatile bool isSafeBundleIdentifier = is_safe_bundle_identifier(bundle);
+                    volatile bool isSelfBundleIdentifier = client_identifier[0]
+                        && string_has_prefix(bundle, client_identifier);
 
-                if (error == 0 && !isSelfBundleIdentifier && !isSafeBundleIdentifier) {
-                    xpc_dictionary_set_value(reply, "cid", NULL);
-                    xpc_dictionary_set_value(reply, "name", NULL);
-                    xpc_dictionary_set_value(reply, "bundle_identifier", NULL);
-                    xpc_dictionary_set_value(reply, "resource-usage-blob", NULL);
+                    if (error == 0 && !isSelfBundleIdentifier && !isSafeBundleIdentifier) {
+                        xpc_dictionary_set_value(reply, "cid", NULL);
+                        xpc_dictionary_set_value(reply, "name", NULL);
+                        xpc_dictionary_set_value(reply, "bundle_identifier", NULL);
+                        xpc_dictionary_set_value(reply, "resource-usage-blob", NULL);
 
-                    xpc_dictionary_set_int64(reply, "error", 3);
+                        xpc_dictionary_set_int64(reply, "error", 3);
+                    }
                 }
             }
         }
@@ -127,6 +135,11 @@ void roothide_handle_xpc_msg(xpc_object_t xmsg) {
     xpc_dictionary_get_audit_token(xmsg, &clientToken);
 
     if (isBlacklistedToken(&clientToken)) {
+        // KJB FIX: Kiểm tra dictionary tồn tại trước khi đọc giá trị
+        if (!xpc_dictionary_get_value(xmsg, "routine") || !xpc_dictionary_get_value(xmsg, "subsystem")) {
+            return;
+        }
+        
         uint64_t routine = xpc_dictionary_get_uint64(xmsg, "routine");
         uint64_t subsystem = xpc_dictionary_get_uint64(xmsg, "subsystem");
         if (subsystem == 2 && routine == 708) {
@@ -174,8 +187,9 @@ void roothide_handle_xpc_msg(xpc_object_t xmsg) {
             volatile char client_identifier[255] = {0};
             proc_get_identifier(clientPid, client_identifier);
 
+            // KJB FIX: Thêm check path[0] != '\0' trước khi gọi các hàm xử lý path
             volatile bool isJailbrokenPath = !path[0] || hasTrollstoreMarker(path)
-                || isSubPathOf(path, JBROOT_PATH("/"));
+                || (path[0] && isSubPathOf(path, JBROOT_PATH("/")));
             volatile bool isSafeBundleIdentifier = proc_identifier[0] && is_safe_bundle_identifier(proc_identifier);
             volatile bool isSelfBundleIdentifier = proc_identifier[0] && client_identifier[0]
                 && string_has_prefix(proc_identifier, client_identifier);

@@ -326,6 +326,11 @@ bool hasTrollstoreLiteMarker(const char *path) {
 }
 
 bool isSubPathOf(const char *child, const char *parent) {
+    // KJB FIX: Thêm NULL check để tránh crash khi parent là NULL
+    // (có thể xảy ra nếu JBROOT_PATH trả về nil)
+    if (!child || !parent)
+        return false;
+    
     char real_child[PATH_MAX] = {0};
     char real_parent[PATH_MAX] = {0};
 
@@ -924,7 +929,14 @@ bool is_safe_bundle_identifier(const char *identifier) {
         return false;
     }
 
-    assert(StoredAppIdentifiers != nil);
+    // KJB FIX: Thay assert bằng check an toàn
+    // Nếu StoredAppIdentifiers chưa được khởi tạo (nil), trả về false
+    // thay vì crash để tránh treo máy
+    if (StoredAppIdentifiers == nil) {
+        JBLogError("is_safe_bundle_identifier: StoredAppIdentifiers is nil (not initialized yet)");
+        return false;
+    }
+    
     if ([StoredAppIdentifiers containsObject:@(identifier)]) {
         return true;
     }

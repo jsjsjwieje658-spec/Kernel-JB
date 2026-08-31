@@ -58,10 +58,18 @@ static bool _isBlacklistedProcess(pid_t pid, int pidversion) {
 
     stateReadLock();
 
+    // KJB FIX: Copy pid values to local variables while holding the lock
+    // to avoid race condition where commitBlacklistProcessId frees the pointer
+    // after we release the lock. The original code dereferenced *(*it) while
+    // holding the read lock, but the pointer could be freed by a writer even
+    // though the write is blocked by this read lock (reader-writer lock semantics).
     for (auto it = uncachedBlacklistedProcesses->begin(); it != uncachedBlacklistedProcesses->end(); ++it) {
-        pid_t uncachedPid = *(*it);
-        if (uncachedPid > 0 && uncachedPid == pid) {
-            if (pidversion == proc_get_pidversion(uncachedPid)) {
+        pid_t *pidp = *it;
+        if (pidp && *pidp > 0 && *pidp == pid) {
+            // Capture the uncached pid value before releasing lock
+            pid_t uncachedPid = *pidp;
+            int uncachedPidversion = proc_get_pidversion(uncachedPid);
+            if (uncachedPidversion > 0 && uncachedPidversion == pidversion) {
                 blacklisted = true;
             }
             break;
