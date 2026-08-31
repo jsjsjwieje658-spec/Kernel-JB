@@ -2,12 +2,10 @@
 //  server.m
 //  jailbreakd server - handles XPC messages from launchdhook
 //
-//  Handles process trust patching requests:
-//    - JBD_MSG_SPAWN_PATCH_CHILD: patch trust for child processes
-//    - JBD_MSG_SPAWN_EXEC_START/CANCEL: handle exec() re-trust
-//    - JBD_MSG_EXEC_TRACE_START/CANCEL: ptrace-based monitoring
-//    - JBD_MSG_SPINLOCK_FIX_ONLY: spinlock fix
-//    - JBD_MSG_TEST_CALL: liveness check
+//  IMPORTANT: This is the SERVER side. Do NOT call jbd* client functions
+//  (jbdTestCall, jbdSpawnPatchChild, etc.) — those SEND XPC messages TO
+//  jailbreakd and would create an infinite loop. Call the actual
+//  implementations directly: roothide_patch_proc(), spawnExecPatchAdd(), etc.
 //
 
 #include <Foundation/Foundation.h>
@@ -21,6 +19,7 @@
 #include <libjailbreak/log.h>
 #include <libjailbreak/roothider.h>
 
+// Server-side implementations (NOT client wrappers)
 #include "../../libjailbreak/src/roothider/exec_patch.h"
 #include "../../libjailbreak/src/roothider/jailbreakd.h"
 
@@ -46,6 +45,11 @@ void jailbreakd_received_message(mach_port_t port) {
         }
 
         xpc_object_t reply = xpc_dictionary_create_reply(message);
+        if (!reply) {
+            JBLogError("jailbreakd: xpc_dictionary_create_reply returned NULL");
+            ((void (*)(xpc_object_t))xpc_release)(message);
+            return;
+        }
 
         JBD_MESSAGE_ID msgId = xpc_dictionary_get_uint64(message, "id");
 
@@ -56,16 +60,16 @@ void jailbreakd_received_message(mach_port_t port) {
 
         switch (msgId) {
             case JBD_MSG_TEST_CALL: {
-                int64_t result = jbdTestCall(0);
-                xpc_dictionary_set_int64(reply, "result", result);
+                // Liveness check — just return success
+                xpc_dictionary_set_int64(reply, "result", 0);
                 break;
             }
 
             case JBD_MSG_SPINLOCK_FIX_ONLY: {
+                // Not supported in stock-dyld policy
                 pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
-                bool resume = xpc_dictionary_get_bool(message, "resume");
-                int64_t result = jbdSpinlockFixOnly(pid, resume);
-                xpc_dictionary_set_int64(reply, "result", result);
+                JBLogError("jailbreakd: spinlock fix rejected pid=%d client=%d", pid, clientPid);
+                xpc_dictionary_set_int64(reply, "result", ENOTSUP);
                 break;
             }
 
@@ -75,7 +79,11 @@ void jailbreakd_received_message(mach_port_t port) {
                 pid_t ppid = proc_get_ppid(pid);
                 int64_t result = -1;
                 if (ppid == clientPid || ppid == 1) {
-                    result = jbdSpawnPatchChild(pid, resume);
+                    // Call the ACTUAL server-side implementation
+                    result = roothide_patch_proc(pid);
+                    if (result == 0 && resume) {
+                        kill(pid, SIGCONT);
+                    }
                 } else {
                     JBLogError("jailbreakd: spawn patch denied ppid=%d client=%d pid=%d", ppid, clientPid, pid);
                 }
@@ -84,42 +92,43 @@ void jailbreakd_received_message(mach_port_t port) {
             }
 
             case JBD_MSG_SPAWN_EXEC_START: {
-                const char *execfile = xpc_dictionary_get_string(message, "execfile");
+                pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
                 bool resume = xpc_dictionary_get_bool(message, "resume");
-                int64_t result = jbdSpawnExecStart(execfile, resume);
+                // Call the ACTUAL server-side implementation
+                int64_t result = spawnExecPatchAdd(pid, resume);
                 xpc_dictionary_set_int64(reply, "result", result);
                 break;
             }
 
             case JBD_MSG_SPAWN_EXEC_CANCEL: {
-                const char *execfile = xpc_dictionary_get_string(message, "execfile");
-                int64_t result = jbdSpawnExecCancel(execfile);
-                xpc_dictionary_set_int64(reply, "result", result);
+                pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
+                // Call the ACTUAL server-side implementation
+                spawnExecPatchDel(pid);
+                xpc_dictionary_set_int64(reply, "result", 0);
                 break;
             }
 
             case JBD_MSG_EXEC_TRACE_START: {
-                const char *execfile = xpc_dictionary_get_string(message, "execfile");
-                bool traced = false;
-                int64_t result = jbdExecTraceStart(execfile, &traced);
-                xpc_dictionary_set_bool(reply, "traced", traced);
+                pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
+                uint64_t traced = xpc_dictionary_get_uint64(message, "traced");
+                // Call the ACTUAL server-side implementation
+                int64_t result = execTraceProcess(pid, traced);
                 xpc_dictionary_set_int64(reply, "result", result);
                 break;
             }
 
             case JBD_MSG_EXEC_TRACE_CANCEL: {
-                const char *execfile = xpc_dictionary_get_string(message, "execfile");
-                bool detached = false;
-                int64_t result = jbdExecTraceCancel(execfile, &detached);
-                xpc_dictionary_set_bool(reply, "detached", detached);
+                pid_t pid = (pid_t)xpc_dictionary_get_int64(message, "pid");
+                uint64_t detached = xpc_dictionary_get_uint64(message, "detached");
+                // Call the ACTUAL server-side implementation
+                int64_t result = execTraceCancel(pid, detached);
                 xpc_dictionary_set_int64(reply, "result", result);
                 break;
             }
 
             default: {
                 JBLogError("jailbreakd: unknown msg id=%llu from client=%d", (uint64_t)msgId, clientPid);
-                int64_t result = -1;
-                xpc_dictionary_set_int64(reply, "result", result);
+                xpc_dictionary_set_int64(reply, "result", -1);
                 break;
             }
         }
