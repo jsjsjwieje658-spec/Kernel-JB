@@ -16,12 +16,8 @@
 // Env buffer manipulation (strip jailbreak env vars from blacklisted apps)
 #include "../systemhook/src/envbuf.h"
 
-// RootHide: isBlacklistedPath() — direct call inside launchd (no XPC round-trip).
-// Defined in roothider/blacklist.m, linked via libjailbreak.dylib.
-// Forward-declared here to avoid pulling roothider.h which conflicts with
-// launchdhook's own crashreporter.h (both define kCrashReporterStateActive).
-extern bool isBlacklistedPath(const char *path);
-// PID-based blacklist tracking (roothider/blacklist.cpp)
+// PID-based blacklist tracking (roothider/blacklist.cpp) — used for env-var
+// propagation: children of blacklisted apps get registered in the PID cache.
 extern pid_t *allocBlacklistProcessId(void);
 extern void commitBlacklistProcessId(pid_t *pidp);
 
@@ -230,41 +226,21 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
         }
 
         // ========== ROOTHIDE SELECTIVE INJECTION ==========
-        // Decide whether this child should be spawned completely clean (no
-        // systemhook injection, no jailbreak-related env modifications).
+        // NOTE: The primary blacklist check (isBlacklistedPath) is handled by
+        // roothide_launchd___posix_spawn_prehook (roothider.m) BEFORE this
+        // function is called. Blacklisted apps are spawned clean there and
+        // never reach this code path.
+        //
+        // This block ONLY handles ENV-VAR PROPAGATION: when a blacklisted
+        // app (or its parent) already set ROOTHIDE_CLEAN_MODE=1, its children
+        // inherit that env var. We detect it here and strip ALL jailbreak
+        // env vars to keep the clean-mode chain going.
         bool shouldHideForChild = false;
 
-        // FIX BUG #28: defer any roothide logic until the launchd XPC server is
-        // up (i.e. after early_boot_done / first xpcproxy spawn). Before that,
-        // the jbserver is not reachable, so blacklist queries would fail anyway.
-        //
-        // RootHide port: per-process init is handled by the Relaxin launchdhook
-        // roothider.m (roothide_launchd_preinit / postinit). We retain only the
-        // env-var propagation check + the dynamic blacklist lookup below.
         if (!gInEarlyBoot) {
-
-                // Check if current process is already in clean mode (propagate to children)
                 if (getenv(ROOTHIDE_CLEAN_MODE_ENV)) {
                         const char *parentCleanMode = getenv(ROOTHIDE_CLEAN_MODE_ENV);
                         if (parentCleanMode && strcmp(parentCleanMode, "1") == 0) {
-                                shouldHideForChild = true;
-                        }
-                }
-
-                // RootHide port (Dopamine2-roothide parity): DIRECT blacklist
-                // check — calls isBlacklistedPath(path) in-process. This
-                // function lives in roothider/blacklist.m compiled into
-                // launchdhook.dylib. It reads RootHideConfig.plist from disk
-                // and resolves path → Info.plist → CFBundleIdentifier → appconfig.
-                //
-                // SAFETY: We do NOT use jbclient_blacklist_check_path() here
-                // because that would send an XPC message to the jbserver,
-                // which also runs inside launchd — a synchronous self-XPC
-                // call inside a posix_spawn hook causes XPC deadlock on some
-                // iOS versions (launchd's XPC dispatch cannot re-enter).
-                // Direct call is both faster and crash-free.
-                if (!shouldHideForChild && path && strstr(path, ".app/")) {
-                        if (isBlacklistedPath(path)) {
                                 shouldHideForChild = true;
                         }
                 }
@@ -352,5 +328,15 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 
 void initSpawnHooks(void)
 {
-        litehook_hook_function(__posix_spawn, __posix_spawn_hook);
+        // Dopamine2-roothide parity: hook __posix_spawn → prehook which handles
+        // blacklist check DIRECTLY (isBlacklistedPath, no XPC) before falling
+        // through to __posix_spawn_hook for injection. This is the ONLY correct
+        // way: the prehook runs inside launchd, so it must use direct calls,
+        // not XPC (which would deadlock since the jbserver also runs in launchd).
+        extern int roothide_launchd___posix_spawn_prehook(pid_t *restrict pidp,
+                                                          const char *restrict path,
+                                                          struct _posix_spawn_args_desc *desc,
+                                                          char *const argv[restrict],
+                                                          char *const envp[restrict]);
+        litehook_hook_function(__posix_spawn, roothide_launchd___posix_spawn_prehook);
 }
