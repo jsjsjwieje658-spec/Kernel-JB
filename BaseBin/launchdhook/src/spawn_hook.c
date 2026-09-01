@@ -13,20 +13,10 @@
 #include "hookd_provider.h"
 // RootHide integration for selective injection
 #include <libjailbreak/libjailbreak.h>
-// FIX LỖI 1: query blacklist động
-#include <libjailbreak/jbclient_xpc.h>
+// isBlacklistedPath() — direct call inside launchd (no XPC round-trip)
+#include <libjailbreak/roothider.h>
 // Env buffer manipulation (strip jailbreak env vars from blacklisted apps)
 #include "../systemhook/src/envbuf.h"
-
-// RootHide port: blacklist process registry (implemented in
-// libjailbreak/src/roothider/blacklist.cpp, linked via libjailbreak.dylib).
-// Used to register clean-spawned blacklisted apps so pid/token-based
-// blacklist checks (isBlacklistedPid / isBlacklistedToken, used by the
-// launchd XPC filter and the lsd/SpringBoard hooks) match them.
-// Declared here directly to avoid pulling the full roothider/common.h
-// (which drags in declarations this TU does not provide).
-extern pid_t *allocBlacklistProcessId(void);
-extern void commitBlacklistProcessId(pid_t *pidp);
 
 extern char **environ;
 
@@ -254,36 +244,20 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
                         }
                 }
 
-                // FIX BLACKLIST INPUT BUG (root cause of banking apps detecting
-                // the jailbreak despite the RootHide app blacklist):
+                // RootHide port (Dopamine2-roothide parity): DIRECT blacklist
+                // check — calls isBlacklistedPath(path) in-process. This
+                // function lives in roothider/blacklist.m compiled into
+                // launchdhook.dylib. It reads RootHideConfig.plist from disk
+                // and resolves path → Info.plist → CFBundleIdentifier → appconfig.
                 //
-                // The old code extracted the app bundle DIRECTORY NAME from the
-                // spawn path (e.g. "iBank" from
-                // /var/containers/Bundle/Application/<UUID>/iBank.app/iBank) and
-                // passed it to jbclient_blacklist_check_bundle(). However the
-                // server side (isBlacklistedApp, blacklist.m:76) looks up by
-                // CFBundleIdentifier (e.g. "com.vietinbank.iBank") inside
-                // RootHideConfig.plist appconfig — so the lookup could never
-                // match and blacklisted apps still got tweak injection.
-                //
-                // Fix: pass the FULL executable path via jbclient_blacklist_check_path().
-                // The server side (isBlacklistedPath, blacklist.m:99) resolves
-                // path -> <Bundle>.app/Info.plist -> CFBundleIdentifier ->
-                // appconfig lookup, which is exactly how the official
-                // Dopamine2-roothide does it (roothider.m:378 calls
-                // isBlacklistedPath(path) in the launchd prehook).
-                //
-                // The strstr(".app/") pre-filter keeps system daemons (the vast
-                // majority of spawns) off the XPC path; only user app launches
-                // pay the ~1ms round-trip. Extensions of blacklisted apps are
-                // covered too: getAppBundlePathFromSpawnPath resolves
-                // /PlugIns/*.appex/ paths to the main bundle identifier.
-                //
-                // Fail-safe: if the jbserver is unreachable, the query returns
-                // false and the app is spawned normally (same behaviour as
-                // before) — this can never hang or break boot.
+                // SAFETY: We do NOT use jbclient_blacklist_check_path() here
+                // because that would send an XPC message to the jbserver,
+                // which also runs inside launchd — a synchronous self-XPC
+                // call inside a posix_spawn hook causes XPC deadlock on some
+                // iOS versions (launchd's XPC dispatch cannot re-enter).
+                // Direct call is both faster and crash-free.
                 if (!shouldHideForChild && path && strstr(path, ".app/")) {
-                        if (jbclient_blacklist_check_path(path)) {
+                        if (isBlacklistedPath(path)) {
                                 shouldHideForChild = true;
                         }
                 }
