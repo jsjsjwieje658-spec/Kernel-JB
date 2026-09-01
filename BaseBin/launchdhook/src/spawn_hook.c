@@ -13,10 +13,17 @@
 #include "hookd_provider.h"
 // RootHide integration for selective injection
 #include <libjailbreak/libjailbreak.h>
-// isBlacklistedPath() — direct call inside launchd (no XPC round-trip)
-#include <libjailbreak/roothider.h>
 // Env buffer manipulation (strip jailbreak env vars from blacklisted apps)
 #include "../systemhook/src/envbuf.h"
+
+// RootHide: isBlacklistedPath() — direct call inside launchd (no XPC round-trip).
+// Defined in roothider/blacklist.m, linked via libjailbreak.dylib.
+// Forward-declared here to avoid pulling roothider.h which conflicts with
+// launchdhook's own crashreporter.h (both define kCrashReporterStateActive).
+extern bool isBlacklistedPath(const char *path);
+// PID-based blacklist tracking (roothider/blacklist.cpp)
+extern pid_t *allocBlacklistProcessId(void);
+extern void commitBlacklistProcessId(pid_t *pidp);
 
 extern char **environ;
 
