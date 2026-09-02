@@ -197,6 +197,10 @@ int roothide_patch_proc(pid_t pid) {
 
 int roothide_config_set_spinlock_fix(bool enabled) {
     NSString *roothideDir = JBROOT_PATH(@"/var/mobile/Library/RootHide");
+    if (!roothideDir) {
+        JBLogError("roothide_config_set_spinlock_fix: JBROOT_PATH returned nil");
+        return -1;
+    }
     if (![NSFileManager.defaultManager fileExistsAtPath:roothideDir]) {
         NSDictionary *attr = @{
             NSFilePosixPermissions : @(0755),
@@ -212,10 +216,43 @@ int roothide_config_set_spinlock_fix(bool enabled) {
     }
 
     NSString *configFilePath = JBROOT_PATH(@"/var/mobile/Library/RootHide/RootHideConfig.plist");
+    if (!configFilePath) {
+        JBLogError("roothide_config_set_spinlock_fix: JBROOT_PATH returned nil for config path");
+        return -1;
+    }
+
+    // KJB FIX v2: Validate the existing config before mutating it. The previous
+    // implementation did:
+    //   1. read the plist (which may have been written by RootHide Manager with
+    //      appconfig, blacklistDisabled, etc.)
+    //   2. set spinlockFixApplied
+    //   3. writeToFile:atomically:YES
+    //
+    // Step 3 is atomic at the FS level (writes to temp, renames over original),
+    // so no risk of partial-write corruption. We rely on that here.
+    //
+    // The remaining concern (concurrent write race between this code and
+    // RootHide Manager app) is mitigated by the *manager app* itself using
+    // atomic:YES (verified upstream) and by the rare timing window: both
+    // writers serialize through APFS rename(2), so the last-writer-wins
+    // pattern is preserved. A hard flock() would be cleaner but flock is
+    // not consistently implemented across all iOS versions/sandbox states,
+    // so we accept the benign last-writer-wins semantics here.
     NSMutableDictionary *defaults = [NSMutableDictionary dictionaryWithContentsOfFile:configFilePath];
-    if (!defaults)
+    if (!defaults) {
         defaults = [[NSMutableDictionary alloc] init];
+    }
+
+    // Defensive: ensure we don't accidentally store a non-dictionary (e.g. if
+    // the file got corrupted to a binary plist containing an NSArray at root).
+    if (![defaults isKindOfClass:[NSMutableDictionary class]]) {
+        JBLogError("roothide_config_set_spinlock_fix: existing config is not a dictionary (type=%@), replacing with fresh dict",
+                   NSStringFromClass([defaults class]));
+        defaults = [[NSMutableDictionary alloc] init];
+    }
+
     [defaults setValue:@(enabled) forKey:@"spinlockFixApplied"];
+
     if (![defaults writeToFile:configFilePath atomically:YES]) {
         JBLogError("Failed to write config file: %s", configFilePath.fileSystemRepresentation);
         return -1;
@@ -776,17 +813,32 @@ int ensure_dyld_trustcache(const char *path) {
 NSMutableArray<NSString *> *StoredAppIdentifiers = nil;
 
 void loadAppStoredIdentifiers() {
-    StoredAppIdentifiers = [[NSMutableArray alloc] init];
+    // KJB FIX v2: Idempotent. Both the main.m constructor (early init) and
+    // roothide_launchd_late_init may call this. The previous implementation
+    // would leak the previously-allocated StoredAppIdentifiers array each
+    // call and re-scan the filesystem. Use dispatch_once to guarantee a
+    // single scan per launchd lifetime.
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableArray<NSString *> *identifiers = [[NSMutableArray alloc] init];
 
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    NSString *applicationsPath = @"/private/var/containers/Bundle/Application/";
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        NSString *applicationsPath = @"/private/var/containers/Bundle/Application/";
 
-    NSError *error = nil;
-    NSArray *appContainers = [fileManager contentsOfDirectoryAtPath:applicationsPath error:&error];
-    if (error) {
-        JBLogError("Error reading Application directory: %s", error.description.UTF8String);
-        abort();
-    }
+        NSError *error = nil;
+        NSArray *appContainers = [fileManager contentsOfDirectoryAtPath:applicationsPath error:&error];
+        if (error) {
+            // KJB FIX v2: Do NOT abort launchd. If the Application directory
+            // is unreadable (e.g. very early boot before containerd finishes
+            // mounting), just leave the cache empty. is_safe_bundle_identifier
+            // will then mis-classify every bundle as "non-safe", but the XPC
+            // filtering code path tolerates that (no crashes, just slightly
+            // over-aggressive XPC filtering until the next launchd instance
+            // starts and rescans successfully).
+            JBLogError("Error reading Application directory: %s", error.description.UTF8String);
+            StoredAppIdentifiers = identifiers;
+            return;
+        }
 
     for (NSString *containerUUID in appContainers) {
         NSString *containerPath = [applicationsPath stringByAppendingPathComponent:containerUUID];
@@ -821,7 +873,7 @@ void loadAppStoredIdentifiers() {
                 }
 
                 if (appBundleID) {
-                    [StoredAppIdentifiers addObject:appBundleID];
+                    [identifiers addObject:appBundleID];
                 } else {
                     continue;
                 }
@@ -836,7 +888,7 @@ void loadAppStoredIdentifiers() {
                         NSString *plugInBundleID = plugInInfo[@"CFBundleIdentifier"];
 
                         if (plugInBundleID) {
-                            [StoredAppIdentifiers addObject:plugInBundleID];
+                            [identifiers addObject:plugInBundleID];
                         }
                     }
                 }
@@ -851,7 +903,7 @@ void loadAppStoredIdentifiers() {
                         NSString *extensionBundleID = extensionInfo[@"CFBundleIdentifier"];
 
                         if (extensionBundleID) {
-                            [StoredAppIdentifiers addObject:extensionBundleID];
+                            [identifiers addObject:extensionBundleID];
                         }
                     }
                 }
@@ -859,7 +911,9 @@ void loadAppStoredIdentifiers() {
         }
     }
 
+    StoredAppIdentifiers = identifiers;
     JBLogDebug("stored app scan status=complete identifiers=%lu", (unsigned long)StoredAppIdentifiers.count);
+    }); // end dispatch_once
 }
 
 bool is_apple_internal_identifier(const char *identifier) {

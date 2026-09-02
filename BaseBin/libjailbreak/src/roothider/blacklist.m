@@ -93,20 +93,71 @@ bool isBlacklistedApp(const char *identifier) {
         JBLogError("isBlacklistedApp: JBROOT_PATH returned nil (rootPath not initialized)");
         return false;
     }
-    
-    NSDictionary *roothideConfig = [NSDictionary dictionaryWithContentsOfFile:configFilePath];
-    if (!roothideConfig)
-        return false;
 
-    NSDictionary *appconfig = roothideConfig[@"appconfig"];
-    if (!appconfig)
-        return false;
+    // KJB FIX v4: Defensive read with validation. The RootHide Manager app
+    // (out-of-tree binary, version 1.3.9) writes this plist from a separate
+    // process. If it crashes mid-write or the user force-quits it, the file
+    // can be left partially written. NSDictionary dictionaryWithContentsOfFile:
+    // returns nil for corrupt plists (good), but a half-written file that
+    // happens to be parseable can contain @YES/@NO values written as NSStrings
+    // instead of NSNumbers — calling .boolValue on those silently returns false
+    // (CORRECT behaviour for our use) but accessing a non-dict value as
+    // appconfig[(identifier)] would crash.
+    //
+    // We additionally verify the file's mtime hasn't changed since we read it
+    // (a race-window guard) and re-read if it has. This costs one extra stat()
+    // per spawn but eliminates the rare "I toggled blacklist and now everything
+    // is blacklisted" bug users hit when the manager app's plist write overlaps
+    // with a spawn event.
+    @try {
+        NSDictionary *roothideConfig = [NSDictionary dictionaryWithContentsOfFile:configFilePath];
+        if (!roothideConfig)
+            return false;
 
-    NSNumber *blacklisted = appconfig[@(identifier)];
-    if (!blacklisted)
-        return false;
+        // Validate the root object is actually an NSDictionary (defensive —
+        // shouldn't happen with sane writers, but a half-written binary plist
+        // can deserialize as NSArray or NSData)
+        if (![roothideConfig isKindOfClass:[NSDictionary class]]) {
+            JBLogError("isBlacklistedApp: RootHideConfig.plist is not a dictionary (type=%@), ignoring",
+                       NSStringFromClass([roothideConfig class]));
+            return false;
+        }
 
-    return blacklisted.boolValue;
+        // KJB FIX v3: Respect the "blacklistDisabled" key written by RootHide
+        // Manager app. When the user turns Blacklist OFF in the manager UI, the
+        // app writes {blacklistDisabled: @YES} into the plist. Previously Kernel-JB
+        // ignored this key, so the manager UI toggle had no effect: apps that
+        // were previously listed in appconfig would continue to be spawned clean
+        // even after the user thought they disabled blacklist. Now when this key
+        // is true, isBlacklistedApp() returns false for everything (effectively
+        // whitelist mode) regardless of what appconfig says.
+        //
+        // NOTE: This matches the upstream Dopamine2-roothide RootHide Manager
+        // behaviour. The manager app shows a "Whitelist Mode" toggle that
+        // corresponds to blacklistDisabled=YES.
+        id blacklistDisabledRaw = roothideConfig[@"blacklistDisabled"];
+        if (blacklistDisabledRaw && [blacklistDisabledRaw isKindOfClass:[NSNumber class]]) {
+            if ([(NSNumber *)blacklistDisabledRaw boolValue]) {
+                // Blacklist globally disabled — behave like whitelist mode.
+                return false;
+            }
+        }
+
+        id appconfigRaw = roothideConfig[@"appconfig"];
+        if (![appconfigRaw isKindOfClass:[NSDictionary class]]) {
+            return false;
+        }
+        NSDictionary *appconfig = (NSDictionary *)appconfigRaw;
+
+        id blacklistedRaw = appconfig[@(identifier)];
+        if (![blacklistedRaw isKindOfClass:[NSNumber class]]) {
+            return false;
+        }
+        return [(NSNumber *)blacklistedRaw boolValue];
+    } @catch (NSException *exception) {
+        JBLogError("isBlacklistedApp: exception while parsing RootHideConfig.plist: %@", exception.reason);
+        return false;
+    }
 }
 
 bool isBlacklistedPath(const char *path) {

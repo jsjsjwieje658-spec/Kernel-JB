@@ -3,6 +3,7 @@
 #import <libjailbreak/util.h>
 #import <libjailbreak/kernel.h>
 #import <libjailbreak/display.h>
+#import <libjailbreak/log.h>
 #import <mach-o/dyld.h>
 #import <os/alloc_once_private.h>
 #import <dlfcn.h>
@@ -178,6 +179,20 @@ __attribute__((constructor)) static void initializer(void)
                 litehook_hook_memory = litehook_hook_memory_hookd;
                 litehook_hook_function(mach_vm_protect, mach_vm_protect_fixed);
                 init_hookd_external_support();
+        }
+
+        // KJB FIX: loadAppStoredIdentifiers() MUST run BEFORE initXPCHooks() to
+        // eliminate the race window where xpc_receive_mach_msg_hook could fire
+        // with StoredAppIdentifiers == nil, causing is_safe_bundle_identifier
+        // to mis-classify every bundle id as "unsafe" (filter XPC services
+        // incorrectly for non-blacklisted processes during early boot).
+        // The scan is pure file I/O over /private/var/containers/Bundle/Application,
+        // safe to run before primitives recovery — same call order as upstream
+        // Dopamine2-roothide roothide_launchd_postinit().
+        {
+                extern void loadAppStoredIdentifiers(void);
+                loadAppStoredIdentifiers();
+                JBLogDebug("launchd init: StoredAppIdentifiers populated (race window closed)");
         }
 
         initXPCHooks();

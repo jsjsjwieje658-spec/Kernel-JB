@@ -58,20 +58,17 @@ static bool _isBlacklistedProcess(pid_t pid, int pidversion) {
 
     stateReadLock();
 
-    // KJB FIX: Copy pid values to local variables while holding the lock
-    // to avoid race condition where commitBlacklistProcessId frees the pointer
-    // after we release the lock. The original code dereferenced *(*it) while
-    // holding the read lock, but the pointer could be freed by a writer even
-    // though the write is blocked by this read lock (reader-writer lock semantics).
+    // KJB FIX v2: No syscall inside the lock. Copy pid values to local
+    // variables while holding the lock to avoid use-after-free if a writer
+    // frees the pointer after we release. We do NOT call proc_get_pidversion
+    // here — the caller passes pidversion; for the uncached set we treat any
+    // matching pid as blacklisted (pid reuse is rare in the millisecond-scale
+    // spawn window, and commitBlacklistProcessId will move the pid into the
+    // version-keyed cache where reuse is properly handled).
     for (auto it = uncachedBlacklistedProcesses->begin(); it != uncachedBlacklistedProcesses->end(); ++it) {
         pid_t *pidp = *it;
         if (pidp && *pidp > 0 && *pidp == pid) {
-            // Capture the uncached pid value before releasing lock
-            pid_t uncachedPid = *pidp;
-            int uncachedPidversion = proc_get_pidversion(uncachedPid);
-            if (uncachedPidversion > 0 && uncachedPidversion == pidversion) {
-                blacklisted = true;
-            }
+            blacklisted = true;
             break;
         }
     }
@@ -120,14 +117,24 @@ extern "C" pid_t *allocBlacklistProcessId() {
 extern "C" void commitBlacklistProcessId(pid_t *pidp) {
     initBlacklistState();
 
+    pid_t pid = *pidp;
+
+    // KJB FIX v2: Resolve pidversion BEFORE acquiring the write lock so we
+    // don't hold a lock across a syscall. The previous implementation
+    // could cause priority inversion when many blacklisted apps spawn
+    // simultaneously and the lock holder is preempted by a higher-priority
+    // thread needing the same lock for a syscall. proc_get_pidversion is
+    // also a non-trivial syscall (sysctl traversal of allproc); calling it
+    // under the lock could block writers for hundreds of microseconds.
+    int pidversion = 0;
+    if (pid > 0) {
+        pidversion = proc_get_pidversion(pid);
+    }
+
     stateWriteLock();
 
-    pid_t pid = *pidp;
-    if (pid > 0) {
-        int pidversion = proc_get_pidversion(pid);
-        if (pidversion > 0) {
-            (*blacklistedProcessesState)[pid] = pidversion;
-        }
+    if (pid > 0 && pidversion > 0) {
+        (*blacklistedProcessesState)[pid] = pidversion;
     }
 
     uncachedBlacklistedProcesses->erase(pidp);
