@@ -204,6 +204,14 @@ mach_port_t jailbreakdClientPort() {
     mach_port_t port = MACH_PORT_NULL;
 
     if (getpid() == 1) {
+        if (!MACH_PORT_VALID(gJailbreakdPort)) {
+            // gJailbreakdPort was never set by registerServerPort() / initJailbreakd().
+            // Return NULL gracefully instead of falling through to reactiveJailbreakdPort()
+            // which calls abort() in release builds.  This happens when the jbserver
+            // inside launchd answers a jbclient_jailbreakd_lookup() XPC from an app
+            // (e.g. RootHide Manager) before or instead of spawning a standalone jailbreakd.
+            return MACH_PORT_NULL;
+        }
         kern_return_t kr = mach_port_mod_refs(mach_task_self(), gJailbreakdPort, MACH_PORT_RIGHT_SEND, 1);
         if (kr == KERN_SUCCESS) {
             port = gJailbreakdPort;
