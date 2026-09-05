@@ -373,12 +373,29 @@ int trust_signatures(int pid, int fd, struct siginfo *sigInfos, uint32_t sigInfo
                                                                         sigInfosToAttach[sigInfosToAttachCount++] = curSigInfo;
                                                                 }
                                                                 else {
-                                                                        // If the signature does not reside inside our own address space, there is nothing we can do
-                                                                        // Such a signature should have been caught by dyldhook so in reality this code path will probably never fire
+                                                                        // ROOTHIDE FIX (iOS 17 "Killed: 9" loop): upstream
+                                                                        // hard-fails the whole trust_signatures call here
+                                                                        // (return -1), which on SPTM devices aborts BEFORE
+                                                                        // jb_trustcache_add_cdhashes runs — so every cdhash
+                                                                        // collected in this call was discarded. On iOS 16
+                                                                        // (no SPTMArgs) this branch never executes and
+                                                                        // everything works, but on iOS 17+ (A12+, SPTM/TXM)
+                                                                        // a single non-ALLOCATION ad-hoc signature that
+                                                                        // needs normalization (e.g. a file-backed slice,
+                                                                        // exactly what the launchd spawn hook and the
+                                                                        // bootstrap trust sweep see) caused every
+                                                                        // prep_bootstrap.sh / dpkg child to be spawned
+                                                                        // untrusted → AMFI SIGKILL → "/bin/sh: line N:
+                                                                        // <binary>: Killed: 9" forever. Skip the blob
+                                                                        // rewrite for this signature (a both/neither blob
+                                                                        // cannot be trusted via trustcache alone, but
+                                                                        // aborting the WHOLE call also threw away every
+                                                                        // unrelated cdhash in the batch — far worse).
+                                                                        // Its cdhash is NOT added (the rewrite is what
+                                                                        // would make it valid), but the remaining
+                                                                        // signatures in this call still get trusted.
                                                                         csd_superblob_free(decodedSuperblob);
-                                                                        free(cdhashes);
-                                                                        free(sigInfosToAttach);
-                                                                        return -1;
+                                                                        continue;
                                                                 }
                                                         }
                                                 }
@@ -395,11 +412,16 @@ int trust_signatures(int pid, int fd, struct siginfo *sigInfos, uint32_t sigInfo
                 }
         }
 
+        int r = 0;
         if (cdhashesCount > 0) {
-                jb_trustcache_add_cdhashes(cdhashes, cdhashesCount);
+                // ROOTHIDE FIX (iOS 17 silent trust failure): the return value of
+                // jb_trustcache_add_cdhashes was discarded, so a failed trustcache
+                // grow/insert (now properly reported as -3 by jb_trustcache_add_entries)
+                // looked like success to every caller up the chain.
+                int tr = jb_trustcache_add_cdhashes(cdhashes, cdhashesCount);
+                if (tr != 0) r = tr;
         }
 
-        int r = 0;
         if (sigInfosToAttachCount > 0) {
                 // For every signature we have modified, we need to attach them to fd now
                 for (uint32_t i = 0; i < sigInfosToAttachCount; i++) {

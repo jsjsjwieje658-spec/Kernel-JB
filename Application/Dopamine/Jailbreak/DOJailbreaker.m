@@ -305,6 +305,13 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
     kwrite32(ucred + koffsetof(ucred, groups), 0);
     
     // Add P_SUGID
+    // NOTE: kept byte-identical to upstream Dopamine 2.x/3.x. The condition
+    // looks inverted (`!= 0` + `&=`), so in practice this never sets the flag;
+    // upstream ships it that way and works, and setting P_SUGID for real would
+    // change exec-time privilege clearing for every child we spawn. The
+    // persona-spawn EPERM seen on 16.7/17.5 is worked around instead by doing
+    // the privileged file operations in-process (see rmrf_in_process in
+    // DOBootstrapper.m) rather than through exec_cmd_root.
     uint32_t flag = kread32(proc + koffsetof(proc, flag));
     if ((flag & P_SUGID) != 0) {
         flag &= P_SUGID;
@@ -390,8 +397,25 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
             developer_mode_storage = ksymbol_txm(txm_developer_mode_storage);
         }
 
+        // ROOTHIDE FIX (iOS 17 "Developer Mode Required" despite being enabled):
+        // on SPTM/TXM devices this function used to be fully silent — if the TXM
+        // symbol failed to resolve or the write did not stick, TXM kept reporting
+        // developer mode as OFF and dev-cert signed apps were refused with the
+        // "You must enable Developer Mode" alert even though Settings showed it
+        // as enabled. Log every step so a failed resolution/write is visible.
         if (developer_mode_storage) {
             kwrite8(developer_mode_storage, 1);
+            uint8_t verify = 0;
+            if (kreadbuf(developer_mode_storage, &verify, sizeof(verify)) == 0 && verify != 1) {
+                NSLog(@"[RootHide] ensureDevModeEnabled: write did NOT stick (storage=%llx read back %u) — dev-cert apps will be refused",
+                      (unsigned long long)developer_mode_storage, verify);
+            }
+        }
+        else {
+            NSLog(@"[RootHide] ensureDevModeEnabled: no storage symbol resolved "
+                  @"(developer_mode_enabled=%llx, txm_developer_mode_storage=%llx) — dev-cert apps may be refused",
+                  (unsigned long long)ksymbol(developer_mode_enabled),
+                  (unsigned long long)ksymbol_txm(txm_developer_mode_storage));
         }
     }
     return nil;

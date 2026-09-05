@@ -72,6 +72,15 @@ int trustcache_list_insert(uint64_t tcToInsert)
 			lastTC = tcKaddr;
 		});
 
+		// ROOTHIDE FIX (iOS 17 silent trust failure): when the list start cannot
+		// be read (txm_trustcache_root unresolved, or the +0x20 root pointer is
+		// 0), lastTC stays 0 and the kwrite64 below targets kernel address 0 —
+		// silently leaving the freshly grown trust cache orphaned (never visible
+		// to TXM/AMFI) while every caller still saw success.
+		if (lastTC == 0) {
+			return -2;
+		}
+
 		if (koffsetof(trustcache, prevptr)) {
 			kwrite64(tcToInsert + koffsetof(trustcache, prevptr), lastTC);
 		}
@@ -182,7 +191,15 @@ uint64_t _jb_trustcache_grow(void)
 		*(uint64_t *)(jbTc->trustcache + koffsetof(trustcache, type)) = 0x5;
 	}
 	kwritebuf(jbTcKern, jbTc, sizeof(*jbTc));
-	trustcache_list_insert(jbTcKern);
+	int insertR = trustcache_list_insert(jbTcKern);
+	if (insertR != 0) {
+		// ROOTHIDE FIX: propagate list-insert failure (e.g. SPTM list start
+		// unreadable) so jb_trustcache_add_entries does not treat an orphaned
+		// trust cache as a successful grow. Returning 0 is this function's
+		// failure convention; free the allocation so retries don't leak.
+		kfree(jbTcKern, 0x4000);
+		return 0;
+	}
 	return jbTcKern;
 }
 
@@ -202,6 +219,15 @@ int jb_trustcache_add_entries(struct trustcache_entry_v1 *entries, uint32_t entr
 		});
 		if (freeJbTcKaddr == 0) {
 			freeJbTcKaddr = _jb_trustcache_grow();
+			if (freeJbTcKaddr == 0) {
+				// ROOTHIDE FIX (iOS 17 silent trust failure): previously a failed
+				// grow fell through to kreadbuf/kwritebuf on kernel address 0 and
+				// the function still returned 0, so every caller believed the
+				// cdhashes were trusted. On SPTM/TXM devices (iOS 17+) a failed
+				// grow therefore produced the "Killed: 9" AMFI loop with no
+				// visible error anywhere.
+				return -3;
+			}
 		}
 
 		uint32_t entryCountToInsert = JB_TRUSTCACHE_ENTRY_COUNT - freeJbTcCurrentLength;
@@ -363,7 +389,14 @@ int trustcache_file_upload(trustcache_file_v1 *tc)
 		kwrite64(tcKaddr + koffsetof(trustcache, type), 0x5);
 	}
 
-	trustcache_list_insert(tcKaddr);
+	// ROOTHIDE FIX (iOS 17 silent trust failure): the insert result was ignored
+	// and this function always returned 0, so a basebin trustcache that never
+	// made it onto the TXM list looked uploaded to the caller.
+	int insertR = trustcache_list_insert(tcKaddr);
+	if (insertR != 0) {
+		kfree(tcKaddr, tcSize);
+		return -4;
+	}
 	return 0;
 }
 

@@ -18,6 +18,10 @@
 #import <strings.h>
 #import <errno.h>
 #import <string.h>
+#import <unistd.h>
+#import <dirent.h>
+#import <fcntl.h>
+#import <stdlib.h>
 #import "NSString+Version.h"
 
 // ROOTHIDE FIX LỖI 1 v3: Không dùng direct reboot3 từ app nữa (thiếu entitlement).
@@ -2013,16 +2017,38 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             NSDictionary *attrs = [fm attributesOfItemAtPath:url.path error:nil];
             if (attrs[NSFileType] == NSFileTypeSymbolicLink) continue;
 
-            int r = jbclient_trust_file_by_path(url.path.fileSystemRepresentation);
+            // ROOTHIDE FIX (iOS 17 dev-cert apps "Developer Mode Required"):
+            // the flat jbclient_trust_file_by_path only registers the file's own
+            // ad-hoc cdhash and does NOT run the roothide randomized-cdhash
+            // normalization, so binaries signed with a developer certificate
+            // (TeamID present) kept failing TXM validation at spawn time even
+            // though their cdhash was in the trustcache. The recurse path (same
+            // one systemhook uses for spawned executables) collects the
+            // executable AND its dependent dylibs and normalizes each slice via
+            // ensure_randomized_cdhash_for_slice. Fall back to the flat trust
+            // when the recurse call fails (e.g. launchd not reachable yet).
+            int r = jbclient_trust_executable_recurse(url.path.fileSystemRepresentation, NULL);
+            if (r != 0) {
+                r = jbclient_trust_file_by_path(url.path.fileSystemRepresentation);
+            }
             if (r == 0) {
                 trusted++;
             } else {
                 skipped++;
+                // ROOTHIDE FIX (iOS 17 "Killed: 9"): per-file trust failures were
+                // previously swallowed silently, making AMFI SIGKILL loops
+                // undiagnosable. Log every failure path + result code.
+                NSLog(@"[RootHide] trust-cache FAILED (%d): %@", r, url.path);
             }
         }
     }
 
     NSLog(@"[RootHide] trust-cache: %lu binaries trusted, %lu skipped", (unsigned long)trusted, (unsigned long)skipped);
+    if (trusted == 0) {
+        // Loud failure: if nothing got trusted, every bootstrap child will be
+        // SIGKILLed by AMFI ("Killed: 9" loop). Surface it in the app log.
+        NSLog(@"[RootHide] trust-cache WARNING: ZERO binaries trusted — spawned bootstrap binaries will be killed by AMFI");
+    }
 }
 
 // FIX LỖI 1 + 2: Tách install RootHide Manager thành method riêng để dễ retry
@@ -2057,8 +2083,14 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             [self trustCacheAppBinariesAfterInstall:@"RootHide"];
             // Vẫn apply chmod/chown (có thể bị reset)
             if (roothideAppBinaryExists) {
-                exec_cmd_root("/usr/sbin/chown", "root:wheel", roothideAppBinaryPath.fileSystemRepresentation, NULL);
-                exec_cmd_root("/bin/chmod", "6755", roothideAppBinaryPath.fileSystemRepresentation, NULL);
+                // Syscalls directly — exec_cmd_root spawns /bin/chown + /bin/chmod
+                // via persona override, which fails with EPERM on 16.7/17.5.
+                if (chown(roothideAppBinaryPath.fileSystemRepresentation, 0, 0) != 0) {
+                    NSLog(@"[RootHide] chown RootHide binary failed (errno %d)", errno);
+                }
+                if (chmod(roothideAppBinaryPath.fileSystemRepresentation, 06755) != 0) {
+                    NSLog(@"[RootHide] chmod 6755 RootHide binary failed (errno %d)", errno);
+                }
             }
             return;
         }
@@ -2122,8 +2154,12 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
         // Apply postinst-equivalent: chown 0:0 + chmod +s (setuid root)
         // RootHide Manager cần setuid root để gọi jbctl/mount/trust-cache.
-        exec_cmd_root("/usr/sbin/chown", "root:wheel", roothideAppBinaryPath.fileSystemRepresentation, NULL);
-        exec_cmd_root("/bin/chmod", "6755", roothideAppBinaryPath.fileSystemRepresentation, NULL);
+        if (chown(roothideAppBinaryPath.fileSystemRepresentation, 0, 0) != 0) {
+            NSLog(@"[RootHide] chown RootHide binary failed (errno %d)", errno);
+        }
+        if (chmod(roothideAppBinaryPath.fileSystemRepresentation, 06755) != 0) {
+            NSLog(@"[RootHide] chmod 6755 RootHide binary failed (errno %d)", errno);
+        }
         NSLog(@"[RootHide] Applied postinst-equivalent: chown root:wheel + chmod 6755 on RootHide binary");
 
         // Trust-cache lần cuối (defensive — có thể fail lần đầu do binary
@@ -2327,6 +2363,109 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     return nil;
 }
 
+// --- in-process recursive delete --------------------------------------------
+// deleteBootstrap must NOT spawn /bin/rm. Two independent reasons, both proven
+// on device:
+//   1. exec_cmd_root() uses posix_spawnattr_set_persona_np(OVERRIDE, uid 0).
+//      Apple neutered persona overrides for non-launchd callers (iOS 17.6+ per
+//      the comment in systemhook/src/common/common.c:263), and in practice the
+//      spawn fails with EPERM on 16.7.16 AND 17.5.1 in this fork — the user
+//      logs show "locateJailbreakRoot: /bin/ls spawn failed: 1" followed by
+//      "deleteBootstrap: rm jbroot failed (1)". Nothing was ever deleted.
+//   2. Even when a spawn does succeed, the child inherits the patched dyld and
+//      can be SIGKILLed by AMFI before it unlinks anything.
+// The Dopamine app is already uid 0 and unsandboxed at this point (runAsRoot +
+// runUnsandboxed in DOEnvironmentManager.deleteBootstrap, and the same block
+// successfully lists /var/containers/Bundle/Application via NSFileManager), so
+// plain unlinkat/rmdir syscalls are all we need.
+//
+// Returns 0 on success, or the first non-zero errno encountered. Missing paths
+// are not an error (ENOENT => 0) so the sweep is idempotent.
+static int rmrf_in_process(const char *path)
+{
+    struct stat sb;
+    if (lstat(path, &sb) != 0) {
+        return (errno == ENOENT) ? 0 : errno;
+    }
+
+    if (!S_ISDIR(sb.st_mode)) {
+        // Regular file, symlink, socket, fifo, device node
+        if (unlink(path) != 0 && errno != ENOENT) return errno;
+        return 0;
+    }
+
+    int dirfd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dirfd < 0) {
+        // Not openable — try removing it as a plain entry (covers races and
+        // directories we cannot descend into).
+        if (rmdir(path) == 0 || errno == ENOENT) return 0;
+        return errno;
+    }
+
+    int firstErr = 0;
+    DIR *d = fdopendir(dirfd);
+    if (!d) {
+        close(dirfd);
+        return errno;
+    }
+
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+
+        char childPath[PATH_MAX];
+        snprintf(childPath, sizeof(childPath), "%s/%s", path, de->d_name);
+
+        struct stat csb;
+        if (lstat(childPath, &csb) != 0) {
+            if (errno == ENOENT) continue;
+            if (firstErr == 0) firstErr = errno;
+            continue;
+        }
+
+        if (S_ISDIR(csb.st_mode)) {
+            int rr = rmrf_in_process(childPath);
+            if (rr != 0 && firstErr == 0) firstErr = rr;
+        }
+        else {
+            if (unlink(childPath) != 0 && errno != ENOENT && firstErr == 0) {
+                firstErr = errno;
+            }
+        }
+    }
+    closedir(d); // also closes dirfd
+
+    if (rmdir(path) != 0 && errno != ENOENT && firstErr == 0) {
+        firstErr = errno;
+    }
+    return firstErr;
+}
+
+static int rmrf_in_process_obj(NSString *path)
+{
+    return rmrf_in_process(path.fileSystemRepresentation);
+}
+
+// True when `path` itself is a symbolic link. NSFileManager's
+// attributesOfItemAtPath: FOLLOWS symlinks, so it reports the target's type for
+// a live link and fails outright for a dangling one — which means an
+// "NSFileType == NSFileTypeSymbolicLink" test never matches anything. lstat is
+// the only correct way to detect a link, and dangling links are exactly the
+// traces this sweep exists to remove.
+static BOOL is_symlink_path(NSString *path)
+{
+    struct stat sb;
+    if (lstat(path.fileSystemRepresentation, &sb) != 0) return NO;
+    return S_ISLNK(sb.st_mode);
+}
+
+static void remove_symlink_path(NSString *path)
+{
+    if (unlink(path.fileSystemRepresentation) == 0) {
+        NSLog(@"[RootHide] deleteBootstrap: removed symlink %@", path);
+    }
+}
+
 - (NSError *)deleteBootstrap
 {
     // =========================================================================
@@ -2353,9 +2492,11 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     //     (kernel state — dies with the next userspace reboot / full reboot,
     //     nothing to remove on disk here)
     //
-    // Every deletion goes through /bin/rm -rf via exec_cmd_root and the exit
-    // status is checked; failures are reported to the caller instead of being
-    // silently swallowed (the old code returned nil no matter what happened).
+    // Deletions are performed in-process with plain syscalls (see
+    // rmrf_in_process above) — spawning /bin/rm fails with EPERM because the
+    // persona override is rejected. Every failure is recorded and reported to
+    // the caller instead of being silently swallowed (the old code returned nil
+    // no matter what happened).
     // =========================================================================
     NSError *error = [self ensurePrivatePrebootIsWritable];
     if (error) return error;
@@ -2380,10 +2521,10 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     ];
     for (NSString *leftover in varTmpLeftovers) {
         if ([[NSFileManager defaultManager] fileExistsAtPath:leftover]) {
-            int r = exec_cmd_root("/bin/rm", "-rf", leftover.fileSystemRepresentation, NULL);
+            int r = rmrf_in_process_obj(leftover);
             if (r != 0) {
-                NSLog(@"[RootHide] deleteBootstrap: rm %@ failed (%d)", leftover, r);
-                [errors addObject:[NSString stringWithFormat:@"rm %@", leftover]];
+                NSLog(@"[RootHide] deleteBootstrap: rm %@ failed (errno %d)", leftover, r);
+                [errors addObject:[NSString stringWithFormat:@"rm %@ (%d)", leftover, r]];
             } else {
                 NSLog(@"[RootHide] deleteBootstrap: removed %@", leftover);
             }
@@ -2391,7 +2532,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     }
 
     // 2. Remove legacy entry-point symlinks (other jailbreaks may have left them)
-    exec_cmd_root("/bin/rm", "-rf", "/var/jb", NULL);
+    rmrf_in_process_obj(@"/var/jb");
 
     // 3. Remove xinaA15-style leftover symlinks in /var (same list as
     //    prepareBootstrap uses for a fresh install; only removes them when
@@ -2411,28 +2552,29 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     ];
     NSFileManager *fm = [NSFileManager defaultManager];
     for (NSString *leftover in varSymlinkLeftovers) {
-        NSDictionary *attrs = [fm attributesOfItemAtPath:leftover error:nil];
-        if (attrs && attrs[NSFileType] == NSFileTypeSymbolicLink) {
+        if (is_symlink_path(leftover)) {
             // Only remove when the symlink target is gone or points into the
-            // (now deleted) jbroot — never delete a link to a live directory.
-            NSString *dest = [fm destinationOfSymbolicLinkAtPath:leftover error:nil];
-            if (!dest) continue;
-            BOOL targetMissing = (![fm fileExistsAtPath:leftover]); // symlink whose target is gone
+            // jbroot — never delete a link to a live system directory.
+            char linkBuf[PATH_MAX] = { 0 };
+            ssize_t linkLen = readlink(leftover.fileSystemRepresentation, linkBuf, sizeof(linkBuf) - 1);
+            if (linkLen <= 0) continue;
+            NSString *dest = [NSString stringWithUTF8String:linkBuf] ?: @"";
+            char resolvedBuf[PATH_MAX] = { 0 };
+            BOOL targetMissing = (realpath(leftover.fileSystemRepresentation, resolvedBuf) == NULL);
             BOOL targetInJbroot = [dest hasPrefix:@"/var/jb"] || [dest hasPrefix:jbrootPath] ||
                                   [dest containsString:@".jbroot-"];
             if (targetMissing || targetInJbroot) {
-                [fm removeItemAtPath:leftover error:nil];
-                NSLog(@"[RootHide] deleteBootstrap: removed leftover symlink %@", leftover);
+                remove_symlink_path(leftover);
             }
         }
     }
 
     // 4. Remove the jbroot directory itself (primary)
     NSLog(@"[RootHide] deleteBootstrap: removing %@", jbrootPath);
-    int rmJbroot = exec_cmd_root("/bin/rm", "-rf", jbrootPath.fileSystemRepresentation, NULL);
+    int rmJbroot = rmrf_in_process_obj(jbrootPath);
     if (rmJbroot != 0) {
-        NSLog(@"[RootHide] deleteBootstrap: rm jbroot failed (%d)", rmJbroot);
-        [errors addObject:[NSString stringWithFormat:@"rm %@", jbrootPath]];
+        NSLog(@"[RootHide] deleteBootstrap: rm jbroot failed (errno %d)", rmJbroot);
+        [errors addObject:[NSString stringWithFormat:@"rm %@ (%d)", jbrootPath, rmJbroot]];
     } else {
         NSLog(@"[RootHide] deleteBootstrap: removed jbroot at %@", jbrootPath);
     }
@@ -2444,10 +2586,10 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", jbrootName],
     ];
     for (NSString *secondaryPath in secondaryPaths) {
-        int r = exec_cmd_root("/bin/rm", "-rf", secondaryPath.fileSystemRepresentation, NULL);
+        int r = rmrf_in_process_obj(secondaryPath);
         if (r != 0) {
-            NSLog(@"[RootHide] deleteBootstrap: rm %@ failed (%d)", secondaryPath, r);
-            [errors addObject:[NSString stringWithFormat:@"rm %@", secondaryPath]];
+            NSLog(@"[RootHide] deleteBootstrap: rm %@ failed (errno %d)", secondaryPath, r);
+            [errors addObject:[NSString stringWithFormat:@"rm %@ (%d)", secondaryPath, r]];
         } else {
             NSLog(@"[RootHide] deleteBootstrap: removed secondary %@", secondaryPath);
         }
@@ -2473,18 +2615,36 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             if ([entry hasPrefix:@".jbroot-"]) continue;
             // (b) a .jbroot symlink directly inside the container directory
             NSString *directSymlink = [entryPath stringByAppendingPathComponent:@".jbroot"];
-            NSDictionary *attrs = [fm attributesOfItemAtPath:directSymlink error:nil];
-            if (attrs && attrs[NSFileType] == NSFileTypeSymbolicLink) {
-                [fm removeItemAtPath:directSymlink error:nil];
-                NSLog(@"[RootHide] deleteBootstrap: removed .jbroot symlink in %@", entryPath);
+            if (is_symlink_path(directSymlink)) {
+                remove_symlink_path(directSymlink);
             }
-            // (c) .app bundles: .jbroot inside the bundle
-            if ([entryPath hasSuffix:@".app"]) {
+            // (c) .app bundles inside a UUID container dir:
+            //     <container>/<UUID>/Payload/Foo.app/.jbroot and
+            //     <container>/<UUID>/Foo.app/.jbroot ( TrollStore layout)
+            if ([entry hasSuffix:@".app"]) {
                 NSString *bundleSymlink = [entryPath stringByAppendingPathComponent:@".jbroot"];
-                NSDictionary *bundleAttrs = [fm attributesOfItemAtPath:bundleSymlink error:nil];
-                if (bundleAttrs && bundleAttrs[NSFileType] == NSFileTypeSymbolicLink) {
-                    [fm removeItemAtPath:bundleSymlink error:nil];
-                    NSLog(@"[RootHide] deleteBootstrap: removed .jbroot symlink in %@", bundleSymlink);
+                if (is_symlink_path(bundleSymlink)) {
+                    remove_symlink_path(bundleSymlink);
+                }
+            }
+            else {
+                // Enumerate one level into the UUID directory for .app bundles
+                NSArray<NSString *> *innerEntries = [fm contentsOfDirectoryAtPath:entryPath error:nil];
+                for (NSString *inner in innerEntries ?: @[]) {
+                    NSString *innerPath = [entryPath stringByAppendingPathComponent:inner];
+                    if ([inner hasSuffix:@".app"]) {
+                        NSString *bundleSymlink = [innerPath stringByAppendingPathComponent:@".jbroot"];
+                        if (is_symlink_path(bundleSymlink)) remove_symlink_path(bundleSymlink);
+                        continue;
+                    }
+                    if (![inner isEqual:@"Payload"]) continue;
+                    NSString *payloadSymlink = [innerPath stringByAppendingPathComponent:@".jbroot"];
+                    if (is_symlink_path(payloadSymlink)) remove_symlink_path(payloadSymlink);
+                    for (NSString *payloadApp in [fm contentsOfDirectoryAtPath:innerPath error:nil] ?: @[]) {
+                        if (![payloadApp hasSuffix:@".app"]) continue;
+                        NSString *appSymlink = [[innerPath stringByAppendingPathComponent:payloadApp] stringByAppendingPathComponent:@".jbroot"];
+                        if (is_symlink_path(appSymlink)) remove_symlink_path(appSymlink);
+                    }
                 }
             }
         }

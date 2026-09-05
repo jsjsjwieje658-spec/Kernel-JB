@@ -214,6 +214,16 @@
 
     [self.logRecord addObject:log];
 
+    // ROOTHIDE FIX (app crash after "Killed: 9" spam): during an AMFI kill loop
+    // thousands of identical lines per second flood stderr, and this unbounded
+    // NSMutableArray grows until the app gets jetsammed. Cap the record; the
+    // oldest lines are dropped but the on-screen log view still renders the
+    // incoming tail in real time.
+    static const NSUInteger kLogRecordMaxLines = 2000;
+    if (self.logRecord.count > kLogRecordMaxLines) {
+        [self.logRecord removeObjectsInRange:NSMakeRange(0, self.logRecord.count - kLogRecordMaxLines)];
+    }
+
     BOOL isDebug = self.logView.class == DODebugLogView.class;
     if (debug && !isDebug) {
         [_logLock unlock];

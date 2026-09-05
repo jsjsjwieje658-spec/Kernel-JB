@@ -13,6 +13,8 @@
 #import <sys/utsname.h>
 #import <sys/stat.h>
 #import <unistd.h>
+#import <dirent.h>
+#import <errno.h>
 #import <mach-o/dyld.h>
 #import <libgrabkernel2/libgrabkernel2.h>
 #import <libjailbreak/info.h>
@@ -135,51 +137,45 @@ static BOOL checkRootHideJBRAND(NSString *str)
         NSString *jbrootSearchPath = @"/var/containers/Bundle/Application";
         NSString *randomizedJailbreakPath;
 
-        // AMFI blocks NSFileManager from listing /var/containers/Bundle/Application/
-        // even when running as root. We MUST use exec_cmd_root to spawn /bin/ls
-        // with persona override — the child process gets a fresh AMFI context.
-        NSLog(@"[RootHide] locateJailbreakRoot: listing %@ via exec_cmd_root", jbrootSearchPath);
+        // ROOTHIDE FIX (EPERM): spawning /bin/ls with a persona override
+        // (posix_spawnattr_set_persona_np 99 OVERRIDE) fails with EPERM on
+        // iOS 16.7.16 AND 17.5.1 ("locateJailbreakRoot: /bin/ls spawn failed: 1"
+        // in user logs). Listing the directory in-process with opendir works
+        // once the app is root + unsandboxed (elevatePrivileges +
+        // runUnsandboxed both run before this on the jailbreak path), and is
+        // what NSFileManager falls back to below anyway — so do the syscall
+        // scan FIRST and only use the two fallbacks when it fails.
+        NSLog(@"[RootHide] locateJailbreakRoot: scanning %@ in-process", jbrootSearchPath);
 
-        // Create a pipe to capture /bin/ls output
-        int pipefd[2];
-        if (pipe(pipefd) != 0) {
-            NSLog(@"[RootHide] locateJailbreakRoot: pipe() failed");
-            return;
+        // FIX: name length must be 24 (8 prefix `.jbroot-` + 16 hex jbrand),
+        // not 23. With length==23, checkRootHideJBRAND() always returns NO
+        // (it requires 16 hex chars), causing every jailbreak to create a NEW
+        // .jbroot-XXX instead of reusing the existing one.
+        DIR *scanDir = opendir(jbrootSearchPath.fileSystemRepresentation);
+        if (scanDir) {
+            struct dirent *de;
+            while ((de = readdir(scanDir)) != NULL) {
+                if (strlen(de->d_name) != 24 || strncmp(de->d_name, ".jbroot-", 8) != 0) continue;
+                NSString *entryName = [NSString stringWithUTF8String:de->d_name];
+                NSString *jbrandStr = [entryName substringFromIndex:8];
+                BOOL valid = checkRootHideJBRAND(jbrandStr);
+                NSLog(@"[RootHide] locateJailbreakRoot: .jbroot- found, jbrand=%@ valid=%d", jbrandStr, valid);
+                if (valid) {
+                    randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:entryName];
+                    NSLog(@"[RootHide] locateJailbreakRoot: FOUND existing jbroot at %@", randomizedJailbreakPath);
+                    break;
+                }
+            }
+            closedir(scanDir);
         }
-
-        pid_t pid = 0;
-        posix_spawn_file_actions_t action;
-        posix_spawn_file_actions_init(&action);
-        posix_spawn_file_actions_adddup2(&action, pipefd[1], STDOUT_FILENO);
-        posix_spawn_file_actions_addclose(&action, pipefd[0]);
-        posix_spawn_file_actions_addclose(&action, pipefd[1]);
-
-        posix_spawnattr_t attr;
-        posix_spawnattr_init(&attr);
-        posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
-        posix_spawnattr_set_persona_uid_np(&attr, 0);
-        posix_spawnattr_set_persona_gid_np(&attr, 0);
-
-        char *argv[] = {"/bin/ls", "-1a", (char *)jbrootSearchPath.UTF8String, NULL};
-        int spawnErr = posix_spawn(&pid, "/bin/ls", &action, &attr, argv, NULL);
-        posix_spawnattr_destroy(&attr);
-        posix_spawn_file_actions_destroy(&action);
-        close(pipefd[1]);
-
-        if (spawnErr != 0) {
-            close(pipefd[0]);
-            NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls spawn failed: %d", spawnErr);
-            // Fallback: try NSFileManager (might work after unsandbox)
+        else {
+            NSLog(@"[RootHide] locateJailbreakRoot: opendir failed (errno %d), trying NSFileManager", errno);
+            // Fallback 1: NSFileManager (equivalent scan through the framework)
             NSError *listError = nil;
             NSArray *fmItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:jbrootSearchPath error:&listError];
             if (listError) {
                 NSLog(@"[RootHide] locateJailbreakRoot: NSFileManager also failed: %@", listError);
             } else if (fmItems) {
-                // FIX: length must be 24 (8 prefix `.jbroot-` + 16 hex jbrand),
-                // not 23. With length==23, substringFromIndex:8 returns 15 chars
-                // and checkRootHideJBRAND() always returns NO (it requires 16),
-                // causing every jailbreak to create a NEW .jbroot-XXX instead
-                // of reusing the existing one.
                 for (NSString *subItem in fmItems) {
                     if (subItem.length == 24 && [subItem hasPrefix:@".jbroot-"]) {
                         NSString *jbrandStr = [subItem substringFromIndex:8];
@@ -191,53 +187,60 @@ static BOOL checkRootHideJBRAND(NSString *str)
                     }
                 }
             }
-        } else {
-            // Read /bin/ls output.
-            // FIX: 16 KB is too small for /var/containers/Bundle/Application,
-            // which can hold 500+ app UUIDs once tweaks are installed
-            // (each UUID = 36 chars + newline = 37 bytes; 16 KB / 37 ≈ 440).
-            // Use a growable NSMutableData and read until EOF so the .jbroot-
-            // entry is never truncated off the end of the buffer.
-            NSMutableData *outData = [NSMutableData dataWithCapacity:262144];
-            char chunk[8192];
-            ssize_t n;
-            while ((n = read(pipefd[0], chunk, sizeof(chunk))) > 0) {
-                [outData appendBytes:chunk length:(NSUInteger)n];
-                if (outData.length >= 4 * 1024 * 1024) break; // 4 MB hard cap
-            }
-            close(pipefd[0]);
-            int status = 0;
-            if (pid > 0) waitpid(pid, &status, 0);
+        }
 
-            if (outData.length > 0) {
-                NSString *output = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding];
-                if (!output) {
-                    NSLog(@"[RootHide] locateJailbreakRoot: failed to decode /bin/ls output (length=%lu)", (unsigned long)outData.length);
-                    output = @"";
+        if (!randomizedJailbreakPath) {
+            // Fallback 2 (kept for debugging): persona /bin/ls, which may still
+            // work on some builds. Never fatal — just another data point.
+            int pipefd[2];
+            if (pipe(pipefd) == 0) {
+                pid_t pid = 0;
+                posix_spawn_file_actions_t action;
+                posix_spawn_file_actions_init(&action);
+                posix_spawn_file_actions_adddup2(&action, pipefd[1], STDOUT_FILENO);
+                posix_spawn_file_actions_addclose(&action, pipefd[0]);
+                posix_spawn_file_actions_addclose(&action, pipefd[1]);
+
+                posix_spawnattr_t attr;
+                posix_spawnattr_init(&attr);
+                posix_spawnattr_set_persona_np(&attr, 99, POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE);
+                posix_spawnattr_set_persona_uid_np(&attr, 0);
+                posix_spawnattr_set_persona_gid_np(&attr, 0);
+
+                char *argv[] = {"/bin/ls", "-1a", (char *)jbrootSearchPath.UTF8String, NULL};
+                int spawnErr = posix_spawn(&pid, "/bin/ls", &action, &attr, argv, NULL);
+                posix_spawnattr_destroy(&attr);
+                posix_spawn_file_actions_destroy(&action);
+                close(pipefd[1]);
+
+                if (spawnErr != 0) {
+                    close(pipefd[0]);
+                    NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls spawn failed: %d", spawnErr);
                 }
-                NSArray *subItems = [output componentsSeparatedByString:@"\n"];
-                NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls -1a found %lu items", (unsigned long)subItems.count);
-
-                for (NSString *subItem in subItems) {
-                    NSString *trimmed = [subItem stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                    if (trimmed.length == 0) continue;
-                    if ([trimmed hasPrefix:@"."]) {
-                        NSLog(@"[RootHide] locateJailbreakRoot: found hidden: %@", trimmed);
+                else {
+                    NSMutableData *outData = [NSMutableData dataWithCapacity:262144];
+                    char chunk[8192];
+                    ssize_t n;
+                    while ((n = read(pipefd[0], chunk, sizeof(chunk))) > 0) {
+                        [outData appendBytes:chunk length:(NSUInteger)n];
+                        if (outData.length >= 4 * 1024 * 1024) break; // 4 MB hard cap
                     }
-                    // FIX: length == 24 (not 23) — see comment above.
-                    if (trimmed.length == 24 && [trimmed hasPrefix:@".jbroot-"]) {
+                    close(pipefd[0]);
+                    int status = 0;
+                    if (pid > 0) waitpid(pid, &status, 0);
+
+                    NSString *output = [[NSString alloc] initWithData:outData encoding:NSUTF8StringEncoding] ?: @"";
+                    for (NSString *subItem in [output componentsSeparatedByString:@"\n"]) {
+                        NSString *trimmed = [subItem stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                        if (trimmed.length != 24 || ![trimmed hasPrefix:@".jbroot-"]) continue;
                         NSString *jbrandStr = [trimmed substringFromIndex:8];
-                        BOOL valid = checkRootHideJBRAND(jbrandStr);
-                        NSLog(@"[RootHide] locateJailbreakRoot: .jbroot- found, jbrand=%@ valid=%d", jbrandStr, valid);
-                        if (valid) {
+                        if (checkRootHideJBRAND(jbrandStr)) {
                             randomizedJailbreakPath = [jbrootSearchPath stringByAppendingPathComponent:trimmed];
-                            NSLog(@"[RootHide] locateJailbreakRoot: FOUND existing jbroot at %@", randomizedJailbreakPath);
+                            NSLog(@"[RootHide] locateJailbreakRoot: FOUND via /bin/ls: %@", randomizedJailbreakPath);
                             break;
                         }
                     }
                 }
-            } else {
-                NSLog(@"[RootHide] locateJailbreakRoot: /bin/ls produced no output");
             }
         }
 
@@ -323,8 +326,19 @@ static BOOL checkRootHideJBRAND(NSString *str)
             NSString *oldPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
             NSString *oldDopamineDir = [oldPath stringByDeletingLastPathComponent];
             NSLog(@"[RootHide] Removing old Dopamine bootstrap at %@", oldDopamineDir);
-            // Use exec_cmd_root (persona override) for rm -rf
-            exec_cmd_root("/bin/rm", "-rf", oldDopamineDir.fileSystemRepresentation, NULL);
+            // ROOTHIDE FIX (remove-jailbreak / migration EPERM): exec_cmd_root
+            // spawns /bin/rm with posix_spawnattr_set_persona_np(OVERRIDE, uid 0),
+            // which returns EPERM on this fork on both 16.7.x and 17.5.x, so the
+            // removal silently no-oped. The app is already uid 0 and unsandboxed
+            // at this point, so remove in-process (same approach upstream 3.x
+            // uses for /var/jb cleanup).
+            if ([[NSFileManager defaultManager] removeItemAtPath:oldDopamineDir error:nil]) {
+                NSLog(@"[RootHide] Removed old bootstrap directory in-process");
+            }
+            else {
+                NSLog(@"[RootHide] In-process removal of %@ failed, falling back to /bin/rm", oldDopamineDir);
+                exec_cmd("/bin/rm", "-rf", oldDopamineDir.fileSystemRepresentation, NULL);
+            }
             free(gSystemInfo.jailbreakInfo.rootPath);
             gSystemInfo.jailbreakInfo.rootPath = NULL;
             _bootstrapNeedsMigration = NO;
@@ -332,40 +346,37 @@ static BOOL checkRootHideJBRAND(NSString *str)
 
         // Create the new .jbroot-XXX directory.
         //
-        // WHY exec_cmd_root instead of mkdir(2):
-        //   Even though we setuid(0) and unsandbox (mac_label_set), the AMFI
-        //   MAC policy still blocks direct mkdir on /var/containers/Bundle/Application/
-        //   from within the Dopamine app process.  The RootHide Bootstrap app
-        //   avoids this by spawning a CHILD process via posix_spawn with
-        //   persona override (POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE + uid 0).
-        //   The child process runs with a FRESH AMFI context that allows
-        //   the mkdir to succeed.
-        //
-        //   We use the same approach: spawn /bin/mkdir via exec_cmd_root,
-        //   which calls posix_spawnattr_set_persona_np(99, OVERRIDE) +
-        //   posix_spawnattr_set_persona_uid_np(0) + gid 0.
-        NSLog(@"[RootHide] Creating jbroot at %@ via root spawn", randomizedJailbreakPath);
-        int mkdirRet = exec_cmd_root("/bin/mkdir", "-m", "0755",
-                                      randomizedJailbreakPath.fileSystemRepresentation, NULL);
-        if (mkdirRet != 0) {
-            // Fallback: try mkdir(2) directly
-            NSLog(@"[RootHide] exec_cmd_root mkdir returned %d, trying direct mkdir(2)", mkdirRet);
-            const char *path = randomizedJailbreakPath.fileSystemRepresentation;
-            if (mkdir(path, 0755) != 0 && errno != EEXIST) {
-                error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
-                                       userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to create jbroot directory %s: %s", path, strerror(errno)]}];
-                NSLog(@"[RootHide] mkdir(2) also failed: %s", strerror(errno));
-            }
-            else {
-                chown(path, 0, 0);
-                NSLog(@"[RootHide] mkdir(2) succeeded for %@", randomizedJailbreakPath);
-                gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
-            }
+        // ROOTHIDE FIX (persona spawn EPERM): the previous order tried
+        // exec_cmd_root("/bin/mkdir", ...) FIRST, but posix_spawn with
+        // POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE returns EPERM on this fork on both
+        // 16.7.x and 17.5.x, so every jbroot creation actually went through the
+        // mkdir(2) fallback anyway. Do the direct syscall first — the app is
+        // uid 0 and unsandboxed here — and only try the spawn as a fallback for
+        // devices where persona spawning does work.
+        const char *path = randomizedJailbreakPath.fileSystemRepresentation;
+        NSLog(@"[RootHide] Creating jbroot at %@ via mkdir(2)", randomizedJailbreakPath);
+        BOOL jbrootCreated = NO;
+        if (mkdir(path, 0755) == 0 || errno == EEXIST) {
+            jbrootCreated = YES;
         }
         else {
-            // chown to root:wheel via root spawn too
-            exec_cmd_root("/usr/sbin/chown", "root:wheel",
-                          randomizedJailbreakPath.fileSystemRepresentation, NULL);
+            NSLog(@"[RootHide] mkdir(2) failed (%s), falling back to /bin/mkdir spawn", strerror(errno));
+            int mkdirRet = exec_cmd("/bin/mkdir", "-m", "0755", path, NULL);
+            jbrootCreated = (mkdirRet == 0);
+        }
+
+        if (!jbrootCreated) {
+            error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno
+                                   userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"Failed to create jbroot directory %s: %s", path, strerror(errno)]}];
+            NSLog(@"[RootHide] jbroot creation failed for %@", randomizedJailbreakPath);
+        }
+        else {
+            // ROOTHIDE FIX: chown via exec_cmd_root no-oped with EPERM (persona
+            // spawn not permitted on this fork); the process is already uid 0,
+            // so chown(2) directly. Keep the error visible instead of silent.
+            if (chown(path, 0, 0) != 0) {
+                NSLog(@"[RootHide] chown(0,0) on %@ failed: %s", randomizedJailbreakPath, strerror(errno));
+            }
             NSLog(@"[RootHide] Created jbroot at %@", randomizedJailbreakPath);
             gSystemInfo.jailbreakInfo.rootPath = strdup(randomizedJailbreakPath.UTF8String);
 
