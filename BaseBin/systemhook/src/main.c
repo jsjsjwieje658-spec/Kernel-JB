@@ -605,6 +605,24 @@ __attribute__((constructor)) static void initializer(void)
                         !strcmp(gExecutablePath, "/usr/libexec/runningboardd")) {
                         dlopen(JBROOT_PATH("/basebin/roothidehooks.dylib"), RTLD_NOW);
                 }
+                // RootHide Manager app compat (Kernel-JB): the shipped RootHide
+                // Manager 1.3.9 binary crashes with SIGABRT when the user toggles
+                // a blacklist switch — +[AppDelegate getDefaultsForKey:] returns
+                // the IMMUTABLE NSDictionary read from RootHideConfig.plist and
+                // -[BlacklistViewController switchChanged:] calls
+                // setObject:forKey: on it (unrecognized selector → abort).
+                // roothidehooks.dylib carries a swizzle that converts the return
+                // value to a mutable dictionary (roothidehooks/rootmanager.m).
+                // Load it ONLY into the manager app: the gExecutablePath for the
+                // manager is <jbroot>/Applications/RootHide.app/RootHide (the app
+                // is installed inside the jbroot by the RootHide bootstrap deb),
+                // so a suffix match keeps the check jbroot-independent. The
+                // hook's constructor gates on the exact process name "RootHide",
+                // making this a no-op for every other process even if the dylib
+                // were loaded elsewhere.
+                else if (string_has_suffix(gExecutablePath, "/RootHide.app/RootHide")) {
+                        dlopen(JBROOT_PATH("/basebin/roothidehooks.dylib"), RTLD_NOW);
+                }
                 else if (!strcmp(gExecutablePath, "/usr/libexec/watchdogd")) {
                         dlopen(JBROOT_PATH("/basebin/watchdoghook.dylib"), RTLD_NOW);
                 }
