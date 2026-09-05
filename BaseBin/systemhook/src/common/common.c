@@ -283,8 +283,19 @@ static int spawn_exec_hook_common(bool isExec,
 				}
 			}
 			if (!hasExecFlag && !isExec && getuid() != 0) {
-				struct _posix_spawn_persona_info *personaInfo = *(struct _posix_spawn_persona_info **)(attrStruct + POSIX_SPAWNATTR_OFF_PERSONA);
-				if (personaInfo) {
+				// Sanity: verify the persona offset actually points at a plausible
+				// in-heap pointer before dereferencing. The offset (0xD8) was taken
+				// from libsystem_kernel's _posix_spawn implementation; if a future
+				// iOS moves the field, a garbage deref here would crash every
+				// injected process. A persona pointer lives in a small heap
+				// allocation: require it to be non-null, 8-byte aligned and inside
+				// a 64-bit userspace range typical for heap zones.
+				uintptr_t personaPtr = *(uintptr_t *)(attrStruct + POSIX_SPAWNATTR_OFF_PERSONA);
+				bool personaPtrPlausible = personaPtr >= 0x10000ULL
+					&& (personaPtr & 0x7) == 0
+					&& personaPtr < 0x800000000000ULL; // below 128TB (userspace upper canons)
+				if (personaPtrPlausible) {
+					struct _posix_spawn_persona_info *personaInfo = (struct _posix_spawn_persona_info *)personaPtr;
 					if (personaInfo->pspi_id == 99 && (personaInfo->pspi_flags & POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE)) {
 						if (personaInfo->pspi_flags & POSIX_SPAWN_PERSONA_UID) {
 							personaFixUid = personaInfo->pspi_uid;
@@ -293,19 +304,19 @@ static int spawn_exec_hook_common(bool isExec,
 							personaFixGid = personaInfo->pspi_gid;
 						}
 					}
-				}
 
-				if (personaFixUid == 0 || personaFixGid == 0) {
-					// Revert any request to become root back to mobile
-					// Otherwise posix_spawn will straight up fail
-					if (personaFixUid == 0) personaInfo->pspi_uid = 501;
-					if (personaFixGid == 0) personaInfo->pspi_gid = 501;
+					if (personaFixUid == 0 || personaFixGid == 0) {
+						// Revert any request to become root back to mobile
+						// Otherwise posix_spawn will straight up fail
+						if (personaFixUid == 0) personaInfo->pspi_uid = 501;
+						if (personaFixGid == 0) personaInfo->pspi_gid = 501;
 
-					if (flags & POSIX_SPAWN_START_SUSPENDED) {
-						personaFixNeedsResume = false;
-					}
-					else {
-						posix_spawnattr_setflags(&attr, flags | POSIX_SPAWN_START_SUSPENDED);
+						if (flags & POSIX_SPAWN_START_SUSPENDED) {
+							personaFixNeedsResume = false;
+						}
+						else {
+							posix_spawnattr_setflags(&attr, flags | POSIX_SPAWN_START_SUSPENDED);
+						}
 					}
 				}
 			}
