@@ -71,6 +71,55 @@ bool systemwide_domain_allowed(audit_token_t clientToken)
                 // We still want it to be accessible by Dopamine itself though
                 if (is_dopamine_app(procPath)) return true;
 
+                // RootHide port: executables living INSIDE the jbroot must always be
+                // able to check in. These are the jailbreak's own tools and user-
+                // installed apps (Sileo, Zebra, RootHide Manager, RootHidePatcher...).
+                // Without check-in they never receive their sandbox extensions and
+                // every file operation outside their own container fails with EPERM —
+                // e.g. RootHidePatcher's "There was a problem with making the folder
+                // for the deb" (createDirectory on <jbroot>/var/mobile fails inside
+                // the app sandbox once the domain is hidden).
+                //
+                // This does NOT weaken the hide: blacklisted apps are stripped of the
+                // injected environment in spawn_hook BEFORE any check-in, and the
+                // blacklist check (isBlacklistedPath) still runs first for every spawn.
+                // Only jbroot-resident binaries — which the user launched from an
+                // invisible-to-stock-iOS directory — reach this point.
+                //
+                // jbinfo(rootPath) comes from dladdr of launchdhook.dylib itself and
+                // may be either the /var/... or the /private/var/... spelling, while
+                // proc_pidpath returns the kernel-resolved path (usually /private/var
+                // on iOS). Compare BOTH spellings to stay correct regardless of which
+                // form the launchd instance recorded.
+                static char jbrootPrefix[2][PATH_MAX];
+                static bool jbrootPrefixResolved = false;
+                if (!jbrootPrefixResolved) {
+                        const char *rootPath = jbinfo(rootPath);
+                        if (rootPath && rootPath[0]) {
+                                strlcpy(jbrootPrefix[0], rootPath, sizeof(jbrootPrefix[0]));
+                                size_t len = strlen(jbrootPrefix[0]);
+                                if (len > 0 && jbrootPrefix[0][len-1] == '/') {
+                                        jbrootPrefix[0][len-1] = '\0';
+                                }
+                                if (string_has_prefix(jbrootPrefix[0], "/private/")) {
+                                        strlcpy(jbrootPrefix[1], &jbrootPrefix[0][sizeof("/private") - 1], sizeof(jbrootPrefix[1]));
+                                } else if (string_has_prefix(jbrootPrefix[0], "/var/")
+                                        || string_has_prefix(jbrootPrefix[0], "/usr/")
+                                        || string_has_prefix(jbrootPrefix[0], "/bin/")
+                                        || string_has_prefix(jbrootPrefix[0], "/etc/")) {
+                                        snprintf(jbrootPrefix[1], sizeof(jbrootPrefix[1]), "/private%s", jbrootPrefix[0]);
+                                } else {
+                                        jbrootPrefix[1][0] = '\0';
+                                }
+                                jbrootPrefixResolved = true;
+                        }
+                }
+                if (jbrootPrefixResolved && jbrootPrefix[0][0] != '\0' &&
+                    (string_has_prefix(procPath, jbrootPrefix[0]) ||
+                     (jbrootPrefix[1][0] != '\0' && string_has_prefix(procPath, jbrootPrefix[1])))) {
+                        return true;
+                }
+
                 return false;
         }
         return true;
@@ -84,7 +133,12 @@ static int systemwide_get_jbroot(char **rootPathOut)
 
 static int systemwide_get_boot_uuid(char **bootUUIDOut)
 {
-        const char *launchdUUID = getenv("LAUNCHD_UUID");
+        // Trace reduction: the LAUNCHD_UUID environment variable is scrubbed
+        // from launchd's environ right after boot (see launchdhook main.m), so
+        // read the cached copy instead. Fall back to getenv for the early-boot
+        // window before the scrub happened (boomerang / first-load paths).
+        const char *launchdUUID = jbinfo(bootUUID);
+        if (!launchdUUID) launchdUUID = getenv("LAUNCHD_UUID");
         *bootUUIDOut = launchdUUID ? strdup(launchdUUID) : NULL;
         return 0;
 }

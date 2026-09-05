@@ -48,6 +48,10 @@ struct system_info {
                 uint64_t jbrand;
                 uint64_t palera1n;
                 bool dyld_patch_enabled;
+                // Trace reduction: boot UUID cached inside the jbserver process so the
+                // LAUNCHD_UUID environment variable can be scrubbed from launchd's
+                // environ (check-ins keep working without the env-var marker).
+                char *bootUUID;
         } jailbreakInfo;
 
         struct {
@@ -425,7 +429,8 @@ extern struct system_info gSystemInfo;
 #define JAILBREAK_INFO_ITERATE(ctx, iterator) \
         iterator(ctx, jailbreakInfo.usesPACBypass); \
         iterator(ctx, jailbreakInfo.rootPath); \
-        iterator(ctx, jailbreakInfo.appIdentifier);
+        iterator(ctx, jailbreakInfo.appIdentifier); \
+        iterator(ctx, jailbreakInfo.bootUUID);
 
 #define JAILBREAK_SETTINGS_ITERATE(ctx, iterator) \
         iterator(ctx, jailbreakSettings.markAppsAsDebugged); \

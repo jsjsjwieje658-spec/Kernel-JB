@@ -1101,6 +1101,25 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             NSLog(@"[RootHide] patchRootHideAssertions (post-bootstrap) failed: %@", patchError);
         }
 
+        // Default repositories written on first bootstrap extraction (also
+        // refreshed on every full re-extraction). Two files, two formats:
+        //
+        //   default.sources  — deb822 format, consumed by Sileo (and apt).
+        //   default.list     — one-line "deb URI suite component" format,
+        //                      consumed by Zebra (older Zebra builds do not
+        //                      parse deb822 .sources files).
+        //
+        // Both carry the same repos. The "1900" suite entries track the
+        // RootHide Bootstrap iOS 19 series (Procursus-compatible suites):
+        //   - apt.procurs.us          → upstream Procursus bootstraps
+        //   - roothide.github.io      → RootHide repo index
+        //   - roothide/procursus      → RootHide's own Procursus mirror
+        //                                (iphoneos-arm64e/1900)
+        //   - RootHide GitHub release → direct-download package root used by
+        //                                RootHide releases (1900 strapfiles)
+        //   - yourepo.com             → general community repo
+        //   - chariz / havoc / bigboss→ standard package repos
+        //   - ellekit.space           → ElleKit (tweak hooking runtime)
         NSString *defaultSources = @"Types: deb\n"
             @"URIs: https://repo.chariz.com/\n"
             @"Suites: ./\n"
@@ -1117,10 +1136,50 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             @"Components: main\n"
             @"\n"
             @"Types: deb\n"
+            @"URIs: https://apt.procurs.us/\n"
+            @"Suites: 1900\n"
+            @"Components: main\n"
+            @"\n"
+            @"Types: deb\n"
+            @"URIs: https://roothide.github.io/procursus/\n"
+            @"Suites: iphoneos-arm64e/1900\n"
+            @"Components: main\n"
+            @"\n"
+            @"Types: deb\n"
+            @"URIs: https://github.com/roothide/roothide.github.io/releases/download/1900/\n"
+            @"Suites: ./\n"
+            @"Components:\n"
+            @"\n"
+            @"Types: deb\n"
+            @"URIs: https://roothide.github.io/\n"
+            @"Suites: ./\n"
+            @"Components:\n"
+            @"\n"
+            @"Types: deb\n"
+            @"URIs: https://yourepo.com/\n"
+            @"Suites: ./\n"
+            @"Components:\n"
+            @"\n"
+            @"Types: deb\n"
             @"URIs: https://ellekit.space/\n"
             @"Suites: ./\n"
             @"Components:\n";
         [defaultSources writeToFile:JBROOT_PATH(@"/etc/apt/sources.list.d/default.sources") atomically:NO encoding:NSUTF8StringEncoding error:nil];
+
+        // Zebra-format mirror of the same list. Zebra's SourcesManager reads
+        // /etc/apt/sources.list.d/*.list with the classic one-line syntax;
+        // writing ONLY a deb822 .sources file leaves Zebra with zero sources
+        // on a fresh bootstrap, so keep both files in sync.
+        NSString *defaultSourcesList = @"deb https://repo.chariz.com/ ./\n"
+            @"deb https://havoc.app/ ./\n"
+            @"deb http://apt.thebigboss.org/repofiles/cydia/ stable main\n"
+            @"deb https://apt.procurs.us/ 1900 main\n"
+            @"deb https://roothide.github.io/procursus/ iphoneos-arm64e/1900 main\n"
+            @"deb https://github.com/roothide/roothide.github.io/releases/download/1900/ ./\n"
+            @"deb https://roothide.github.io/ ./\n"
+            @"deb https://yourepo.com/ ./\n"
+            @"deb https://ellekit.space/ ./\n";
+        [defaultSourcesList writeToFile:JBROOT_PATH(@"/etc/apt/sources.list.d/default.list") atomically:NO encoding:NSUTF8StringEncoding error:nil];
         
         NSString *mobilePreferencesPath = JBROOT_PATH(@"/var/mobile/Library/Preferences");
         if (![[NSFileManager defaultManager] fileExistsAtPath:mobilePreferencesPath]) {
@@ -1131,7 +1190,40 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             };
             [[NSFileManager defaultManager] createDirectoryAtPath:mobilePreferencesPath withIntermediateDirectories:YES attributes:attributes error:nil];
         }
-        
+
+        // Pre-create the working directories that rootless→roothide package
+        // converters (RootHidePatcher et al.) expect to create on first
+        // launch. Their app code runs as mobile and does
+        // createDirectory(jbroot("/var/mobile/RootHidePatcher/...")) inside
+        // the iOS app sandbox — a mkdir that fails whenever the sandbox
+        // extension lookup races or the app was spawned before check-in.
+        // Creating them here (as root, pre-sandbox concerns) makes the
+        // converter work on first open, matching the upstream RootHide
+        // postinst behaviour (chown -R mobile:mobile /var/mobile/RootHidePatcher/).
+        NSArray<NSString *> *precreatedMobileDirs = @[
+            @"/var/mobile/RootHidePatcher",
+            @"/var/mobile/RootHidePatcher/.Inbox",
+            @"/var/tmp/com.roothide.patcher-Inbox",
+        ];
+        for (NSString *relDir in precreatedMobileDirs) {
+            NSString *dirPath = JBROOT_PATH(relDir);
+            if (![[NSFileManager defaultManager] fileExistsAtPath:dirPath]) {
+                NSDictionary<NSFileAttributeKey, id> *dirAttrs = @{
+                    NSFilePosixPermissions : @0755,
+                    NSFileOwnerAccountID : @501,
+                    NSFileGroupOwnerAccountID : @501,
+                };
+                NSError *mkErr = nil;
+                if (![[NSFileManager defaultManager] createDirectoryAtPath:dirPath
+                                               withIntermediateDirectories:YES
+                                                                attributes:dirAttrs
+                                                                     error:&mkErr]
+                    && mkErr) {
+                    NSLog(@"[RootHide] pre-create %@ failed: %@", relDir, mkErr);
+                }
+            }
+        }
+
         JBFixMobilePermissions();
 
         completion(nil);
@@ -2237,36 +2329,175 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
 
 - (NSError *)deleteBootstrap
 {
+    // =========================================================================
+    // Full remove-jailbreak cleanup (rewritten).
+    //
+    // The old implementation deleted only the two/three .jbroot-<JBRAND>
+    // directories, never checked the rm exit status, and left every artifact
+    // the jailbreak had published OUTSIDE those directories behind:
+    //
+    //   - /var/tmp/bootstrap.tar and /var/tmp/bootstrap_restore.tar
+    //     (decompressed bootstrap leftovers, several dozen MB each)
+    //   - /var/jb symlink (legacy rootless JB entry point; also recreated by
+    //     other jailbreaks — remove when present)
+    //   - xinaA15-style /var/<dir> leftover symlinks (same list prepareBootstrap
+    //     already cleans when starting a FRESH bootstrap)
+    //   - .jbroot symlinks INSIDE user app containers, created by
+    //     ensureJbrootSymlinksInApps / ensure_jbroot_symlink for every jbroot
+    //     app (Sileo, Zebra, RootHide Manager, RootHidePatcher...). When the
+    //     jbroot disappears these become dangling symlinks pointing into a
+    //     deleted directory — any app container carrying one is a visible
+    //     jailbreak trace (and crashes the removed jbroot apps if they are
+    //     still launched from caches).
+    //   - the fake dyld names that were published into the kernel namecache
+    //     (kernel state — dies with the next userspace reboot / full reboot,
+    //     nothing to remove on disk here)
+    //
+    // Every deletion goes through /bin/rm -rf via exec_cmd_root and the exit
+    // status is checked; failures are reported to the caller instead of being
+    // silently swallowed (the old code returned nil no matter what happened).
+    // =========================================================================
     NSError *error = [self ensurePrivatePrebootIsWritable];
     if (error) return error;
 
-    // ROOTHIDE: Only delete the .jbroot-XXX directory and its secondary.
-    // Do NOT delete /var/containers/Bundle/Application/ contents — that
-    // would remove ALL installed apps (TrollStore apps, system apps, etc.).
-    //
-    // RootHide Bootstrap's uninstallBootstrap() removes:
-    //   /var/containers/Bundle/Application/.jbroot-<JBRAND>
-    //   /var/mobile/Containers/Shared/AppGroup/.jbroot-<JBRAND>
-    //   /var/mobile/Containers/Data/Application/.jbroot-<JBRAND> (old)
-    NSString *jbrootPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath];
+    NSString *jbrootPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath ?: ""];
+    if (jbrootPath.length == 0) {
+        // jbroot unknown — try to locate it before doing anything else
+        [[DOEnvironmentManager sharedManager] locateJailbreakRoot];
+        jbrootPath = [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath ?: ""];
+        if (jbrootPath.length == 0) {
+            NSLog(@"[RootHide] deleteBootstrap: no jbroot found — nothing to delete");
+            return nil;
+        }
+    }
+
+    NSMutableArray<NSString *> *errors = [NSMutableArray array];
+
+    // 1. Remove /var/tmp leftovers (bootstrap tarballs)
+    NSArray<NSString *> *varTmpLeftovers = @[
+        @"/var/tmp/bootstrap.tar",
+        @"/var/tmp/bootstrap_restore.tar",
+    ];
+    for (NSString *leftover in varTmpLeftovers) {
+        if ([[NSFileManager defaultManager] fileExistsAtPath:leftover]) {
+            int r = exec_cmd_root("/bin/rm", "-rf", leftover.fileSystemRepresentation, NULL);
+            if (r != 0) {
+                NSLog(@"[RootHide] deleteBootstrap: rm %@ failed (%d)", leftover, r);
+                [errors addObject:[NSString stringWithFormat:@"rm %@", leftover]];
+            } else {
+                NSLog(@"[RootHide] deleteBootstrap: removed %@", leftover);
+            }
+        }
+    }
+
+    // 2. Remove legacy entry-point symlinks (other jailbreaks may have left them)
+    exec_cmd_root("/bin/rm", "-rf", "/var/jb", NULL);
+
+    // 3. Remove xinaA15-style leftover symlinks in /var (same list as
+    //    prepareBootstrap uses for a fresh install; only removes them when
+    //    they are symlinks so a real user directory named e.g. /var/bin
+    //    is never touched).
+    NSArray<NSString *> *varSymlinkLeftovers = @[
+        @"/var/alternatives", @"/var/ap", @"/var/apt", @"/var/bin",
+        @"/var/bzip2", @"/var/cache", @"/var/comm", @"/var/etc",
+        @"/var/include", @"/var/info", @"/var/lib", @"/var/libexec",
+        @"/var/limits", @"/var/local", @"/var/log", @"/var/logs",
+        @"/var/man", @"/var/mds", @"/var/mds-coll", @"/var/mnt",
+        @"/var/msg", @"/var/pref", @"/var/run", @"/var/sbin",
+        @"/var/share", @"/var/spool", @"/var/src", @"/var/stash",
+        @"/var/sy", @"/var/symbolic", @"/var/tar", @"/var/tmp",
+        @"/var/ucb", @"/var/undone", @"/var/usr", @"/var/X11",
+        @"/var/xbin", @"/var/zbin",
+    ];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *leftover in varSymlinkLeftovers) {
+        NSDictionary *attrs = [fm attributesOfItemAtPath:leftover error:nil];
+        if (attrs && attrs[NSFileType] == NSFileTypeSymbolicLink) {
+            // Only remove when the symlink target is gone or points into the
+            // (now deleted) jbroot — never delete a link to a live directory.
+            NSString *dest = [fm destinationOfSymbolicLinkAtPath:leftover error:nil];
+            if (!dest) continue;
+            BOOL targetMissing = (![fm fileExistsAtPath:leftover]); // symlink whose target is gone
+            BOOL targetInJbroot = [dest hasPrefix:@"/var/jb"] || [dest hasPrefix:jbrootPath] ||
+                                  [dest containsString:@".jbroot-"];
+            if (targetMissing || targetInJbroot) {
+                [fm removeItemAtPath:leftover error:nil];
+                NSLog(@"[RootHide] deleteBootstrap: removed leftover symlink %@", leftover);
+            }
+        }
+    }
+
+    // 4. Remove the jbroot directory itself (primary)
     NSLog(@"[RootHide] deleteBootstrap: removing %@", jbrootPath);
+    int rmJbroot = exec_cmd_root("/bin/rm", "-rf", jbrootPath.fileSystemRepresentation, NULL);
+    if (rmJbroot != 0) {
+        NSLog(@"[RootHide] deleteBootstrap: rm jbroot failed (%d)", rmJbroot);
+        [errors addObject:[NSString stringWithFormat:@"rm %@", jbrootPath]];
+    } else {
+        NSLog(@"[RootHide] deleteBootstrap: removed jbroot at %@", jbrootPath);
+    }
 
-    // Remove the jbroot directory itself — use exec_cmd_root (rm -rf) because
-    // NSFileManager removeItemAtPath fails on /var/containers/Bundle/Application/
-    // due to AMFI restrictions (same reason mkdir fails).
-    exec_cmd_root("/bin/rm", "-rf", jbrootPath.fileSystemRepresentation, NULL);
-    NSLog(@"[RootHide] Removed jbroot at %@", jbrootPath);
-
-    // Remove the secondary AppGroup container
+    // 5. Remove secondary containers (AppGroup + old-style Data path)
     NSString *jbrootName = jbrootPath.lastPathComponent;
-    NSString *secondaryPath = [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", jbrootName];
-    exec_cmd_root("/bin/rm", "-rf", secondaryPath.fileSystemRepresentation, NULL);
-    NSLog(@"[RootHide] Removed secondary at %@", secondaryPath);
+    NSArray<NSString *> *secondaryPaths = @[
+        [NSString stringWithFormat:@"/var/mobile/Containers/Shared/AppGroup/%@", jbrootName],
+        [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", jbrootName],
+    ];
+    for (NSString *secondaryPath in secondaryPaths) {
+        int r = exec_cmd_root("/bin/rm", "-rf", secondaryPath.fileSystemRepresentation, NULL);
+        if (r != 0) {
+            NSLog(@"[RootHide] deleteBootstrap: rm %@ failed (%d)", secondaryPath, r);
+            [errors addObject:[NSString stringWithFormat:@"rm %@", secondaryPath]];
+        } else {
+            NSLog(@"[RootHide] deleteBootstrap: removed secondary %@", secondaryPath);
+        }
+    }
 
-    // Also remove old-style path
-    NSString *oldSecondaryPath = [NSString stringWithFormat:@"/var/mobile/Containers/Data/Application/%@", jbrootName];
-    exec_cmd_root("/bin/rm", "-rf", oldSecondaryPath.fileSystemRepresentation, NULL);
+    // 6. Remove dangling .jbroot symlinks from user app containers.
+    //    ensureJbrootSymlinksInApps created <jbroot>/Applications/Foo.app/.jbroot
+    //    (inside the jbroot — already gone with step 4), and libjailbreak's
+    //    ensure_jbroot_symlink can additionally create one next to any real
+    //    directory that resolved into the jbroot. Sweep BOTH app container
+    //    roots for leftover .jbroot symlinks and delete them.
+    NSArray<NSString *> *appContainerRoots = @[
+        @"/var/containers/Bundle/Application",
+        @"/var/mobile/Containers/Data/Application",
+        @"/var/mobile/Containers/Shared/AppGroup",
+    ];
+    for (NSString *containerRoot in appContainerRoots) {
+        NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:containerRoot error:nil];
+        if (!entries) continue; // sandboxed / not listable — best effort only
+        for (NSString *entry in entries) {
+            NSString *entryPath = [containerRoot stringByAppendingPathComponent:entry];
+            // (a) the container itself was a .jbroot-XXXX dir (secondary copy) — gone via step 5
+            if ([entry hasPrefix:@".jbroot-"]) continue;
+            // (b) a .jbroot symlink directly inside the container directory
+            NSString *directSymlink = [entryPath stringByAppendingPathComponent:@".jbroot"];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:directSymlink error:nil];
+            if (attrs && attrs[NSFileType] == NSFileTypeSymbolicLink) {
+                [fm removeItemAtPath:directSymlink error:nil];
+                NSLog(@"[RootHide] deleteBootstrap: removed .jbroot symlink in %@", entryPath);
+            }
+            // (c) .app bundles: .jbroot inside the bundle
+            if ([entryPath hasSuffix:@".app"]) {
+                NSString *bundleSymlink = [entryPath stringByAppendingPathComponent:@".jbroot"];
+                NSDictionary *bundleAttrs = [fm attributesOfItemAtPath:bundleSymlink error:nil];
+                if (bundleAttrs && bundleAttrs[NSFileType] == NSFileTypeSymbolicLink) {
+                    [fm removeItemAtPath:bundleSymlink error:nil];
+                    NSLog(@"[RootHide] deleteBootstrap: removed .jbroot symlink in %@", bundleSymlink);
+                }
+            }
+        }
+    }
 
+    if (errors.count > 0) {
+        return [NSError errorWithDomain:bootstrapErrorDomain code:-1
+                               userInfo:@{NSLocalizedDescriptionKey :
+                                          [NSString stringWithFormat:@"Remove jailbreak failed for %lu target(s): %@",
+                                           (unsigned long)errors.count, [errors componentsJoinedByString:@", "]]}];
+    }
+
+    NSLog(@"[RootHide] deleteBootstrap: cleanup complete");
     return nil;
 }
 

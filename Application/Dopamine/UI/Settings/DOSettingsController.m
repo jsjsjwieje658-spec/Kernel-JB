@@ -716,8 +716,24 @@
 {
     UIAlertController *confirmationAlertController = [UIAlertController alertControllerWithTitle:DOLocalizedString(@"Alert_Remove_Jailbreak_Title") message:DOLocalizedString(@"Alert_Remove_Jailbreak_Pressed_Body") preferredStyle:UIAlertControllerStyleAlert];
     UIAlertAction *uninstallAction = [UIAlertAction actionWithTitle:DOLocalizedString(@"Button_Continue") style:UIAlertActionStyleDestructive handler:^(UIAlertAction * _Nonnull action) {
-        [[DOEnvironmentManager sharedManager] deleteBootstrap];
+        NSError *deleteError = [[DOEnvironmentManager sharedManager] deleteBootstrap];
+        if (deleteError) {
+            // Deletion failed (rm could not remove a target) — surface it
+            // instead of pretending the removal succeeded. The jbroot may
+            // still exist; the user can retry after a userspace reboot.
+            UIAlertController *errorAlert = [UIAlertController alertControllerWithTitle:DOLocalizedString(@"Error")
+                                                                                message:[NSString stringWithFormat:@"Removing the jailbreak failed: %@\n\nThe jailbreak was NOT fully removed. Try again after respringing or rebooting userspace.", deleteError.localizedDescription]
+                                                                         preferredStyle:UIAlertControllerStyleAlert];
+            [errorAlert addAction:[UIAlertAction actionWithTitle:DOLocalizedString(@"Button_Close") style:UIAlertActionStyleDefault handler:nil]];
+            [self presentViewController:errorAlert animated:YES completion:nil];
+            return;
+        }
+
         if ([DOEnvironmentManager sharedManager].isJailbroken) {
+            // Full userspace reboot: required to drop the kernel namecache
+            // entries (published systemhook / patched dyld names) and every
+            // jbserver hook state that lives inside the running launchd.
+            // A plain exit(0) would leave launchd running with jailbreak hooks.
             [[DOEnvironmentManager sharedManager] reboot];
         }
         else {

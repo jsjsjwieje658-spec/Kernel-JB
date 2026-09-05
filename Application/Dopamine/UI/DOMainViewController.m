@@ -260,7 +260,18 @@
             else if (didRemove) {
                 UIAlertController *alertController = [UIAlertController alertControllerWithTitle:DOLocalizedString(@"Removed_Jailbreak_Alert_Title") message:DOLocalizedString(@"Removed_Jailbreak_Alert_Message") preferredStyle:UIAlertControllerStyleAlert];
                 UIAlertAction *rebootAction = [UIAlertAction actionWithTitle:DOLocalizedString(@"Button_Close") style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-                    exit(0);
+                    // A plain exit(0) leaves the running launchd fully hooked
+                    // (jbserver, XPC filters, spawn hooks) and keeps the kernel
+                    // namecache entries for the published systemhook/patched
+                    // dyld alive — a visible jailbreak trace and a half-broken
+                    // state. A userspace reboot restores a stock launchd and
+                    // drops all namecache state, completing the removal.
+                    if ([DOEnvironmentManager sharedManager].isJailbroken) {
+                        [[DOEnvironmentManager sharedManager] rebootUserspace];
+                    }
+                    else {
+                        exit(0);
+                    }
                 }];
                 [alertController addAction:rebootAction];
                 [self presentViewController:alertController animated:YES completion:nil];

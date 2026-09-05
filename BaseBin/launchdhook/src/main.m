@@ -11,6 +11,7 @@
 #import <pthread.h>
 #import <sys/sysctl.h>
 #import <substrate.h>
+#include <fcntl.h>
 #include <sys/param.h>
 #include <sys/mount.h>
 #include <kern_memorystatus.h>
@@ -132,8 +133,20 @@ __attribute__((constructor)) static void initializer(void)
         }
 
         bool firstLoad = false;
-        if (getenv("DOPAMINE_INITIALIZED") != 0) {
+        // Trace reduction: the userspace-reboot marker used to be the
+        // DOPAMINE_INITIALIZED environment variable, which every child
+        // process inherited and any app could read with one getenv() call
+        // (known Dopamine detection vector). It is now a zero-byte marker
+        // file inside the jbroot, which stock apps cannot even resolve.
+        // Flow: first load  → marker absent → create it;
+        //       reboot load → marker present → consume (delete) it.
+        // A full (hard) reboot makes the marker disappear with the jbroot
+        // trustcache/namecache state, so detection stays correct.
+        char rebootMarkerPath[PATH_MAX];
+        strlcpy(rebootMarkerPath, JBROOT_PATH("/basebin/.boot_injected"), sizeof(rebootMarkerPath));
+        if (access(rebootMarkerPath, F_OK) == 0) {
                 // If Dopamine was initialized before, we assume we're coming from a userspace reboot
+                remove(rebootMarkerPath); // consume: the NEXT live-launchd injection must look "first" again
 
                 // Stock bug: These prefs wipe themselves after a reboot (they contain a boot time and this is matched when they're loaded)
                 // But on userspace reboots, they apparently do not get wiped as the boot time doesn't change
@@ -225,12 +238,32 @@ __attribute__((constructor)) static void initializer(void)
         // As this launchd will pass environ to the next launchd...
         setenv("DYLD_INSERT_LIBRARIES", JBROOT_PATH("/basebin/launchdhook.dylib"), 1);
 
-        // Mark Dopamine as having been initialized before
-        setenv("DOPAMINE_INITIALIZED", "1", 1);
+        // Trace reduction: the userspace-reboot marker is now the jbroot file
+        // <jbroot>/basebin/.boot_injected (created at the end of this
+        // constructor, consumed at the top of the next one). The legacy
+        // DOPAMINE_INITIALIZED environment variable is no longer set at all,
+        // so no child process ever inherits it.
+        //
+        // LAUNCHD_UUID is still generated (rootless v2 boot identifier,
+        // consumed by systemwide_get_boot_uuid() during process check-ins),
+        // but it is cached into jbinfo.bootUUID and then scrubbed from the
+        // environment below, so children never see it either.
+        NSString *launchdUUIDString = [NSUUID UUID].UUIDString;
+        setenv("LAUNCHD_UUID", launchdUUIDString.UTF8String, 1);
 
-        // Set an identifier that uniquely identifies this userspace boot
-        // Part of rootless v2 spec
-        setenv("LAUNCHD_UUID", [NSUUID UUID].UUIDString.UTF8String, 1);
+        /********** roothide trace reduction (env-var scrubbing) **********/
+        {
+                const char *launchdUUID = getenv("LAUNCHD_UUID");
+                if (launchdUUID) {
+                        // Cache for systemwide_get_boot_uuid() check-ins, then
+                        // scrub the env marker so no spawned child inherits it.
+                        if (gSystemInfo.jailbreakInfo.bootUUID) free(gSystemInfo.jailbreakInfo.bootUUID);
+                        gSystemInfo.jailbreakInfo.bootUUID = strdup(launchdUUID);
+                }
+                unsetenv("DOPAMINE_INITIALIZED"); // legacy: scrub if inherited from an older boot
+                unsetenv("LAUNCHD_UUID");
+        }
+        /*******************************************************************/
 
 /********** roothide specific (Relaxin main.m:222 parity) **********/
         // RootHide port: late roothide initialization. Runs at the very end of
@@ -252,4 +285,16 @@ __attribute__((constructor)) static void initializer(void)
         extern void roothide_launchd_late_init(bool firstLoad);
         roothide_launchd_late_init(firstLoad);
 /*******************************************************************/
+
+        // Trace reduction: arm the userspace-reboot marker for the NEXT
+        // launchd instance (see the access() check at the top of this
+        // constructor). Only armed on a successful init — if the boot fails
+        // below this point the marker is absent and the next load counts as
+        // first again, which keeps boomerang/firstLoad semantics intact.
+        {
+                char markerPath[PATH_MAX];
+                strlcpy(markerPath, JBROOT_PATH("/basebin/.boot_injected"), sizeof(markerPath));
+                int fd = open(markerPath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                if (fd >= 0) close(fd);
+        }
 }
