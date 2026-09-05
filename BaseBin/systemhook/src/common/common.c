@@ -260,11 +260,21 @@ static int spawn_exec_hook_common(bool isExec,
 			}
 		}
 
-		// On iOS 17.6 and up Apple neutered persona overwrites to block going from (non root) -> (root)
-		// Since jailbreak infra relies on this, we need to reenable it via our patches
-		// To do this we will spawn the process as suspended, modify the ucred to the desired uid/gid and resume it
-		// POSIX_SPAWN_SETEXEC is not a concern since using it together with POSIX_SPAWN_PERSONA_FLAGS_OVERRIDE is not supported anyways
-		if (__builtin_available(iOS 17.6, *)) {
+		// Persona root-spawn fix — now applied on ALL iOS versions.
+		//
+		// Upstream comment: "On iOS 17.6 and up Apple neutered persona overwrites
+		// to block going from (non root) -> (root)". In practice this fork's test
+		// devices (16.7.16 / 17.5.1) ALSO fail posix_spawn with EPERM when a
+		// non-root process requests persona 99 OVERRIDE uid 0 — proven by
+		// exec_cmd_root() silently no-oping during bootstrap. The mechanism below
+		// is version independent: rewrite the requested uid to 501 so the spawn
+		// succeeds, start the child suspended, kernel-patch its ucred to the
+		// requested root uid via jbclient_persona_fix, then resume it.
+		// Running it on <17.6 too is safe: the only non-root callers that request
+		// persona uid 0 are jailbreak tools (jbctl, exec_cmd_root, and
+		// RootHidePatcher spawning bash for patch.sh — patch.sh hard-gates on
+		// `whoami == root`). launchd itself is uid 0 → excluded by getuid() != 0.
+		{
 			bool hasExecFlag = false;
 			short flags = 0;
 			if (posix_spawnattr_getflags(&attr, &flags) == 0) {
@@ -362,7 +372,13 @@ static int spawn_exec_hook_common(bool isExec,
 		envbuf_free(envc);
 	}
 
-	if (personaFixUid == 0 || personaFixGid == 0 && childPid != -1) {
+	// ROOTHIDE FIX: the original upstream expression
+	//   (personaFixUid == 0 || personaFixGid == 0 && childPid != -1)
+	// binds the childPid check to the GID term only (C precedence), so a spawn
+	// that FAILS after a uid-0 persona request still runs jbclient_persona_fix
+	// with childPid == -1 — proc_find(-1) / and worse, kill(-1, SIGCONT) which
+	// broadcasts SIGCONT to every process the caller may signal. Guard both.
+	if (childPid != -1 && (personaFixUid == 0 || personaFixGid == 0)) {
 		jbclient_persona_fix(childPid, personaFixUid, personaFixGid);
 		if (personaFixNeedsResume) {
 			kill(childPid, SIGCONT);
