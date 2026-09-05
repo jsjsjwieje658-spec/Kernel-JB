@@ -22,6 +22,7 @@
 #import <dirent.h>
 #import <fcntl.h>
 #import <stdlib.h>
+#import <libkern/OSByteOrder.h>
 #import "NSString+Version.h"
 
 // ROOTHIDE FIX LỖI 1 v3: Không dùng direct reboot3 từ app nữa (thiếu entitlement).
@@ -1204,9 +1205,19 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         // Creating them here (as root, pre-sandbox concerns) makes the
         // converter work on first open, matching the upstream RootHide
         // postinst behaviour (chown -R mobile:mobile /var/mobile/RootHidePatcher/).
+        //
+        // ROOTHIDE PATCHER FIX: patch.sh runs with TMPDIR=/var/mobile/RootHidePatcher
+        // and does `mktemp -d "$TMPDIR/<deb>.old.XXXXXX"` + writes the converted
+        // output deb into the SAME directory, so that directory must be writable
+        // by uid 501 AND have room for the extracted package tree. The extra
+        // sub-directories give the flow predictable, pre-permissioned locations
+        // even if the app's own mkdir races with first launch.
         NSArray<NSString *> *precreatedMobileDirs = @[
             @"/var/mobile/RootHidePatcher",
             @"/var/mobile/RootHidePatcher/.Inbox",
+            @"/var/mobile/RootHidePatcher/output",
+            @"/var/mobile/RootHidePatcher/tmp",
+            @"/var/mobile/RootHidePatcher/.cache",
             @"/var/tmp/com.roothide.patcher-Inbox",
         ];
         for (NSString *relDir in precreatedMobileDirs) {
@@ -1611,8 +1622,21 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         // Trust-cache binary chính
         NSString *executablePath = [realAppBundlePath stringByAppendingPathComponent:executableName];
         if ([fm fileExistsAtPath:executablePath]) {
-            int tcR = jbclient_trust_file_by_path(executablePath.fileSystemRepresentation);
-            NSLog(@"[RootHide] trust-cache %@/%@ (binary): %d", appName, executableName, tcR);
+            // ROOTHIDE PATCHER FIX: use the recurse path (same one systemhook uses
+            // at spawn time) instead of the flat by_path trust. RootHidePatcher's
+            // main executable links libroothide.dylib via
+            // @loader_path/.jbroot/usr/lib/libroothide.dylib and shells out to
+            // jbroot("/usr/bin/bash"); the flat trust only registered the main
+            // cdhash and never normalized the developer-certificate slices, so on
+            // iOS 17+ (SPTM/TXM) the app launched but its dylibs / spawned tools
+            // were untrusted → AMFI killed them and the convert silently produced
+            // no output. recurse collects the executable AND its dependent
+            // libraries and runs ensure_randomized_cdhash_for_slice on each.
+            int tcR = jbclient_trust_executable_recurse(executablePath.fileSystemRepresentation, NULL);
+            if (tcR != 0) {
+                tcR = jbclient_trust_file_by_path(executablePath.fileSystemRepresentation);
+            }
+            NSLog(@"[RootHide] trust-cache %@/%@ (binary, recurse): %d", appName, executableName, tcR);
         }
 
         // Trust-cache tất cả .dylib trong Frameworks/
@@ -1621,7 +1645,7 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             for (NSString *item in [fm contentsOfDirectoryAtPath:frameworksPath error:nil]) {
                 if ([item hasSuffix:@".dylib"] || [item hasSuffix:@".framework"]) {
                     NSString *itemPath = [frameworksPath stringByAppendingPathComponent:item];
-                    jbclient_trust_file_by_path(itemPath.fileSystemRepresentation);
+                    jbclient_trust_executable_recurse(itemPath.fileSystemRepresentation, NULL);
                 }
             }
         }
@@ -1630,8 +1654,33 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         for (NSString *item in [fm contentsOfDirectoryAtPath:realAppBundlePath error:nil]) {
             if ([item hasSuffix:@".dylib"]) {
                 NSString *itemPath = [realAppBundlePath stringByAppendingPathComponent:item];
-                jbclient_trust_file_by_path(itemPath.fileSystemRepresentation);
+                jbclient_trust_executable_recurse(itemPath.fileSystemRepresentation, NULL);
             }
+        }
+
+        // ROOTHIDE PATCHER FIX: RootHidePatcher ships Mach-O helper tools in a
+        // top-level "cctools" directory (otool, strings, install_name_tool) and
+        // prepends <bundle>/cctools to PATH when running patch.sh. Those are
+        // executed as child processes, so each must be executable AND trusted or
+        // AMFI kills them mid-conversion (the "convert does nothing" symptom).
+        NSString *cctoolsPath = [realAppBundlePath stringByAppendingPathComponent:@"cctools"];
+        if ([fm fileExistsAtPath:cctoolsPath]) {
+            for (NSString *tool in [fm contentsOfDirectoryAtPath:cctoolsPath error:nil]) {
+                NSString *toolPath = [cctoolsPath stringByAppendingPathComponent:tool];
+                chmod(toolPath.fileSystemRepresentation, 0755);
+                int tr = jbclient_trust_executable_recurse(toolPath.fileSystemRepresentation, NULL);
+                if (tr != 0) {
+                    jbclient_trust_file_by_path(toolPath.fileSystemRepresentation);
+                }
+                NSLog(@"[RootHide] trust-cache %@/cctools/%@: %d", appName, tool, tr);
+            }
+        }
+
+        // ROOTHIDE PATCHER FIX: patch.sh is copied into the .app bundle and run
+        // through bash. Ensure it is executable so the conversion can start.
+        NSString *patchScript = [realAppBundlePath stringByAppendingPathComponent:@"patch.sh"];
+        if ([fm fileExistsAtPath:patchScript]) {
+            chmod(patchScript.fileSystemRepresentation, 0755);
         }
 
         break; // chỉ process .app đầu tiên tìm thấy
@@ -1894,9 +1943,101 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
         } else {
             NSLog(@"[RootHide] ensureJbrootSymlinksInApps: FAILED to create %@/.jbroot: %@", jbrootLink, createErr);
         }
+
+        // ROOTHIDE PATCHER FIX: RootHidePatcher ships Mach-O helpers in a nested
+        // "cctools" directory (otool / strings / install_name_tool) and patch.sh
+        // rewrites library paths to "@loader_path/.jbroot/usr/lib/...". For a
+        // binary at <app>/cctools/otool, @loader_path is the cctools directory,
+        // so the single .jbroot symlink at the .app root is NOT visible to it and
+        // dyld fails to resolve libroothide.dylib → the helper is killed and the
+        // conversion aborts with no message. Drop a correctly-relative .jbroot
+        // symlink into every nested directory that actually contains a Mach-O.
+        created += [self ensureJbrootSymlinksInAppBundle:appPath jbroot:appsRoot];
     }
     NSLog(@"[RootHide] ensureJbrootSymlinksInApps: scanned %lu .app dirs, created %lu symlinks, verified %lu existing",
           (unsigned long)apps.count, (unsigned long)created, (unsigned long)verified);
+}
+
+// Ensure a `.jbroot` symlink exists in every sub-directory of an .app bundle that
+// contains at least one Mach-O file, pointing back at the jailbreak root with a
+// path relative to that directory. Returns the number of symlinks created.
+- (NSUInteger)ensureJbrootSymlinksInAppBundle:(NSString *)appPath jbroot:(NSString *)appsRoot
+{
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *jbrootRoot = [appsRoot stringByDeletingLastPathComponent]; // <jbroot>
+    NSUInteger created = 0;
+
+    NSArray<NSURL *> *allItems = [fm enumeratorAtURL:[NSURL fileURLWithPath:appPath]
+                          includingPropertiesForKeys:@[NSURLIsRegularFileKey]
+                                             options:0
+                                        errorHandler:nil].allObjects;
+
+    NSMutableSet<NSString *> *dirsNeedingLink = [NSMutableSet set];
+    for (NSURL *url in allItems) {
+        NSNumber *isRegular = nil;
+        [url getResourceValue:&isRegular forKey:NSURLIsRegularFileKey error:nil];
+        if (![isRegular boolValue]) continue;
+
+        // Cheap Mach-O sniff: first 4 bytes are a mach-o / fat magic.
+        int fd = open(url.path.fileSystemRepresentation, O_RDONLY);
+        if (fd < 0) continue;
+        uint32_t magicBE = 0;
+        ssize_t got = read(fd, &magicBE, sizeof(magicBE));
+        close(fd);
+        if (got != (ssize_t)sizeof(magicBE)) continue;
+
+        // On-disk Mach-O magics are stored big-endian.
+        uint32_t m = OSSwapBigToHostInt32(magicBE);
+        BOOL isMachO = (m == 0xfeedfacf || m == 0xfeedface ||   // MH_MAGIC_64 / MH_MAGIC
+                        m == 0xcafebabe || m == 0xcafebabf);    // FAT_MAGIC / FAT_MAGIC_64
+        if (!isMachO) continue;
+
+        NSString *dir = [url.path stringByDeletingLastPathComponent];
+        if ([dir isEqualToString:appPath]) continue; // .app root already handled
+        [dirsNeedingLink addObject:dir];
+    }
+
+    for (NSString *dir in dirsNeedingLink) {
+        NSString *link = [dir stringByAppendingPathComponent:@".jbroot"];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:link error:nil];
+        if (attrs && attrs[NSFileType] == NSFileTypeSymbolicLink) continue; // already present
+        if (attrs) { [fm removeItemAtPath:link error:nil]; }
+
+        // Relative path from <dir> back to <jbroot>.
+        NSString *rel = [self relativePathFromDirectory:dir toDirectory:jbrootRoot];
+        if (rel.length == 0) continue;
+        NSError *err = nil;
+        if ([fm createSymbolicLinkAtPath:link withDestinationPath:rel error:&err]) {
+            created++;
+            NSLog(@"[RootHide] PATCHER: created %@/.jbroot -> %@", dir, rel);
+        } else {
+            NSLog(@"[RootHide] PATCHER: FAILED to create %@/.jbroot: %@", link, err);
+        }
+    }
+    return created;
+}
+
+// Compute a relative path ("../../..") that navigates from `fromDir` to `toDir`.
+- (NSString *)relativePathFromDirectory:(NSString *)fromDir toDirectory:(NSString *)toDir
+{
+    NSArray<NSString *> *fromComps = [fromDir pathComponents];
+    NSArray<NSString *> *toComps = [toDir pathComponents];
+
+    NSUInteger common = 0;
+    NSUInteger maxCommon = MIN(fromComps.count, toComps.count);
+    while (common < maxCommon && [fromComps[common] isEqualToString:toComps[common]]) {
+        common++;
+    }
+
+    NSMutableArray<NSString *> *parts = [NSMutableArray array];
+    for (NSUInteger i = common; i < fromComps.count; i++) {
+        [parts addObject:@".."];
+    }
+    for (NSUInteger i = common; i < toComps.count; i++) {
+        [parts addObject:toComps[i]];
+    }
+    if (parts.count == 0) return @".";
+    return [parts componentsJoinedByString:@"/"];
 }
 
 - (BOOL)shouldInstallPackage:(NSString *)identifier
@@ -2353,6 +2494,47 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     } @catch (NSException *e) {
         NSLog(@"[RootHide] EXCEPTION during bundled packages install: %@: %@", e.name, e.reason);
         fflush(stderr);
+    }
+
+    // ROOTHIDE PATCHER FIX: verify every tool RootHidePatcher's patch.sh needs.
+    // patch.sh aborts with exit 1 + "Please install dpkg-deb/file/awk/ldid" if
+    // any of these are missing, but the Patcher UI swallows that output, so the
+    // user just sees "convert does nothing". Check them at jailbreak time and
+    // log loudly — the missing tool then shows up in the app log immediately.
+    @try {
+        NSArray<NSString *> *patcherToolPaths = @[
+            @"/usr/bin/bash", @"/usr/bin/dpkg-deb", @"/usr/bin/file", @"/usr/bin/awk",
+            @"/usr/bin/ldid", @"/usr/bin/otool", @"/usr/bin/install_name_tool",
+            @"/usr/bin/plutil", @"/usr/bin/mktemp", @"/usr/bin/realpath",
+            @"/usr/bin/sw_vers", @"/usr/bin/whoami", @"/usr/bin/find", @"/usr/bin/sed",
+        ];
+        NSFileManager *fmChk = [NSFileManager defaultManager];
+        NSMutableString *missing = [NSMutableString string];
+        for (NSString *toolRelPath in patcherToolPaths) {
+            NSString *toolAbsPath = JBROOT_PATH(toolRelPath);
+            BOOL isDir = NO;
+            if (![fmChk fileExistsAtPath:toolAbsPath isDirectory:&isDir] || isDir) {
+                [missing appendFormat:@" %@ (rel %@)", toolAbsPath, toolRelPath];
+            }
+        }
+        if (missing.length > 0) {
+            NSLog(@"[RootHide] PATCHER WARNING: patch.sh dependencies missing:%@ — RootHidePatcher convert will fail with 'Please install ...'", missing);
+        } else {
+            NSLog(@"[RootHide] PATCHER: all patch.sh dependencies present (bash/dpkg-deb/file/awk/ldid/otool/install_name_tool)");
+        }
+        // The upstream Patcher postinst chowns these to mobile:mobile; if the deb
+        // was installed before this fix ran, re-apply ownership defensively.
+        NSArray<NSString *> *patcherDirs = @[
+            @"/var/mobile/RootHidePatcher", @"/var/tmp/com.roothide.patcher-Inbox",
+        ];
+        for (NSString *dirRel in patcherDirs) {
+            NSString *dirAbs = JBROOT_PATH(dirRel);
+            if ([[NSFileManager defaultManager] fileExistsAtPath:dirAbs]) {
+                chown(dirAbs.fileSystemRepresentation, 501, 501);
+            }
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[RootHide] PATCHER dependency check EXCEPTION (non-fatal): %@", e);
     }
 
     // ROOTHIDE FIX LỖI 1 v5: KHÔNG gọi reboot trong finalizeBootstrap
